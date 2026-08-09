@@ -62,10 +62,51 @@ key copy was sitting in the repo's own `ssh/` folder, uncommitted but one `git a
       `.env.example` template defaults, verified present.
 - [x] `DAILY_LLM_SPEND_CAP_USD=10` set (can be changed anytime — plain env var,
       no migration, just `docker compose restart factory`).
-- [ ] Telegram: bot created, chat id discovered, both set in `.env`.
-- [ ] Mailgun: domain added + DNS verified, API key, domain, webhook signing key set.
-- [ ] Stripe: API key + webhook secret set (if revenue is in scope for this pass).
-- [ ] Vercel/Cloudflare token set (if Development deploys are in scope for this pass).
+- [x] Telegram: bot created, chat id discovered, both set in `.env`. Verified —
+      escalations arriving in Telegram in real time.
+- [x] `ANTHROPIC_API_KEY` set.
+- [x] Mailgun: **sandbox domain** (not a verified custom domain) + API key set.
+      `OUTBOUND_FROM_ADDRESS` uses the sandbox domain, no personal info in it.
+      **Open**: `MAILGUN_WEBHOOK_SIGNING_KEY` not set yet (Mailgun dashboard →
+      Sending → Webhooks). Sandbox domain can only send to pre-authorized
+      recipients — fine for mechanism testing, not for real cold outreach.
+- [x] Stripe: **test-mode** secret key set (`sk_test_...`). Live keys
+      (`sk_live_...`/`pk_live_...`) were provided but deliberately NOT
+      configured yet — using live payment credentials during a dry run
+      contradicts the "dry run before live" rule for this pass; switch to them
+      at Phase 6. **Open**: `STRIPE_WEBHOOK_SECRET` needs a real webhook
+      endpoint pointed at a public HTTPS URL, which this server doesn't have
+      (see the domain/TLS decision below).
+- [ ] `OUTBOUND_POSTAL_ADDRESS` set (CAN-SPAM requirement) — done, PMB address.
+- [ ] `UNSUBSCRIBE_BASE_URL` — needs the same public HTTPS endpoint as the
+      Stripe webhook. Open.
+- [ ] Vercel/Cloudflare token set — still open; this is the one credential
+      blocking Development (everything else is enabled: discovery, compliance,
+      marketing, finance, supervisor).
+- [ ] At least one lead provider key (Hunter or Apollo) — still open; Marketing
+      is enabled but has no real lead source to search without one.
+
+**Privacy note (explicit user requirement):** no personal name, personal
+address, or personal email anywhere in outbound-facing config. The Mailgun
+sandbox domain and its generated from-address are non-identifying by
+construction. The postal address is a PMB (private mailbox), not a home
+address, so it's safe to use as given for the CAN-SPAM footer. **Still to
+check**: Stripe's *account-level* business name / statement descriptor
+(Dashboard → Settings → Business/Public details) is not something an API key
+or env var controls — verify directly in the Stripe dashboard that it shows
+the company name, not a personal one, before going live. If/when a real
+domain is registered for Mailgun/webhooks, use WHOIS privacy protection
+(offered by every registrar, usually free) so the registrant's name/address
+isn't published in public WHOIS records.
+
+**Deferred, not forgotten:** "every tool gets its own domain email" — the
+current architecture has one global `MAILGUN_DOMAIN`/`OUTBOUND_FROM_ADDRESS`
+for all outreach across every generated product, not a per-product identity.
+Doing this properly means each generated product acquiring and verifying its
+own sending domain (DNS records, Mailgun domain add) and threading a
+per-product sender through `outreach.py`/`email.py` instead of the global
+`Settings` fields. Real, legitimate enhancement — just larger than a config
+change, and not blocking today's dry run.
 
 **Also fixed while here (not in the original plan, found by inspection):**
 `docker-compose.yml` bound Postgres as `"5432:5432"` — on a droplet with a public
