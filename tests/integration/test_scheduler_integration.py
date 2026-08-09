@@ -241,6 +241,12 @@ async def test_reclaimed_leases_do_not_block_new_periodic_tasks(
 
     from factory.state.orm import Task
 
+    # `housekeeping()` mutates this row through its own internal `session_scope()`
+    # — a separate connection from this test's `session` fixture. Without expiring
+    # first, `session.get()` returns the stale object already in this session's
+    # identity map (loaded back when `claim_next_task` first returned `stuck`)
+    # instead of re-querying the database.
+    session.expire_all()
     reclaimed = await session.get(Task, stuck_id)
     assert reclaimed is not None
     assert reclaimed.status == TaskStatus.PENDING.value

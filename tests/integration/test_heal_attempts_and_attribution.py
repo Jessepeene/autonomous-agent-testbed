@@ -47,7 +47,7 @@ async def _make_product(session: AsyncSession, name: str) -> str:
         problem_statement="Bookkeepers reconcile invoices by hand every week.",
         target_niche=name,
         source_url="https://example.test/thread",
-        monetization_hypothesis="EUR 49/month.",
+        monetization_hypothesis="Bookkeepers pay EUR 49/month per seat.",
         pain_severity=0.8,
         willingness_to_pay=0.7,
         build_feasibility=0.6,

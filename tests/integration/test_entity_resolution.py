@@ -85,7 +85,10 @@ async def test_second_lookup_for_the_same_domain_hits_the_cache(
     `FakeProvider` would raise, failing the test."""
     gemini_fake.register_turns(_agent_turn("Registered company, per its imprint page."))
     gemini_fake.register(
-        EntityVerdict, EntityVerdict(entity_type=EntityType.CORPORATE, confidence=0.9, evidence="e")
+        EntityVerdict,
+        EntityVerdict(
+            entity_type=EntityType.CORPORATE, confidence=0.9, evidence="imprint names a BV"
+        ),
     )
     first = await resolve_entity_type(
         ctx, session, company="Engines BV", email_domain="engines.test"
@@ -105,7 +108,10 @@ async def test_a_different_domain_is_resolved_independently(
 ) -> None:
     gemini_fake.register_turns(_agent_turn("Found a BV in the imprint."))
     gemini_fake.register(
-        EntityVerdict, EntityVerdict(entity_type=EntityType.CORPORATE, confidence=0.9, evidence="e")
+        EntityVerdict,
+        EntityVerdict(
+            entity_type=EntityType.CORPORATE, confidence=0.9, evidence="imprint names a BV"
+        ),
     )
     await resolve_entity_type(ctx, session, company="Engines BV", email_domain="engines.test")
     await session.commit()

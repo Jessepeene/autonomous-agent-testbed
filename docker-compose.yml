@@ -7,7 +7,12 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-factory}
       POSTGRES_DB: factory
     ports:
-      - "5432:5432"
+      # Bound to loopback only: the factory reaches this over the internal compose
+      # network (postgres:5432), never via the host's public interface. Without
+      # this, a plain "5432:5432" binds 0.0.0.0 and exposes Postgres to the
+      # internet on any host with a public IP. Still reachable for local
+      # debugging via an SSH tunnel: ssh -L 5432:localhost:5432 <host>.
+      - "127.0.0.1:5432:5432"
     volumes:
       - factory-pgdata:/var/lib/postgresql/data
     healthcheck:

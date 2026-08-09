@@ -850,11 +850,22 @@ async def create_marketing_freeze(
     session: AsyncSession, *, reason: str, complaint_rate: float
 ) -> MarketingFreeze | None:
     """Idempotent: the partial-unique index on ``status='active'`` means a second
-    trip while one is already active is a no-op, not a duplicate freeze."""
+    trip while one is already active is a no-op, not a duplicate freeze.
+
+    ``index_where`` is required, not optional, here: Postgres only matches an
+    ``ON CONFLICT`` target against a partial index when the predicate is repeated
+    verbatim. Without it, ``index_elements=[status]`` alone matches nothing (this
+    table has no plain unique constraint on ``status``, only the partial one) and
+    Postgres raises ``InvalidColumnReferenceError`` instead of silently ignoring
+    the conflict.
+    """
     stmt = (
         pg_insert(MarketingFreeze)
         .values(reason=reason[:4000], complaint_rate=complaint_rate, status="active")
-        .on_conflict_do_nothing(index_elements=[MarketingFreeze.status])
+        .on_conflict_do_nothing(
+            index_elements=[MarketingFreeze.status],
+            index_where=(MarketingFreeze.status == "active"),
+        )
         .returning(MarketingFreeze.id)
     )
     row = (await session.execute(stmt)).scalar_one_or_none()

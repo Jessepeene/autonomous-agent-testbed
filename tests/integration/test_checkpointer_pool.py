@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 
 import pytest
+from pydantic import SecretStr
 
 from factory.settings import Settings, get_settings
 from factory.state.checkpointer import postgres_checkpointer
@@ -27,8 +28,11 @@ pytestmark = pytest.mark.skipif(
 
 
 def _settings() -> Settings:
+    # model_copy(update=...) bypasses Pydantic validation/coercion, so a plain str
+    # here would fail every `.get_secret_value()` call downstream — SecretStr must
+    # be constructed explicitly.
     base = get_settings()
-    return base.model_copy(update={"database_url": DATABASE_URL})
+    return base.model_copy(update={"database_url": SecretStr(DATABASE_URL or "")})
 
 
 async def test_the_checkpointer_is_usable_end_to_end() -> None:
