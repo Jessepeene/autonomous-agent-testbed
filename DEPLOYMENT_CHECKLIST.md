@@ -212,6 +212,71 @@ root, unwritable by the non-root `factory` user, crashing preflight with
 `Path.cwd()` (`/app` in the container, the repo root in local dev), matching the
 same fix pattern already used for `WORKSPACE_ROOT`/`BLACKLIST_PATH`.
 
-All nine fixes (1 ON CONFLICT bug, 5 test-fixture bugs, and 3 more found getting
-Docker sandboxing to actually work end to end) are applied, verified against the
-real server, and committed.
+**10. [REAL PRODUCTION BUG, severe] Every Gemini structured-output call failed —
+`response_schema` included a JSON Schema key the live API rejects.** First real
+LLM call after Telegram was wired up failed with `400 INVALID_ARGUMENT: Unknown
+name "additional_properties" ... Cannot find field.` Root cause: Pydantic's
+`model_json_schema()` sets `additionalProperties` wherever a `dict[str, ...]`-typed
+field appears (including inside nested `$defs`), and the Gemini *Developer* API
+(as opposed to Vertex AI) does not support this JSON Schema keyword in
+`response_schema` at all. This blocked **every single** structured Gemini call —
+orchestration, discovery, everything — permanently, on every deployment, the
+moment any schema had a dict-typed field anywhere in it. Never caught before
+because every existing test mocks the LLM client. Fixed in
+`gemini_provider.py::parse()` by converting the schema to a dict via
+`model_json_schema()` and recursively stripping the key before sending.
+
+**11. [REAL PRODUCTION BUG, same class] The agent tool-use loop (`converse()`)
+had the identical bug** in its tool-parameter schemas, surfaced the moment the
+Supervisor first spawned an analyst sub-agent
+(`tools[0].function_declarations[0].parameters`). Same fix, applied at
+`_sanitize_tools_for_gemini()` — with an added subtlety: each tool's schema dict
+is the *same shared object* as `ToolDescriptor.input_schema` in
+`tools/registry.py` (passed by reference, no copy), which `to_anthropic()` also
+reads for Claude's strict-mode tool schemas. Stripping in place would have
+silently corrupted Anthropic's tool payloads the next time the same descriptor
+was used, so the fix deep-copies before mutating. `parse()`'s own unused-today
+`tools` parameter had the same latent bug and got the same fix for consistency,
+since `client.py`/`metering.py` already forward it through.
+
+**12. [CONFIG, not a code bug] `MODEL_GENERAL=gemini-2.5-pro` /
+`MODEL_FAST=gemini-2.5-flash` are retired for new API keys.** Once bug #10 was
+fixed, the very next real call failed with `404 ... no longer available to new
+users`. Both models are still listed by Gemini's `ListModels` endpoint (so a
+catalog-membership preflight check would **not** have caught this — genuinely
+listed, just not invokable for a fresh key/project), which is why no amount of
+"validate the model list" defensiveness in `preflight.py` would help; a real
+per-boot smoke-generateContent call would catch it but costs tokens and risks
+tripping quota on every restart, so this stays a documented operational
+gotcha rather than an automated check. Also **found and fixed a false claim**:
+`.env.example` said "Preflight validates them against the live APIs" — it
+never did; corrected the comment. Fixed by switching to the `-latest` aliases
+(`gemini-pro-latest` / `gemini-flash-latest`), which is also more resilient for
+a system meant to run unattended for weeks (pin to a dated snapshot instead if
+the learning loop's trial comparisons ever need reproducible model behavior).
+
+**13. [EXTERNAL, blocking, not yet resolved] `429 RESOURCE_EXHAUSTED` — quota
+exceeded on the just-rotated `GEMINI_API_KEY`.** Hit within the first ~2 minutes
+of real traffic, on `gemini-flash-latest` (not just the heavier `-pro` model),
+consistent with the Gemini Developer API's free-tier rate limit rather than a
+per-model issue — this project's API key most likely has no billing enabled.
+Live service paused (`docker compose stop factory`) to stop burning retries
+while this is open. **Needs the user to check/enable billing on the Google
+Cloud project behind this key** before the dry run can produce a real
+Discovery → Compliance → Development cycle — this is outside what I can act on
+from here.
+
+**Note on test methodology, not a bug**: running the integration suite via
+`docker compose run` (as opposed to plain `docker run`) pulls in the real `.env`
+via compose's `env_file:` directive — this caused 12 apparently-unrelated unit
+test failures (env vars like `TELEGRAM_BOT_TOKEN` leaking into tests that assert
+a credential is absent by default) and one `DeadlockDetectedError` from running
+the schema-touching integration suite concurrently with the live service hitting
+the same database. Neither is a product bug: use plain `docker run` (bypasses
+`env_file`) for unit tests, and stop the live `factory` service before running
+the integration suite.
+
+All thirteen fixes (1 ON CONFLICT bug, 5 test-fixture bugs, 3 Docker-sandboxing
+bugs, 2 Gemini schema bugs, and 1 stale-model-ID config fix) are applied,
+verified against the real server, and ready to commit. Item 13 (quota/billing)
+is open and blocking the rest of Phase 5.

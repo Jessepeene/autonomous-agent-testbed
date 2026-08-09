@@ -11,7 +11,13 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from factory.llm.providers.gemini_provider import _billable_input_tokens
+from pydantic import BaseModel
+
+from factory.llm.providers.gemini_provider import (
+    _billable_input_tokens,
+    _sanitize_tools_for_gemini,
+    _strip_additional_properties,
+)
 
 
 def test_cached_tokens_are_subtracted_from_the_inclusive_prompt_count() -> None:
@@ -31,3 +37,73 @@ def test_missing_metadata_is_zero_not_a_crash() -> None:
 def test_never_goes_negative_even_on_an_inconsistent_response() -> None:
     meta = SimpleNamespace(prompt_token_count=100, cached_content_token_count=500)
     assert _billable_input_tokens(meta) == 0
+
+
+class _Nested(BaseModel):
+    tags: dict[str, str]
+
+
+class _Outer(BaseModel):
+    items: list[_Nested]
+    extra: dict[str, int]
+
+
+def test_strip_additional_properties_removes_every_occurrence_including_nested_defs() -> None:
+    # Pydantic sets additionalProperties wherever a dict[str, ...]-typed field appears
+    # -- both directly on the outer model and inside a $defs sub-schema referenced by
+    # a nested model -- and the Gemini Developer API rejects the key at every one of
+    # those locations, not just the first one found.
+    schema = _Outer.model_json_schema()
+    assert "additionalProperties" in schema["$defs"]["_Nested"]["properties"]["tags"]
+    assert "additionalProperties" in schema["properties"]["extra"]
+
+    _strip_additional_properties(schema)
+
+    dumped = str(schema)
+    assert "additionalProperties" not in dumped
+    assert "additional_properties" not in dumped
+
+
+def test_strip_additional_properties_is_a_no_op_on_a_clean_schema() -> None:
+    schema = {"type": "object", "properties": {"name": {"type": "string"}}}
+    _strip_additional_properties(schema)
+    assert schema == {"type": "object", "properties": {"name": {"type": "string"}}}
+
+
+def test_sanitize_tools_for_gemini_strips_additional_properties_from_parameters() -> None:
+    tools = [
+        {
+            "name": "run_query",
+            "description": "Run a query.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filters": {"type": "object", "additionalProperties": {"type": "string"}}
+                },
+                "additionalProperties": False,
+            },
+        }
+    ]
+    sanitized = _sanitize_tools_for_gemini(tools)
+    dumped = str(sanitized)
+    assert "additionalProperties" not in dumped
+    assert "additional_properties" not in dumped
+
+
+def test_sanitize_tools_for_gemini_does_not_mutate_the_shared_input_schema() -> None:
+    # ToolDescriptor.to_gemini() hands over the *same* dict object also read by
+    # to_anthropic() for strict-mode schemas (registry.py) -- corrupting it here
+    # would silently break Anthropic's tool payloads on their next read of it.
+    shared_schema = {"type": "object", "additionalProperties": False}
+    tools = [{"name": "t", "description": "d", "parameters": shared_schema}]
+
+    _sanitize_tools_for_gemini(tools)
+
+    assert shared_schema == {"type": "object", "additionalProperties": False}
+
+
+def test_sanitize_tools_for_gemini_passes_through_a_tool_with_no_parameters() -> None:
+    tools = [{"name": "noop", "description": "does nothing", "parameters": {}}]
+    assert _sanitize_tools_for_gemini(tools) == [
+        {"name": "noop", "description": "does nothing", "parameters": {}}
+    ]

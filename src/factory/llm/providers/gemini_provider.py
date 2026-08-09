@@ -7,6 +7,7 @@ answered.
 
 from __future__ import annotations
 
+import copy
 import json
 import time
 from typing import Any, TypeVar
@@ -36,6 +37,52 @@ SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
 _BLOCKING_FINISH_REASONS = {"SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "RECITATION"}
 _RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504}
+
+
+def _strip_additional_properties(node: Any) -> None:
+    """Recursively delete ``additionalProperties``/``additional_properties`` in place.
+
+    Pydantic's ``model_json_schema()`` sets this wherever a ``dict[str, ...]``-typed
+    field appears, including inside a ``$defs`` sub-schema for a nested model. The
+    Gemini *Developer* API (as opposed to Vertex AI / Gemini Enterprise) does not
+    support this JSON Schema keyword in ``response_schema`` at all -- google-genai's
+    own schema processor hard-raises a local ``ValueError`` if it sees the key rather
+    than dropping it, and prior to that check even reaching it, this key was observed
+    passing straight through unrenamed into the literal request body, which the live
+    API then rejects with `Unknown name "additional_properties" ... Cannot find
+    field.`. Every structured-output Gemini call failed until this was stripped --
+    this was never exercised against the real API before, since every existing test
+    mocks the client.
+    """
+    if isinstance(node, dict):
+        node.pop("additionalProperties", None)
+        node.pop("additional_properties", None)
+        for value in node.values():
+            _strip_additional_properties(value)
+    elif isinstance(node, list):
+        for item in node:
+            _strip_additional_properties(item)
+
+
+def _sanitize_tools_for_gemini(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Strip additionalProperties from each tool's parameter schema for Gemini.
+
+    Deep-copies first: each tool dict's ``"parameters"`` is the *same shared dict
+    object* as ``ToolDescriptor.input_schema`` (``registry.py``'s ``to_gemini()``
+    passes it by reference, no copy), which ``to_anthropic()`` also reads for
+    strict-mode tool schemas. Mutating in place would silently corrupt what
+    Anthropic sees on its next call using the same descriptor.
+    """
+    sanitized_tools = []
+    for tool in tools:
+        sanitized = dict(tool)
+        params = sanitized.get("parameters")
+        if isinstance(params, dict):
+            params = copy.deepcopy(params)
+            _strip_additional_properties(params)
+            sanitized["parameters"] = params
+        sanitized_tools.append(sanitized)
+    return sanitized_tools
 
 
 def _billable_input_tokens(meta: Any) -> int:
@@ -116,14 +163,16 @@ class GeminiProvider:
         # which all pass `None`, and still lets Gemini's implicit caching pick up the
         # repeated prefix server-side for free if it chooses to.
         instruction = f"{cache_prefix}\n\n{system}" if cache_prefix else system
+        schema_dict = schema.model_json_schema()
+        _strip_additional_properties(schema_dict)
         config_kwargs: dict[str, Any] = {
             "system_instruction": instruction,
             "response_mime_type": "application/json",
-            "response_schema": schema,
+            "response_schema": schema_dict,
             "max_output_tokens": max_tokens,
         }
         if tools:
-            config_kwargs["tools"] = [{"function_declarations": tools}]
+            config_kwargs["tools"] = [{"function_declarations": _sanitize_tools_for_gemini(tools)}]
 
         started = time.perf_counter()
         try:
@@ -207,7 +256,7 @@ class GeminiProvider:
             "max_output_tokens": max_tokens,
         }
         if tools:
-            config_kwargs["tools"] = [{"function_declarations": tools}]
+            config_kwargs["tools"] = [{"function_declarations": _sanitize_tools_for_gemini(tools)}]
 
         started = time.perf_counter()
         try:
