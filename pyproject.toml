@@ -1,0 +1,78 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "superagent-factory"
+version = "0.1.0"
+description = "Autonomous multi-agent B2B micro-SaaS factory"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "anthropic>=0.69",
+    "google-genai>=1.0",
+    "langgraph>=0.2.60",
+    "langgraph-checkpoint-postgres>=2.0",
+    "psycopg[binary,pool]>=3.2",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30",
+    "alembic>=1.14",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "structlog>=24.4",
+    "httpx>=0.27",
+    "tenacity>=9.0",
+    "stripe>=11.0",
+]
+
+[project.optional-dependencies]
+browser = ["playwright>=1.48"]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "hypothesis>=6.115",
+    "ruff>=0.7",
+    "mypy>=1.13",
+    # In-memory backend for testing the memory subsystem's SQL (dedup, recall,
+    # supersede) without Postgres. Never used outside tests.
+    "aiosqlite>=0.20",
+]
+
+[project.scripts]
+factory = "factory.main:cli"
+factory-preflight = "factory.preflight:cli"
+factory-telegram-chatid = "factory.hitl.telegram:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/factory"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
+filterwarnings = ["error::DeprecationWarning:factory.*"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC", "S", "RUF"]
+ignore = ["S101"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106", "S108"]
+
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+packages = ["factory"]
+strict = true
+warn_unreachable = true
+disallow_untyped_decorators = false
+
+[[tool.mypy.overrides]]
+module = ["google.genai.*", "stripe.*", "telegram.*", "langgraph.*"]
+ignore_missing_imports = true

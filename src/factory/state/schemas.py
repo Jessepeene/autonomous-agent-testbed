@@ -1,0 +1,397 @@
+"""Agent contracts.
+
+Every model call in the factory returns one of these. They are the reason routing is
+deterministic: the Supervisor never parses prose, it reads a validated field and looks
+the destination up in a dict.
+
+``extra="forbid"`` renders as ``additionalProperties: false`` in the emitted JSON
+Schema, which both providers enforce server-side.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from enum import StrEnum
+from typing import Annotated, ClassVar, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
+
+from factory.settings import EngineName
+
+
+class Contract(BaseModel):
+    """Base for anything an LLM is asked to produce."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+# --------------------------------------------------------------------------- enums
+
+
+class NextAction(StrEnum):
+    ROUTE = "ROUTE"
+    RETRY = "RETRY"
+    HOLD_DISCOVERY = "HOLD_DISCOVERY"
+    ESCALATE = "ESCALATE"
+    IDLE_BACKLOG = "IDLE_BACKLOG"
+    #: Create an ephemeral agent for work no fixed engine covers. The role is chosen
+    #: from a fixed catalogue — see `factory.agents.roles`.
+    SPAWN_AGENT = "SPAWN_AGENT"
+    #: The daily LLM spend circuit breaker has tripped. Deterministic, never chosen by
+    #: the model — see `factory.supervisor.orchestrator.decide`.
+    BUDGET_PAUSED = "BUDGET_PAUSED"
+
+
+class TaskKind(StrEnum):
+    """A unit of durable work. Distinct from `settings.TaskType`, which is a model role."""
+
+    DISCOVER_OPPORTUNITIES = "discover_opportunities"
+    ASSESS_COMPLIANCE = "assess_compliance"
+    BUILD_MVP = "build_mvp"
+    PATCH_PRODUCT = "patch_product"
+    REVIEW_BUILD = "review_build"
+    DEPLOY_PRODUCT = "deploy_product"
+    HARVEST_LEADS = "harvest_leads"
+    SEND_OUTREACH = "send_outreach"
+    RECONCILE_REVENUE = "reconcile_revenue"
+    MAINTENANCE = "maintenance"
+
+
+class TaskStatus(StrEnum):
+    PENDING = "pending"
+    CLAIMED = "claimed"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+    ESCALATED = "escalated"
+
+
+class ProductStatus(StrEnum):
+    PLANNED = "planned"
+    BUILDING = "building"
+    REVIEWING = "reviewing"
+    PATCHING = "patching"
+    LIVE = "live"
+    RETIRED = "retired"
+
+
+class InterruptReason(StrEnum):
+    """The only situations a human may be asked about. Enforced, not advisory: the
+    enum makes anything else impossible to express, so widening this set is always a
+    deliberate, reviewed code change rather than a call site improvising a new reason.
+
+    Started as exactly two (missing credential, legal uncertainty). Three more were
+    added deliberately: BUDGET_EXCEEDED (the financial circuit breaker),
+    CAMPAIGN_APPROVAL (the mandatory pre-send authorisation gate), and
+    DELIVERABILITY_FROZEN (the spam-complaint circuit breaker) are none of the
+    original two — two operational hard limits and a standing policy sign-off — so
+    folding them into LEGAL_UNCERTAINTY would have been a dishonest fit.
+    """
+
+    MISSING_CREDENTIAL = "missing_credential"
+    LEGAL_UNCERTAINTY = "legal_uncertainty"
+    BUDGET_EXCEEDED = "budget_exceeded"
+    CAMPAIGN_APPROVAL = "campaign_approval"
+    DELIVERABILITY_FROZEN = "deliverability_frozen"
+
+
+class ComplianceStatus(StrEnum):
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    FLAG_FOR_REVIEW = "FLAG_FOR_REVIEW"
+
+
+# ------------------------------------------------------------------- orchestrator
+
+
+class OrchestratorDecision(Contract):
+    """Supervisor routing. `target_engine` is looked up in a dict, never interpreted."""
+
+    next_action: NextAction
+    target_engine: EngineName
+    tool_call: str | None = Field(
+        default=None,
+        description="Name of a registered MCP tool to invoke, or null for none.",
+    )
+    agent_role: str | None = Field(
+        default=None,
+        description=("With SPAWN_AGENT, the role to spawn from the catalogue. Null otherwise."),
+    )
+    agent_objective: str | None = Field(
+        default=None,
+        description="With SPAWN_AGENT, the single concrete objective for that agent.",
+    )
+    rationale: str = Field(min_length=1, max_length=600)
+
+
+# ----------------------------------------------------------------------- discovery
+
+
+class GeneratedIdea(Contract):
+    problem_statement: str = Field(min_length=20, max_length=800)
+    target_niche: str = Field(min_length=3, max_length=200)
+    source_url: HttpUrl
+
+
+class IdeaBatch(Contract):
+    """Object-wrapped because a JSON Schema root must be an object, not an array."""
+
+    ideas: list[GeneratedIdea] = Field(default_factory=list, max_length=25)
+
+
+class ScoredIdea(Contract):
+    #: The historical fixed weights, kept as the default for `.score` so every
+    #: existing caller that never heard of the learning loop keeps behaving exactly
+    #: as before. `discovery/graph.py` is the only caller that fetches tuned weights
+    #: and calls `weighted_score()` directly instead.
+    _DEFAULT_WEIGHTS: ClassVar[dict[str, float]] = {
+        "pain_severity": 0.4,
+        "willingness_to_pay": 0.4,
+        "build_feasibility": 0.2,
+    }
+
+    problem_statement: str = Field(min_length=20, max_length=800)
+    target_niche: str = Field(min_length=3, max_length=200)
+    source_url: HttpUrl
+    monetization_hypothesis: str = Field(min_length=20, max_length=800)
+    pain_severity: Annotated[float, Field(ge=0.0, le=1.0)]
+    willingness_to_pay: Annotated[float, Field(ge=0.0, le=1.0)]
+    build_feasibility: Annotated[float, Field(ge=0.0, le=1.0)]
+    rejection_reason: str | None = None
+    #: Self-serve / PLG constraint inputs (see `discovery.score.passes_plg_constraint`).
+    #: Defaulted rather than required so every existing caller that predates this
+    #: constraint — including callers that construct a `ScoredIdea` directly in a
+    #: test — keeps validating without having to know about it.
+    requires_human_sales: bool = False
+    requires_human_onboarding: bool = False
+    self_serve_price_usd: Annotated[float, Field(ge=0.0, le=100_000.0)] = 0.0
+
+    @classmethod
+    def default_weights(cls) -> dict[str, float]:
+        return dict(cls._DEFAULT_WEIGHTS)
+
+    @property
+    def score(self) -> float:
+        return self.weighted_score(self._DEFAULT_WEIGHTS)
+
+    def weighted_score(self, weights: dict[str, float]) -> float:
+        return round(
+            (self.pain_severity * weights.get("pain_severity", 0.0))
+            + (self.willingness_to_pay * weights.get("willingness_to_pay", 0.0))
+            + (self.build_feasibility * weights.get("build_feasibility", 0.0)),
+            4,
+        )
+
+
+class DiscriminatedIdeas(Contract):
+    ideas: list[ScoredIdea] = Field(default_factory=list, max_length=25)
+
+
+class ValidatedIdea(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    problem_statement: str
+    target_niche: str
+    source_url: str
+    monetization_hypothesis: str
+    score: float
+    evidence_count: int = 0
+    created_at: datetime | None = None
+
+
+# ---------------------------------------------------------------------- compliance
+
+
+class LIAVerdict(Contract):
+    """GDPR Art. 6(1)(f) legitimate interest assessment.
+
+    All three limbs must be argued explicitly. A model that cannot articulate the
+    role-to-utility link has not established a lawful basis for contact.
+    """
+
+    role_utility_link: str = Field(min_length=20, max_length=1000)
+    necessity: str = Field(min_length=20, max_length=1000)
+    balancing_test: str = Field(min_length=20, max_length=1000)
+    passed: bool
+
+
+class ComplianceAssessment(Contract):
+    status: ComplianceStatus
+    justification: str = Field(min_length=20, max_length=2000)
+    confidence: Annotated[float, Field(ge=0.0, le=1.0)]
+    lia_verdict: LIAVerdict | None = None
+
+    @property
+    def approved(self) -> bool:
+        return self.status is ComplianceStatus.APPROVED
+
+
+class LeadAssessment(Contract):
+    """One prospect's LIA within a batched call.
+
+    ``ref`` echoes the caller-minted, per-batch token (``L1``, ``L2``, ...) rather
+    than a list position or a database id. A position is silently wrong the moment
+    the model drops, reorders, or duplicates an entry; an echoed token makes all
+    three mechanically detectable. A real id would give a third-party model provider
+    a stable handle to correlate the same prospect across separate batches, which the
+    LIA prompt deliberately never gives it in the first place.
+    """
+
+    ref: str = Field(min_length=1, max_length=8)
+    status: ComplianceStatus
+    justification: str = Field(min_length=20, max_length=2000)
+    confidence: Annotated[float, Field(ge=0.0, le=1.0)]
+    lia_verdict: LIAVerdict | None = None
+
+    def to_assessment(self) -> ComplianceAssessment:
+        return ComplianceAssessment(
+            status=self.status,
+            justification=self.justification,
+            confidence=self.confidence,
+            lia_verdict=self.lia_verdict,
+        )
+
+
+class LeadAssessmentBatch(Contract):
+    """Object-wrapped, matching `IdeaBatch`/`DiscriminatedIdeas`."""
+
+    assessments: list[LeadAssessment] = Field(default_factory=list, max_length=10)
+
+
+class EntityType(StrEnum):
+    """What kind of data subject sits behind a company domain.
+
+    The distinction that matters under GDPR: a CORPORATE entity's staff are
+    contacted in their professional capacity; a SOLE_PROPRIETOR_OR_INDIVIDUAL is, or
+    may be indistinguishable from, a protected natural person acting outside any
+    organisation. UNKNOWN is the fail-closed default — the agent found no clear
+    evidence either way, which is treated identically to a negative result.
+    """
+
+    CORPORATE = "corporate"
+    SOLE_PROPRIETOR_OR_INDIVIDUAL = "sole_proprietor_or_individual"
+    UNKNOWN = "unknown"
+
+
+class EntityVerdict(Contract):
+    """Whether a company domain belongs to a registered corporate entity.
+
+    Deliberately a judgement about the *organisation*, never the person: the prompt
+    that produces this is given a company name and email domain only, the same
+    restraint already applied to the LIA.
+    """
+
+    entity_type: EntityType
+    confidence: Annotated[float, Field(ge=0.0, le=1.0)]
+    evidence: str = Field(min_length=10, max_length=1500)
+
+
+# --------------------------------------------------------------------------- leads
+
+# GDPR data minimisation: this tuple is the whole permitted PII surface. The `leads`
+# table has no other personal columns, so widening it requires a migration and a
+# conscious decision — not an accidental dict spread.
+ALLOWED_LEAD_FIELDS: frozenset[str] = frozenset(
+    {"first_name", "last_name", "job_title", "company", "work_email"}
+)
+
+
+class LeadRecord(BaseModel):
+    """A contactable prospect. Exactly five PII fields, plus mandatory provenance."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    first_name: str = Field(min_length=1, max_length=100)
+    last_name: str = Field(min_length=1, max_length=100)
+    job_title: str = Field(min_length=1, max_length=200)
+    company: str = Field(min_length=1, max_length=200)
+    work_email: str = Field(min_length=5, max_length=320)
+
+    # Proof-of-origin. Non-optional here and NOT NULL in the database.
+    source_url: str = Field(min_length=8, max_length=2000)
+    scraped_at: datetime
+
+    @field_validator("work_email")
+    @classmethod
+    def _normalise_email(cls, value: str) -> str:
+        email = value.strip().lower()
+        if email.count("@") != 1 or email.startswith("@") or email.endswith("@"):
+            raise ValueError("work_email must be a single well-formed address")
+        local, _, domain = email.partition("@")
+        if not local or "." not in domain:
+            raise ValueError("work_email must contain a domain with a dot")
+        return email
+
+    @field_validator("source_url")
+    @classmethod
+    def _require_url(cls, value: str) -> str:
+        url = value.strip()
+        if not url.startswith(("http://", "https://")):
+            raise ValueError("source_url must be an absolute http(s) URL for provenance")
+        return url
+
+    @property
+    def email_domain(self) -> str:
+        return self.work_email.partition("@")[2]
+
+
+# --------------------------------------------------------------------- development
+
+
+class ReviewCategory(StrEnum):
+    SECURITY = "security"
+    PERFORMANCE = "performance"
+    DEPENDENCIES = "dependencies"
+    PRIVILEGE = "privilege"
+    SECRETS = "secrets"
+
+
+class ReviewFinding(Contract):
+    category: ReviewCategory
+    severity: Literal["low", "medium", "high", "critical"]
+    file: str = Field(max_length=500)
+    line: int | None = Field(default=None, ge=1)
+    summary: str = Field(min_length=10, max_length=500)
+    failure_scenario: str = Field(min_length=10, max_length=1500)
+    remediation: str = Field(min_length=10, max_length=1500)
+
+
+class ReviewVerdict(Contract):
+    """One Bug Council reviewer's output."""
+
+    category: ReviewCategory
+    approved: bool
+    findings: list[ReviewFinding] = Field(default_factory=list, max_length=40)
+
+
+class HealingInstructions(Contract):
+    """What the dev agent must change before the build is re-reviewed."""
+
+    summary: str = Field(min_length=10, max_length=1000)
+    ordered_steps: list[str] = Field(min_length=1, max_length=25)
+    blocking_findings: list[ReviewFinding] = Field(default_factory=list, max_length=40)
+
+
+class CouncilResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    approved: bool
+    verdicts: list[ReviewVerdict]
+    healing: HealingInstructions | None = None
+
+    @property
+    def blocking(self) -> list[ReviewFinding]:
+        return [f for v in self.verdicts if not v.approved for f in v.findings]
+
+
+class GeneratedFile(Contract):
+    path: str = Field(min_length=1, max_length=400)
+    contents: str
+
+
+class ScaffoldPlan(Contract):
+    product_name: str = Field(min_length=2, max_length=120)
+    summary: str = Field(min_length=20, max_length=2000)
+    files: list[GeneratedFile] = Field(min_length=1, max_length=80)
+    test_command: str = Field(min_length=1, max_length=400)

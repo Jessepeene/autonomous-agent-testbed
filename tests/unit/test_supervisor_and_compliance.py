@@ -1,0 +1,510 @@
+"""Discovery throttle, the LIA contact gate, and preflight degradation."""
+
+from __future__ import annotations
+
+from typing import Any
+from unittest.mock import MagicMock
+
+import pytest
+
+from factory.engines.compliance import assessor, lia
+from factory.hitl import interrupts
+from factory.llm.providers.fake import FakeProvider
+from factory.preflight import (
+    Finding,
+    Severity,
+    check_sandbox_workspace_sharing,
+    run_preflight,
+    write_missing_credentials,
+)
+from factory.settings import EngineName, Settings
+from factory.state import repository
+from factory.state.schemas import (
+    ComplianceAssessment,
+    ComplianceStatus,
+    InterruptReason,
+    LeadRecord,
+    LIAVerdict,
+    NextAction,
+)
+from factory.supervisor import orchestrator
+from factory.supervisor.context import FactoryContext
+
+
+def _snapshot(**overrides: Any) -> orchestrator.FactorySnapshot:
+    base: dict[str, Any] = {
+        "eligible_engines": ["development", "discovery"],
+        "disabled_engines": {},
+        "pending_tasks_total": 5,
+        "pending_by_engine": {"discovery": 5},
+        "active_dev_products": 0,
+        "max_concurrent_builds": 2,
+        "approved_ideas_waiting": 3,
+        "pending_ideas": 10,
+        "open_interrupts": 0,
+        "spend_limit_cents": 0,
+        "dry_run": True,
+    }
+    base.update(overrides)
+    return orchestrator.FactorySnapshot(**base)
+
+
+# --- Discovery throttle -----------------------------------------------------
+
+
+async def test_orchestrator_holds_discovery_at_capacity(
+    ctx: FactoryContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At MAX_CONCURRENT_BUILDS, ideas wait instead of flooding the queue."""
+
+    async def fake_snapshot(session: Any, context: Any) -> orchestrator.FactorySnapshot:
+        return _snapshot(active_dev_products=2, max_concurrent_builds=2)
+
+    monkeypatch.setattr(orchestrator, "build_snapshot", fake_snapshot)
+    decision = await orchestrator.decide(None, ctx)  # type: ignore[arg-type]
+
+    assert decision.next_action is NextAction.HOLD_DISCOVERY
+    assert decision.target_engine is EngineName.SUPERVISOR
+    assert "capacity" in decision.rationale
+
+
+async def test_orchestrator_does_not_hold_below_capacity(
+    ctx: FactoryContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_snapshot(session: Any, context: Any) -> orchestrator.FactorySnapshot:
+        return _snapshot(active_dev_products=1, max_concurrent_builds=2, pending_tasks_total=0)
+
+    monkeypatch.setattr(orchestrator, "build_snapshot", fake_snapshot)
+    decision = await orchestrator.decide(None, ctx)  # type: ignore[arg-type]
+
+    # Nothing queued, so the tick does maintenance rather than sleeping.
+    assert decision.next_action is NextAction.IDLE_BACKLOG
+
+
+async def test_no_ready_work_still_does_backlog(
+    ctx: FactoryContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_snapshot(session: Any, context: Any) -> orchestrator.FactorySnapshot:
+        return _snapshot(pending_tasks_total=0)
+
+    monkeypatch.setattr(orchestrator, "build_snapshot", fake_snapshot)
+    decision = await orchestrator.decide(None, ctx)  # type: ignore[arg-type]
+    assert decision.next_action is NextAction.IDLE_BACKLOG
+
+
+def test_fallback_prefers_revenue_bearing_engines() -> None:
+    decision = orchestrator._fallback(
+        _snapshot(pending_by_engine={"discovery": 3, "finance": 1, "marketing": 2})
+    )
+    assert decision.target_engine is EngineName.FINANCE
+
+
+def test_capacity_property_is_inclusive() -> None:
+    assert _snapshot(active_dev_products=2, max_concurrent_builds=2).dev_at_capacity is True
+    assert _snapshot(active_dev_products=1, max_concurrent_builds=2).dev_at_capacity is False
+
+
+async def test_dev_at_capacity_routes_to_marketing_when_it_has_queued_work(
+    ctx: FactoryContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Distribution outranks starting another build: a capacity tick with organic
+    outreach waiting must not fall through to generic backlog maintenance."""
+
+    async def fake_snapshot(session: Any, context: Any) -> orchestrator.FactorySnapshot:
+        return _snapshot(
+            active_dev_products=2,
+            max_concurrent_builds=2,
+            pending_by_engine={"discovery": 1, "marketing": 3},
+        )
+
+    monkeypatch.setattr(orchestrator, "build_snapshot", fake_snapshot)
+    decision = await orchestrator.decide(None, ctx)  # type: ignore[arg-type]
+
+    assert decision.next_action is NextAction.ROUTE
+    assert decision.target_engine is EngineName.MARKETING
+
+
+async def test_dev_at_capacity_with_no_marketing_work_still_holds_discovery(
+    ctx: FactoryContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_snapshot(session: Any, context: Any) -> orchestrator.FactorySnapshot:
+        return _snapshot(
+            active_dev_products=2, max_concurrent_builds=2, pending_by_engine={"discovery": 1}
+        )
+
+    monkeypatch.setattr(orchestrator, "build_snapshot", fake_snapshot)
+    decision = await orchestrator.decide(None, ctx)  # type: ignore[arg-type]
+
+    assert decision.next_action is NextAction.HOLD_DISCOVERY
+
+
+# --- financial circuit breaker ------------------------------------------------
+
+
+async def test_budget_check_is_a_noop_when_the_cap_is_unset(ctx: FactoryContext) -> None:
+    ctx.settings.daily_llm_spend_cap_usd = None
+    assert await orchestrator._check_budget(None, ctx) is None  # type: ignore[arg-type]
+
+
+async def test_budget_check_is_a_noop_below_the_cap(
+    ctx: FactoryContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ctx.settings.daily_llm_spend_cap_usd = 10.0
+
+    async def fake_total_usd(session: Any, *, hours: int = 24) -> float:
+        return 5.0
+
+    monkeypatch.setattr(orchestrator.costs, "total_usd", fake_total_usd)
+    assert await orchestrator._check_budget(None, ctx) is None  # type: ignore[arg-type]
+
+
+async def test_budget_check_trips_at_or_above_the_cap(
+    ctx: FactoryContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ctx.settings.daily_llm_spend_cap_usd = 10.0
+    raised: dict[str, Any] = {}
+
+    async def fake_total_usd(session: Any, *, hours: int = 24) -> float:
+        return 10.0
+
+    async def fake_request(session: Any, **kwargs: Any) -> str:
+        raised.update(kwargs)
+        return "interrupt-1"
+
+    monkeypatch.setattr(orchestrator.costs, "total_usd", fake_total_usd)
+    monkeypatch.setattr(orchestrator.interrupts, "request", fake_request)
+
+    decision = await orchestrator._check_budget(None, ctx)  # type: ignore[arg-type]
+
+    assert decision is not None
+    assert decision.next_action is NextAction.BUDGET_PAUSED
+    assert decision.target_engine is EngineName.SUPERVISOR
+    assert raised["reason"] is InterruptReason.BUDGET_EXCEEDED
+
+
+async def test_tripped_budget_overrides_dev_capacity_and_everything_else(
+    ctx: FactoryContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The breaker is checked before `build_snapshot` is even called — a tripped
+    breaker must win regardless of what the rest of the snapshot would otherwise
+    decide."""
+    ctx.settings.daily_llm_spend_cap_usd = 1.0
+
+    async def fake_total_usd(session: Any, *, hours: int = 24) -> float:
+        return 999.0
+
+    async def fake_request(session: Any, **kwargs: Any) -> str:
+        return "interrupt-1"
+
+    async def exploding_snapshot(session: Any, context: Any) -> orchestrator.FactorySnapshot:
+        raise AssertionError("build_snapshot must not be called once the breaker trips")
+
+    monkeypatch.setattr(orchestrator.costs, "total_usd", fake_total_usd)
+    monkeypatch.setattr(orchestrator.interrupts, "request", fake_request)
+    monkeypatch.setattr(orchestrator, "build_snapshot", exploding_snapshot)
+
+    decision = await orchestrator.decide(None, ctx)  # type: ignore[arg-type]
+    assert decision.next_action is NextAction.BUDGET_PAUSED
+
+
+# --- orchestrator prompt rendering ------------------------------------------
+
+
+def test_system_prompt_renders_the_role_catalogue_not_a_literal_placeholder() -> None:
+    """Regression: the template's ``{roles}`` slot was once left unformatted, so the
+    literal string "{roles}" was sent to the model instead of the actual catalogue."""
+    from factory.agents.roles import RoleName
+
+    rendered = orchestrator._system_prompt()
+    assert "{roles}" not in rendered
+    for name in RoleName:
+        assert name.value in rendered
+
+
+async def test_spawn_agent_decision_passes_through_when_target_is_eligible(
+    ctx: FactoryContext, gemini_fake: FakeProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SUPERVISOR is always an eligible target, so a well-formed SPAWN_AGENT decision
+    from the model must reach the graph unchanged, not be rewritten to a fallback."""
+    from factory.state.schemas import OrchestratorDecision
+
+    async def fake_snapshot(session: Any, context: Any) -> orchestrator.FactorySnapshot:
+        return _snapshot()
+
+    monkeypatch.setattr(orchestrator, "build_snapshot", fake_snapshot)
+    gemini_fake.register(
+        OrchestratorDecision,
+        OrchestratorDecision(
+            next_action=NextAction.SPAWN_AGENT,
+            target_engine=EngineName.SUPERVISOR,
+            agent_role="researcher",
+            agent_objective="find out whether a competitor shipped this already",
+            rationale="No fixed engine answers open market questions.",
+        ),
+    )
+
+    decision = await orchestrator.decide(None, ctx)  # type: ignore[arg-type]
+
+    assert decision.next_action is NextAction.SPAWN_AGENT
+    assert decision.agent_role == "researcher"
+
+
+# --- LIA contact gate -------------------------------------------------------
+
+
+def _verdict(passed: bool) -> LIAVerdict:
+    text = "a" * 30
+    return LIAVerdict(role_utility_link=text, necessity=text, balancing_test=text, passed=passed)
+
+
+def _assessment(status: ComplianceStatus, confidence: float, passed: bool) -> ComplianceAssessment:
+    return ComplianceAssessment(
+        status=status,
+        justification="j" * 30,
+        confidence=confidence,
+        lia_verdict=_verdict(passed),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _no_db(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the two repository calls the LIA path makes, so no database is needed."""
+
+    async def zero(*args: Any, **kwargs: Any) -> int:
+        return 0
+
+    async def noop(*args: Any, **kwargs: Any) -> str | None:
+        return "int_test"
+
+    monkeypatch.setattr(repository, "outreach_count_for_domain", zero)
+    monkeypatch.setattr(interrupts, "request", noop)
+
+
+async def test_rule_block_short_circuits_before_any_model_call(
+    ctx: FactoryContext, lead: LeadRecord, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A personal mailbox is refused without spending a token on an assessment."""
+    called = False
+
+    async def spy(*args: Any, **kwargs: Any) -> ComplianceAssessment:
+        nonlocal called
+        called = True
+        return _assessment(ComplianceStatus.APPROVED, 0.99, True)
+
+    monkeypatch.setattr(assessor, "assess_lead", spy)
+    personal = lead.model_copy(update={"work_email": "ada@gmail.com"})
+
+    decision = await lia.evaluate_lead(ctx, None, personal, product_summary="tool")  # type: ignore[arg-type]
+
+    assert decision.allowed is False
+    assert called is False, "the model was consulted about a lead the rules already refused"
+
+
+async def test_failed_lia_blocks_contact(
+    ctx: FactoryContext, lead: LeadRecord, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def rejected(*args: Any, **kwargs: Any) -> ComplianceAssessment:
+        return _assessment(ComplianceStatus.REJECTED, 0.95, False)
+
+    monkeypatch.setattr(assessor, "assess_lead", rejected)
+    decision = await lia.evaluate_lead(ctx, None, lead, product_summary="tool")  # type: ignore[arg-type]
+    assert decision.allowed is False
+
+
+async def test_flagged_lia_blocks_contact_and_escalates(
+    ctx: FactoryContext, lead: LeadRecord, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def flagged(*args: Any, **kwargs: Any) -> ComplianceAssessment:
+        return _assessment(ComplianceStatus.FLAG_FOR_REVIEW, 0.5, True)
+
+    monkeypatch.setattr(assessor, "assess_lead", flagged)
+    decision = await lia.evaluate_lead(ctx, None, lead, product_summary="tool")  # type: ignore[arg-type]
+    assert decision.allowed is False
+    assert "review" in decision.reason
+
+
+async def test_approved_lia_permits_contact(
+    ctx: FactoryContext, lead: LeadRecord, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def approved(*args: Any, **kwargs: Any) -> ComplianceAssessment:
+        return _assessment(ComplianceStatus.APPROVED, 0.95, True)
+
+    monkeypatch.setattr(assessor, "assess_lead", approved)
+    decision = await lia.evaluate_lead(ctx, None, lead, product_summary="tool")  # type: ignore[arg-type]
+    assert decision.allowed is True
+
+
+def test_low_confidence_is_downgraded_not_approved(settings: Settings) -> None:
+    """An assessor that is unsure has not established a lawful basis."""
+    assert settings.compliance_min_confidence == 0.85
+    downgraded = _assessment(ComplianceStatus.APPROVED, 0.5, True).model_copy(
+        update={"status": ComplianceStatus.FLAG_FOR_REVIEW}
+    )
+    assert downgraded.approved is False
+
+
+def test_refusal_helper_never_approves() -> None:
+    refusal = assessor._refuse("provider outage")
+    assert refusal.approved is False
+    assert refusal.confidence == 0.0
+    assert refusal.lia_verdict is not None
+    assert refusal.lia_verdict.passed is False
+
+
+# --- preflight --------------------------------------------------------------
+
+
+def test_missing_database_is_a_hard_block(tmp_path: Any, blacklist_file: Any) -> None:
+    bare = Settings(
+        database_url=None,
+        gemini_api_key=None,
+        anthropic_api_key=None,
+        blacklist_path=blacklist_file,
+        workspace_root=tmp_path,
+    )
+    report = run_preflight(bare)
+    subjects = {f.subject for f in report.hard_blocks}
+    assert "DATABASE_URL" in subjects
+    assert "LLM_PROVIDER" in subjects
+    assert report.ok is False
+
+
+def test_one_provider_key_satisfies_the_provider_requirement(
+    tmp_path: Any, blacklist_file: Any
+) -> None:
+    partial = Settings(
+        database_url="postgresql+asyncpg://x/y",
+        gemini_api_key="key",
+        anthropic_api_key=None,
+        blacklist_path=blacklist_file,
+        workspace_root=tmp_path,
+    )
+    report = run_preflight(partial)
+    assert "LLM_PROVIDER" not in {f.subject for f in report.hard_blocks}
+    # Development still degrades: no Claude key means no code generation.
+    assert EngineName.DEVELOPMENT in report.disabled_engines
+
+
+def test_missing_blacklist_is_a_hard_block(tmp_path: Any) -> None:
+    """A silently absent suppression list is a compliance incident waiting to happen."""
+    report = run_preflight(
+        Settings(
+            database_url="postgresql+asyncpg://x/y",
+            gemini_api_key="key",
+            blacklist_path=tmp_path / "nope.txt",
+            workspace_root=tmp_path,
+        )
+    )
+    assert "BLACKLIST" in {f.subject for f in report.hard_blocks}
+
+
+def test_degradations_are_written_where_a_human_can_read_them(
+    tmp_path: Any, blacklist_file: Any
+) -> None:
+    """Telegram may itself be the missing credential, so the report goes to disk."""
+    report = run_preflight(
+        Settings(
+            _env_file=None,  # hermetic: a real developer .env must not leak in here
+            database_url="postgresql+asyncpg://x/y",
+            gemini_api_key="key",
+            blacklist_path=blacklist_file,
+            workspace_root=tmp_path,
+        )
+    )
+    target = tmp_path / "MISSING_CREDENTIALS.md"
+    written = write_missing_credentials(report, target)
+    assert written == target
+    text = target.read_text(encoding="utf-8")
+    assert "TELEGRAM_BOT_TOKEN" in text
+
+
+# --- sandbox workspace sharing (sibling-container path alignment) -----------
+
+
+def test_sharing_check_passes_when_the_sandbox_can_write_where_the_factory_reads(
+    tmp_path: Any, blacklist_file: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = Settings(
+        database_url="postgresql+asyncpg://x/y",
+        gemini_api_key="key",
+        blacklist_path=blacklist_file,
+        workspace_root=tmp_path,
+    )
+
+    def fake_run(argv: list[str], **kwargs: Any) -> Any:
+        # Simulates a sandbox container that successfully wrote into the shared
+        # bind-mounted directory — the same path this process resolves too.
+        probe_dir = tmp_path / ".preflight-probe"
+        (probe_dir / "marker").write_text("ok\n", encoding="utf-8")
+        return MagicMock(returncode=0)
+
+    monkeypatch.setattr("factory.preflight.subprocess.run", fake_run)
+    assert check_sandbox_workspace_sharing(settings) is None
+
+
+def test_sharing_check_fails_when_the_sandbox_writes_somewhere_else(
+    tmp_path: Any, blacklist_file: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exact failure mode of a named volume or mismatched bind-mount path: the
+    container call "succeeds" but the marker never appears where the factory looks."""
+    settings = Settings(
+        database_url="postgresql+asyncpg://x/y",
+        gemini_api_key="key",
+        blacklist_path=blacklist_file,
+        workspace_root=tmp_path,
+    )
+
+    def fake_run(argv: list[str], **kwargs: Any) -> Any:
+        return MagicMock(returncode=0)  # ran "successfully", wrote nowhere this process sees
+
+    monkeypatch.setattr("factory.preflight.subprocess.run", fake_run)
+    finding = check_sandbox_workspace_sharing(settings)
+
+    assert finding is not None
+    assert finding.subject == "SANDBOX_WORKSPACE_SHARING"
+    assert finding.severity is Severity.DEGRADES
+
+
+def test_sharing_check_degrades_rather_than_raises_when_docker_itself_errors(
+    tmp_path: Any, blacklist_file: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = Settings(
+        database_url="postgresql+asyncpg://x/y",
+        gemini_api_key="key",
+        blacklist_path=blacklist_file,
+        workspace_root=tmp_path,
+    )
+
+    def fake_run(argv: list[str], **kwargs: Any) -> Any:
+        raise OSError("docker: command not found")
+
+    monkeypatch.setattr("factory.preflight.subprocess.run", fake_run)
+    finding = check_sandbox_workspace_sharing(settings)
+
+    assert finding is not None
+    assert finding.severity is Severity.DEGRADES
+
+
+def test_a_broken_sandbox_share_disables_development_with_a_specific_reason(
+    tmp_path: Any, blacklist_file: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = Settings(
+        database_url="postgresql+asyncpg://x/y",
+        gemini_api_key="key",
+        anthropic_api_key="key",
+        blacklist_path=blacklist_file,
+        workspace_root=tmp_path,
+    )
+    broken = Finding(
+        subject="SANDBOX_WORKSPACE_SHARING",
+        severity=Severity.DEGRADES,
+        detail="mismatch",
+        remedy="fix the mount",
+    )
+    monkeypatch.setattr("factory.preflight.docker_available", lambda: True)
+    monkeypatch.setattr("factory.preflight.check_sandbox_workspace_sharing", lambda s: broken)
+
+    report = run_preflight(settings)
+
+    assert "sandbox workspace" in report.disabled_engines[EngineName.DEVELOPMENT]
+    assert any(f.severity is Severity.DEGRADES for f in report.degradations)

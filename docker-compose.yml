@@ -1,0 +1,47 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: factory
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-factory}
+      POSTGRES_DB: factory
+    ports:
+      - "5432:5432"
+    volumes:
+      - factory-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U factory -d factory"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  factory:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://factory:${POSTGRES_PASSWORD:-factory}@postgres:5432/factory
+    ports:
+      - "8000:8000"
+    volumes:
+      # Sibling-container sandboxing: the factory asks the *host* daemon to run
+      # ephemeral, unprivileged containers (docker.sock is mounted, not a
+      # docker-in-docker daemon of its own). That has a sharp edge: `docker run -v
+      # SRC:DST` issued from inside this container is resolved by the daemon against
+      # the HOST's filesystem, not this container's — a named volume, or any path
+      # that doesn't look identical on both sides, silently mounts the wrong (often
+      # empty) directory into every sandbox. The fix is this bind mount using the
+      # *same literal path* on the host and in the container, matched by
+      # WORKSPACE_ROOT in .env — see the "Sandboxing note" in DEPLOYMENT.md, and
+      # `factory.preflight.check_sandbox_workspace_sharing`, which verifies this
+      # actually works at every boot rather than assuming it from config.
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${WORKSPACE_HOST_PATH:-/srv/factory-workspaces}:/srv/factory-workspaces
+    command: ["python", "-m", "factory.main"]
+
+volumes:
+  factory-pgdata:

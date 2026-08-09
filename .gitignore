@@ -1,0 +1,28 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+MISSING_CREDENTIALS.md
+ssh/
+*.pem
+id_rsa*
+id_ed25519*
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Runtime artifacts
+outputs/
+workspaces/
+logs/
+*.db
+*.sqlite3

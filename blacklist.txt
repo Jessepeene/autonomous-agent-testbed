@@ -1,0 +1,15 @@
+# Outbound email blacklist — ENFORCED IN CODE, NOT BY A MODEL.
+#
+# factory.engines.marketing.email.send_email() parses this file on every call and
+# returns False before touching any transport if the recipient matches. Deleting or
+# renaming this file makes send_email() fail CLOSED (nothing is sent).
+#
+# One rule per line. Blank lines and lines starting with '#' are ignored.
+# Matching is case-insensitive and applies to the recipient address only.
+#
+#   someone@example.com   exact address
+#   @example.com          entire domain
+#   *.example.com         domain and every subdomain
+#
+# Addresses added by repository.erase_lead() (GDPR Art. 17 erasure) are appended
+# below with an ERASURE marker and must never be removed.
