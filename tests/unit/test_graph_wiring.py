@@ -54,6 +54,21 @@ def test_route_reaches_an_enabled_engine(ctx: FactoryContext) -> None:
     assert _route(state, ctx=ctx) == engine_node_name(EngineName.DISCOVERY)
 
 
+def test_route_sends_a_supervisor_target_to_the_supervisor_engine_node(
+    ctx: FactoryContext,
+) -> None:
+    """Regression test: `ROUTE` to `EngineName.SUPERVISOR` must reach the maintenance
+    runner, not silently redirect to `backlog` (which only *enqueues* maintenance
+    tasks, it never claims or runs them). The live orchestrator routes here often --
+    its rationale text for this decision is indistinguishable from IDLE_BACKLOG's
+    ("process interrupts", "run maintenance") -- so every `engine=SUPERVISOR`
+    maintenance task (the whole learning loop, prune-memory, triage-escalated-tasks)
+    sat at status=pending forever before this was wired up correctly.
+    """
+    state: SupervisorState = {"action": NextAction.ROUTE.value, "engine": "supervisor"}
+    assert _route(state, ctx=ctx) == engine_node_name(EngineName.SUPERVISOR)
+
+
 def test_route_diverts_a_disabled_engine_to_backlog(ctx: FactoryContext) -> None:
     """Development is disabled in the fixture (no Docker), so routing must not stall."""
     assert not ctx.is_enabled(EngineName.DEVELOPMENT)

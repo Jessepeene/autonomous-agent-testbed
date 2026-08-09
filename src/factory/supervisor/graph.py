@@ -48,6 +48,14 @@ ENGINE_NODES: tuple[EngineName, ...] = (
     EngineName.DEVELOPMENT,
     EngineName.MARKETING,
     EngineName.FINANCE,
+    # SUPERVISOR must be a real engine node, not just a backlog-enqueue target:
+    # `backlog.enqueue_maintenance()` only creates maintenance tasks, it never claims
+    # or runs them. Without this, every maintenance item tagged `engine=SUPERVISOR`
+    # (triage-escalated-tasks, the whole learning loop, prune-memory, ...) sits at
+    # `status=pending` forever the moment the orchestrator ever says `ROUTE` to
+    # supervisor instead of `IDLE_BACKLOG` -- which it does routinely in practice,
+    # since both read the same "process interrupts / do maintenance" situation.
+    EngineName.SUPERVISOR,
 )
 
 
@@ -99,7 +107,7 @@ def _route(state: SupervisorState, *, ctx: FactoryContext) -> str:
     except ValueError:
         log.warning("supervisor.unknown_engine", engine=engine_value)
         return "backlog"
-    if engine is EngineName.SUPERVISOR or not ctx.is_enabled(engine):
+    if not ctx.is_enabled(engine):
         return "backlog"
     return engine_node_name(engine)
 

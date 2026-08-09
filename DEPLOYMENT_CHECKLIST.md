@@ -276,7 +276,35 @@ the same database. Neither is a product bug: use plain `docker run` (bypasses
 `env_file`) for unit tests, and stop the live `factory` service before running
 the integration suite.
 
-All thirteen fixes (1 ON CONFLICT bug, 5 test-fixture bugs, 3 Docker-sandboxing
-bugs, 2 Gemini schema bugs, and 1 stale-model-ID config fix) are applied,
-verified against the real server, and ready to commit. Item 13 (quota/billing)
-is open and blocking the rest of Phase 5.
+**14. [REAL PRODUCTION BUG, severe, structural] `EngineName.SUPERVISOR` was never
+a real graph node — every maintenance/learning-loop task was permanently
+stuck at `status=pending`, forever, on every deployment.** Noticed because
+Discovery ran once, then the orchestrator spent ~9 straight ticks alternating
+`ESCALATE`/`ROUTE→supervisor` on a static "6 open interrupts" count that never
+went down. `graph.py`'s `ENGINE_NODES` (the tuple of engines that get a real
+`_run_engine` LangGraph node) excluded `SUPERVISOR`, and `_route()` explicitly
+redirected any `ROUTE` decision targeting `engine=SUPERVISOR` to the `backlog`
+node — which only *enqueues* maintenance tasks (`enqueue_maintenance()`), it
+never claims or runs them. `factory.engines.maintenance.run()` — the real
+runner, correctly registered in `engines/base.py`'s `_MODULES` table — was
+dead code from the graph's perspective; nothing ever called
+`claim_next_task(engines=[SUPERVISOR])`. This meant **the entire learning
+loop** (prompt-mutation proposals, trial evaluation/rollback), memory pruning,
+escalated-task triage, LLM cost-reduction analysis, and prompt refinement
+never actually executed in a real run — only ever exercised by unit tests
+calling the functions directly, never through the live dispatch path. No test
+caught it: `test_graph_wiring.py` tests every other `action`/`engine`
+combination except `ROUTE` targeting `supervisor` specifically. The live LLM
+orchestrator routes here constantly in practice — its rationale for "handle
+interrupts / run maintenance" is indistinguishable from `IDLE_BACKLOG`'s, so
+this was not a rare edge case, it was the common case. Fixed by adding
+`SUPERVISOR` to `ENGINE_NODES` and removing the special-cased redirect in
+`_route()`. **Verified live**: rebuilt and restarted, watched
+`triage-escalated-tasks`, `reduce-llm-cost`, and `refine-agent-prompts` each
+get claimed and run for the first time ever, the entire 6-item maintenance
+backlog drain to empty, and the tick loop reach a genuine
+`IDLE_BACKLOG: No task is ready` steady state.
+
+All fourteen fixes are applied, verified against the real server, and ready
+to commit. Bug #13 (quota/billing) is resolved — the user enabled billing on
+the Google Cloud project.
