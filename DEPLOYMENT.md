@@ -110,6 +110,39 @@ escalations raised earlier while Telegram itself was the missing credential. If 
 other credential is still unset, expect a message within seconds. Reply to an
 escalation with `#<8-char-id> your answer`; the id is in the message itself.
 
+## Public domain / TLS setup
+
+Three things need a real, publicly reachable HTTPS endpoint: the Stripe webhook,
+the Mailgun bounce/complaint webhook, and the `/u/{token}` link recipients click to
+unsubscribe. None of this is required to run the factory at all (Telegram uses
+polling, not a webhook) — skip this section entirely until one of those three is
+actually in scope.
+
+**1. Point DNS** at the host: an `A` record for whatever domain (or subdomain)
+you're using, pointing at the droplet's public IPv4. Wait for it to resolve
+(`dig +short your-domain.com`) before continuing — Caddy's certificate request
+will fail otherwise.
+
+**2. Set `PUBLIC_DOMAIN`** in `.env` to that domain, then:
+
+```bash
+docker compose up -d caddy
+```
+
+Caddy (already in `docker-compose.yml`) reverse-proxies `PUBLIC_DOMAIN` to the
+factory's internal port and provisions/renews its own Let's Encrypt certificate
+automatically — nothing else to configure. Watch `docker compose logs -f caddy` on
+first boot; a certificate failure almost always means DNS hasn't propagated yet.
+
+**3. Verify**: `curl https://your-domain.com/health` from *outside* the host should
+return the same JSON as `curl localhost:8000/health` from inside it.
+
+A dedicated domain unrelated to any other identity you'd rather keep separate from
+this factory (rather than a subdomain of one) is worth the ~$10/year: the
+unsubscribe link is plain text in every outreach email's footer, and DNS/WHOIS
+records publicly connect a subdomain back to its parent domain. Enable WHOIS
+privacy at the registrar (usually free) regardless of which you choose.
+
 ## Mailgun setup
 
 Outbound cold email goes through Mailgun's API, never raw SMTP — a burst of cold

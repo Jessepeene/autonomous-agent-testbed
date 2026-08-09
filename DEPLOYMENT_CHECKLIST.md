@@ -78,8 +78,22 @@ key copy was sitting in the repo's own `ssh/` folder, uncommitted but one `git a
       endpoint pointed at a public HTTPS URL, which this server doesn't have
       (see the domain/TLS decision below).
 - [ ] `OUTBOUND_POSTAL_ADDRESS` set (CAN-SPAM requirement) — done, PMB address.
-- [ ] `UNSUBSCRIBE_BASE_URL` — needs the same public HTTPS endpoint as the
-      Stripe webhook. Open.
+- [x] Public HTTPS domain: `manifestaudit.com` (chosen deliberately separate
+      from the user's existing personal/business domain — see privacy note
+      below), Caddy added to `docker-compose.yml` as a reverse proxy with
+      automatic Let's Encrypt TLS. Verified end to end:
+      `curl https://manifestaudit.com/health` returns real JSON over a valid
+      certificate. Factory's port 8000 locked to loopback now that Caddy is
+      the sole public entrypoint (same pattern as the earlier Postgres fix).
+- [ ] `UNSUBSCRIBE_BASE_URL=https://manifestaudit.com` — domain exists now,
+      just needs setting in `.env`.
+- [ ] `STRIPE_WEBHOOK_SECRET` — domain exists now; add a webhook endpoint in
+      the Stripe dashboard pointing at `https://manifestaudit.com/webhooks/stripe`
+      (test mode, matching the test secret key already configured), copy its
+      signing secret into `.env`.
+- [ ] `MAILGUN_WEBHOOK_SIGNING_KEY` — Mailgun dashboard → Sending → Webhooks →
+      "HTTP webhook signing key"; also point the complained/failed event
+      webhooks at `https://manifestaudit.com/webhooks/mailgun` while there.
 - [ ] Vercel/Cloudflare token set — still open; this is the one credential
       blocking Development (everything else is enabled: discovery, compliance,
       marketing, finance, supervisor).

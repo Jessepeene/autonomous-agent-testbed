@@ -31,7 +31,10 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://factory:${POSTGRES_PASSWORD:-factory}@postgres:5432/factory
     ports:
-      - "8000:8000"
+      # Loopback only: Caddy (below) is the sole public entrypoint now, terminating
+      # TLS and reverse-proxying over the internal compose network. Still reachable
+      # for local debugging via curl on the host itself or an SSH tunnel.
+      - "127.0.0.1:8000:8000"
     # The image runs as a fixed non-root user (uid 10001), but /var/run/docker.sock
     # on the host is owned by root:docker (mode 660) — without group membership
     # matching the host's docker group GID, this non-root user gets a permission
@@ -57,5 +60,25 @@ services:
       - ${WORKSPACE_HOST_PATH:-/srv/factory-workspaces}:/srv/factory-workspaces
     command: ["python", "-m", "factory.main"]
 
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - factory
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN}
+    ports:
+      # 80 is required even for an HTTPS-only site: Caddy uses it for the ACME
+      # HTTP-01 challenge (and to redirect plain-HTTP requests) when it
+      # provisions/renews the Let's Encrypt certificate for PUBLIC_DOMAIN.
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
 volumes:
   factory-pgdata:
+  caddy-data:
+  caddy-config:
