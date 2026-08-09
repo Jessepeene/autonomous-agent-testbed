@@ -192,6 +192,28 @@ first-contact-with-reality check for something built this session:
       event, not "event type not tracked". This is the one piece flagged as
       unverified against a real payload shape.
       - Result: ______________________
+
+**[REAL PRODUCTION BUG, severe] Every Stripe webhook delivery crashed —
+`dict(event)` on a real `stripe.Event` object.** Found triggering the very
+first real test event (`stripe trigger payment_intent.succeeded` via the
+official `stripe/stripe-cli` Docker image, since this Stripe account's
+"thin" event destination only offers CLI-triggered test events, not a
+dashboard button). `StripeObject` (the real SDK class, `stripe==15.4.0`)
+only implements `__getitem__(str)` — no `keys()`, no `__iter__`. `dict(event)`
+therefore fell back to Python's legacy sequence-iteration protocol
+(`event[0]`, `event[1]`, ...), which raises `KeyError` instead of the
+`IndexError` that protocol needs to detect the end of a sequence — crashing
+on every single real delivery, 100% of the time, since day one. No test ever
+caught it: every existing webhook test drives `process_event()` directly with
+a hand-built plain dict, never touching `verify()` or the real
+`stripe.Webhook.construct_event()` return value at all. Fixed by using the
+SDK's own `event.to_dict()` (recursive, also converting nested objects like
+`data.object`), and added a real signed-payload regression test
+(`tests/unit/test_finance_webhooks.py`) that constructs and verifies an
+actual HMAC-signed Stripe payload rather than mocking the SDK away. Verified
+live: a triggered `payment_intent.succeeded` event now produces a real
+`finance.revenue` log line with the correct amount and updated ledger
+balance.
 - [ ] A real campaign-approval cycle: harvest runs, Telegram brief arrives, we
       reply `#<id> APPROVE`, sending unblocks. Also try one ambiguous reply on a
       second cohort and confirm it stays blocked (fail-closed).

@@ -55,7 +55,15 @@ def verify(payload: bytes, signature: str, settings: Settings | None = None) -> 
         event = stripe.Webhook.construct_event(payload, signature, secret)  # type: ignore[no-untyped-call]
     except (ValueError, stripe.SignatureVerificationError) as exc:
         raise SignatureInvalid(str(exc)) from exc
-    return dict(event)
+    # NOT dict(event): StripeObject only implements __getitem__(str), not the
+    # mapping/iterable protocol (no keys()/__iter__). dict() falls back to Python's
+    # legacy sequence-iteration protocol, calling event[0], event[1], ... which
+    # raises KeyError (not the IndexError that protocol expects to signal the end)
+    # the moment it hits the backing dict's string keys -- crashing on every real
+    # webhook delivery. to_dict() is the SDK's own recursive conversion, also
+    # turning nested objects like data.object into plain dicts, which every
+    # downstream .get() call here already assumes.
+    return event.to_dict()  # type: ignore[no-any-return]
 
 
 def _amount_cents(event: dict[str, Any]) -> int:
