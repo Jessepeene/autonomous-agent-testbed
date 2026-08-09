@@ -119,10 +119,18 @@ pairing philosophy already used on the host. Verified: `docker --version` →
 Watching `docker compose logs -f factory` throughout. Each of these is a
 first-contact-with-reality check for something built this session:
 
-- [ ] At least one full Discovery → Compliance → Development cycle completes.
-- [ ] At least one Bug Council review runs and its verdict looks sane.
+- [x] At least one Discovery cycle completes end to end against the real
+      Gemini API (`discover_opportunities` task: `engine.start` → real
+      `llm.call outcome=ok` → `engine.done`).
+- [x] Supervisor/maintenance backlog drains to a genuine idle steady state
+      (see bug #14) — `triage-escalated-tasks`, `reduce-llm-cost`,
+      `refine-agent-prompts` all ran for the first time ever.
+- [ ] Compliance → Development leg of the cycle (needs `ANTHROPIC_API_KEY`,
+      still pending in Phase 2).
+- [ ] At least one Bug Council review runs and its verdict looks sane (needs
+      `ANTHROPIC_API_KEY`/Development enabled).
 - [ ] A LEAD_SCOUT sourcing-refinement run appears in logs and terminates cleanly
-      (not step-limited every time).
+      (not step-limited every time) — needs Marketing enabled (`MAILGUN_API_KEY`).
 - [ ] An entity-resolution run appears in logs; verdict is plausible for a test lead.
 - [ ] Mailgun test webhook sent from their dashboard (Sending → Webhooks → pick
       "complained" → Test webhook) — confirm `/webhooks/mailgun` logs a *handled*
