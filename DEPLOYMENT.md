@@ -26,6 +26,10 @@ $EDITOR .env            # DATABASE_URL + at least one provider key are mandatory
 sudo mkdir -p /srv/factory-workspaces
 sudo chown 10001:10001 /srv/factory-workspaces
 
+# The factory's non-root user also needs group access to the host's docker.sock —
+# set DOCKER_GID in .env to this host's actual value (varies by distro/install):
+stat -c '%g' /var/run/docker.sock   # put this number in .env as DOCKER_GID
+
 docker compose up -d postgres
 docker compose run --rm factory alembic upgrade head
 docker compose run --rm factory python -m factory.preflight

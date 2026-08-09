@@ -91,12 +91,28 @@ for manual debugging via `ssh -L 5432:localhost:5432 <host>`.
 
 ## Phase 4 — Preflight
 
-- [ ] `docker compose run --rm factory python -m factory.preflight` run.
-- [ ] No HARD_BLOCK findings remain.
-- [ ] `SANDBOX_WORKSPACE_SHARING` specifically checked — this is a new, real probe
-      -container test, not a config assumption. Pass/fail: ___________
-- [ ] Every DEGRADES finding reviewed and accepted or fixed on purpose (not just
-      ignored by default).
+- [x] `docker compose run --rm factory python -m factory.preflight` run.
+- [x] No HARD_BLOCK findings remain (`ok=True`).
+- [x] `SANDBOX_WORKSPACE_SHARING` specifically checked — real probe-container test,
+      not a config assumption. **Pass** (docker_available()=True, and
+      `check_sandbox_workspace_sharing` returned no finding, meaning the sharing
+      probe container's marker write/read round-trip succeeded for real).
+- [x] Every DEGRADES finding reviewed: `ANTHROPIC_API_KEY` (development),
+      `TELEGRAM_BOT_TOKEN` (escalations), `STRIPE_API_KEY` (finance),
+      `VERCEL_TOKEN` (deploy target), `MAILGUN_API_KEY` (marketing) — all expected,
+      all deferred to Phase 2's remaining items, none accidental.
+
+**Note (real production bug, fixed):** the `docker.io` apt package on Debian
+trixie (this image's base, `python:3.13-slim`) does not ship `/usr/bin/docker` at
+all — only `dockerd`/`docker-proxy`/`docker-init`. `dpkg -l` reported it
+"installed" the entire time; the CLI binary was simply never in the package.
+Every preflight run would have reported `docker=False` forever, permanently
+disabling Development on **every** deployment using this Dockerfile, not just
+this one. Fixed by copying the static `/usr/local/bin/docker` binary from the
+official `docker:cli` image via a multi-stage build instead of installing
+`docker.io` from apt — no distro-repo dependency, and it matches the CLI/daemon
+pairing philosophy already used on the host. Verified: `docker --version` →
+29.7.1 (client) against `29.7.2` (host daemon, via the mounted socket).
 
 ## Phase 5 — Dry run (`FACTORY_DRY_RUN=1`, the default — confirm it's still 1)
 
@@ -171,6 +187,31 @@ executed against real Postgres before this pass:**
   (`ledger.product_id -> products.id`). Added a `_make_product()` helper
   (matching the pattern already used in sibling test files) and used its real id.
 
-**Pending**: these fixes are applied and verified (rebuilt image, full suite
-green) but not yet committed to git — will do that as one commit once we've
-finished this phase of the checklist, unless we hit more before then.
+**7. [REAL PRODUCTION BUG] Docker socket group-permission mismatch.** The factory
+container's fixed non-root user (uid 10001) had no group membership matching the
+host's `docker.sock` GID, so every attempt to reach the socket failed permission
+checks silently and `docker_available()` reported false — Development would have
+been permanently disabled on every real deployment. Fixed with a compose-level
+`group_add: - "${DOCKER_GID:-999}"` (can't be baked into the image; the GID
+varies per host/distro), documented in `.env.example` and `DEPLOYMENT.md`.
+
+**8. [REAL PRODUCTION BUG] `docker.io` apt package on Debian trixie ships no
+`docker` CLI binary.** Same silent-`docker_available()=False` failure mode as
+above, different root cause: `dpkg -l` reported `docker.io` installed, but
+`dpkg -L docker.io` showed it only lays down `dockerd`/`docker-proxy`/
+`docker-init` — no `/usr/bin/docker`. This would have permanently broken
+Development on this Dockerfile's base image regardless of host configuration.
+Fixed by copying the static binary from Docker's official `docker:cli` image via
+a multi-stage build instead of relying on the distro package.
+
+**9. [REAL PRODUCTION BUG] `write_missing_credentials()` default path used
+`REPO_ROOT`**, a module-file-location-derived path that resolves under
+site-packages once installed via `pip install .` into a container — owned by
+root, unwritable by the non-root `factory` user, crashing preflight with
+`PermissionError` before it could even report findings. Fixed by defaulting to
+`Path.cwd()` (`/app` in the container, the repo root in local dev), matching the
+same fix pattern already used for `WORKSPACE_ROOT`/`BLACKLIST_PATH`.
+
+All nine fixes (1 ON CONFLICT bug, 5 test-fixture bugs, and 3 more found getting
+Docker sandboxing to actually work end to end) are applied, verified against the
+real server, and committed.

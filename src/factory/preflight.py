@@ -22,7 +22,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from factory.logging import configure_logging, get_logger
-from factory.settings import REPO_ROOT, EngineName, Settings, get_settings
+from factory.settings import EngineName, Settings, get_settings
 
 log = get_logger(__name__)
 
@@ -295,8 +295,19 @@ def run_preflight(settings: Settings | None = None) -> PreflightReport:
 
 
 def write_missing_credentials(report: PreflightReport, path: Path | None = None) -> Path | None:
-    """Persist the audit where a human can read it without a working Telegram bot."""
-    target = path or (REPO_ROOT / "MISSING_CREDENTIALS.md")
+    """Persist the audit where a human can read it without a working Telegram bot.
+
+    Defaults to the current working directory, not ``REPO_ROOT``: ``REPO_ROOT`` is
+    derived from this module's own file location (``factory.settings``), which is
+    only correct when running from a repo checkout. Once installed via
+    ``pip install .`` into a container — the actual deployed case — that file lives
+    under site-packages, somewhere the app's own non-root user cannot write and has
+    no business writing to anyway. The process's cwd is `/app` in the shipped
+    Dockerfile (``WORKDIR /app``) and the repo root in any normal local-dev
+    invocation, so it is the correct default in both cases without needing a
+    dedicated setting.
+    """
+    target = path or (Path.cwd() / "MISSING_CREDENTIALS.md")
     if report.ok and not report.degradations:
         target.unlink(missing_ok=True)
         return None

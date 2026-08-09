@@ -32,6 +32,15 @@ services:
       DATABASE_URL: postgresql+asyncpg://factory:${POSTGRES_PASSWORD:-factory}@postgres:5432/factory
     ports:
       - "8000:8000"
+    # The image runs as a fixed non-root user (uid 10001), but /var/run/docker.sock
+    # on the host is owned by root:docker (mode 660) — without group membership
+    # matching the host's docker group GID, this non-root user gets a permission
+    # error talking to the socket and `docker_available()` reports false, silently
+    # and permanently disabling Development. The docker group's GID is not the same
+    # across hosts/distros, so it cannot be baked into the image at build time —
+    # set DOCKER_GID in .env to the output of: stat -c '%g' /var/run/docker.sock
+    group_add:
+      - "${DOCKER_GID:-999}"
     volumes:
       # Sibling-container sandboxing: the factory asks the *host* daemon to run
       # ephemeral, unprivileged containers (docker.sock is mounted, not a
