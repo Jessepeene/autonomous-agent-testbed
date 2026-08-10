@@ -173,6 +173,28 @@ async def test_active_dev_count_drives_the_throttle(session: AsyncSession) -> No
     assert await repository.count_active_dev_tasks(session) == 0
 
 
+async def test_upsert_idea_persists_the_given_evidence_count(session: AsyncSession) -> None:
+    idea_id = await repository.upsert_idea(session, _scored_idea(), evidence_count=7)
+    assert idea_id is not None
+    await repository.set_idea_status(session, idea_id, "approved")
+
+    validated = await repository.next_validated_idea(session)
+
+    assert validated is not None
+    assert validated.evidence_count == 7
+
+
+async def test_upsert_idea_defaults_evidence_count_to_zero(session: AsyncSession) -> None:
+    idea_id = await repository.upsert_idea(session, _scored_idea())
+    assert idea_id is not None
+    await repository.set_idea_status(session, idea_id, "approved")
+
+    validated = await repository.next_validated_idea(session)
+
+    assert validated is not None
+    assert validated.evidence_count == 0
+
+
 async def test_lead_insert_drops_extraneous_fields(session: AsyncSession) -> None:
     record = await repository.insert_lead(
         session,

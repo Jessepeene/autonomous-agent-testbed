@@ -13,7 +13,7 @@ import asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from factory.engines.discovery import score
-from factory.engines.discovery.cluster import cluster_signals
+from factory.engines.discovery.cluster import Cluster, cluster_signals
 from factory.engines.discovery.sources.base import Signal, Source
 from factory.engines.discovery.sources.github import GitHubIssuesSource
 from factory.engines.discovery.sources.hackernews import HackerNewsSource
@@ -33,6 +33,27 @@ _SIGNALS_PER_SOURCE = 40
 _GENERATOR_KEY = "factory.engines.discovery.score:GENERATOR_SYSTEM"
 _DISCRIMINATOR_KEY = "factory.engines.discovery.score:DISCRIMINATOR_SYSTEM"
 _WEIGHTS_KEY = "factory.engines.discovery.score:SCORING_WEIGHTS"
+
+
+def _evidence_count_for(idea: ScoredIdea, clusters: list[Cluster]) -> int:
+    """How many raw signals corroborate this idea's cluster.
+
+    The generator is told to copy ``source_url`` verbatim from one of the signals
+    in the cluster it drew the idea from ("Never invent one"), so that URL is the
+    only link back to a cluster an emitted idea still carries -- there is no
+    cluster index or id in the returned schema. Deterministic, not asked of the
+    model: the model already has enough to fabricate a plausible-sounding count,
+    and this is a fact derivable from data already in hand.
+
+    Falls back to 0 (matching every idea's behaviour before this existed) if the
+    URL was altered in transit (whitespace, a trailing slash) rather than raising
+    -- one idea's evidence count being wrong is not worth failing the whole cycle.
+    """
+    target = str(idea.source_url).rstrip("/")
+    for cluster in clusters:
+        if any(signal.url.rstrip("/") == target for signal in cluster.signals):
+            return cluster.size
+    return 0
 
 
 def build_sources(settings: Settings) -> list[Source]:
@@ -112,7 +133,12 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
 
     stored = 0
     for idea in kept:
-        idea_id = await repository.upsert_idea(session, idea, score=idea.weighted_score(weights))
+        idea_id = await repository.upsert_idea(
+            session,
+            idea,
+            score=idea.weighted_score(weights),
+            evidence_count=_evidence_count_for(idea, clusters),
+        )
         if idea_id is None:
             continue  # already known — de-duplicated by fingerprint
         stored += 1

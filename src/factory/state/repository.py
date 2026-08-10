@@ -309,13 +309,21 @@ async def count_pending_tasks(
 
 
 async def upsert_idea(
-    session: AsyncSession, idea: ScoredIdea, *, score: float | None = None
+    session: AsyncSession,
+    idea: ScoredIdea,
+    *,
+    score: float | None = None,
+    evidence_count: int = 0,
 ) -> str | None:
     """Store a scored idea, de-duplicated by problem + niche fingerprint.
 
     ``score`` defaults to ``idea.score`` (the fixed historical weights) — pass it
     explicitly only when the caller has fetched tuned weights and wants
     ``idea.weighted_score(weights)`` stored instead.
+
+    ``evidence_count`` defaults to 0 for any caller that predates it (tests
+    constructing an idea directly, for instance) -- ``discovery/graph.py`` is the
+    only real caller, and it passes the source cluster's signal count.
     """
     stored_score = score if score is not None else idea.score
     key = fingerprint(idea.problem_statement, idea.target_niche)
@@ -327,6 +335,7 @@ async def upsert_idea(
             source_url=str(idea.source_url),
             monetization_hypothesis=idea.monetization_hypothesis,
             score=stored_score,
+            evidence_count=evidence_count,
             fingerprint=key,
             status="pending",
         )
