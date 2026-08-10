@@ -427,6 +427,21 @@ clear, write a differently-named plan, assert the old tree is gone) plus the ful
 during a natural pause (spend cap had just re-tripped at exactly $15.01, so
 nothing was in flight).
 
+**22. [REAL PRODUCTION BUG] `evidence_count` was defined end-to-end and never
+written.** Found while answering a user question about idea approval rates: all 4
+ideas in the database (approved and rejected alike) had `evidence_count=0`.
+Traced it — the field exists on the schema, the ORM column, and the read path
+(`next_validated_idea`), but `upsert_idea()`'s actual `INSERT` never mentioned the
+column, so every idea silently took the database default regardless of how many
+corroborating signals its source cluster actually had. Fixed deterministically
+(`_evidence_count_for()` in `discovery/graph.py`, matching `source_url` back to
+its cluster — not asking the model to self-report a number it could fabricate),
+threaded through a new `upsert_idea(..., evidence_count=...)` parameter. Zero
+added LLM cost. Note: this only makes the count honest — it does not yet feed
+into scoring or the learning loop; `evidence_count` isn't one of the four scoring
+dimensions today, so populating it is necessary-but-not-sufficient if the goal is
+for well-evidenced ideas to actually score higher.
+
 ## ⚠ Operational hazard discovered this pass
 
 **Running `pytest tests/integration` against a live deployment destroys its
