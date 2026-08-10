@@ -94,11 +94,20 @@ key copy was sitting in the repo's own `ssh/` folder, uncommitted but one `git a
 - [ ] `MAILGUN_WEBHOOK_SIGNING_KEY` — Mailgun dashboard → Sending → Webhooks →
       "HTTP webhook signing key"; also point the complained/failed event
       webhooks at `https://manifestaudit.com/webhooks/mailgun` while there.
-- [ ] Vercel/Cloudflare token set — still open; this is the one credential
-      blocking Development (everything else is enabled: discovery, compliance,
-      marketing, finance, supervisor).
-- [ ] At least one lead provider key (Hunter or Apollo) — still open; Marketing
-      is enabled but has no real lead source to search without one.
+- [x] Vercel token set. **Note**: `CLOUDFLARE_API_TOKEN` is a `Settings` field
+      and appears in preflight's remedy text ("Vercel or Cloudflare") but has
+      zero real usage anywhere in `deploy.py` or elsewhere — the remedy text
+      overpromises, Cloudflare isn't actually a working alternative today.
+      Considered adding real Netlify support (user has an existing
+      subscription) but scoped it as genuinely new work — different API shape
+      (digest/upload flow, separate env-var mechanism) comparable to what
+      exists for Vercel, not a config swap — user chose the free Vercel token
+      instead to unblock now.
+- [x] Apollo API key set (lead provider for Marketing's sourcing).
+- [x] **All six engines now enabled simultaneously for the first time**:
+      `disabled_engines={}`, `ok=True`. This is the real target state for the
+      rest of Phase 5 — Development (Bug Council, sandbox builds, Vercel
+      deploy) has never run against real infrastructure until now.
 
 **Privacy note (explicit user requirement):** no personal name, personal
 address, or personal email anywhere in outbound-facing config. The Mailgun
