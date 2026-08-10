@@ -75,6 +75,17 @@ class DockerSandbox:
             "/workspace",
             "--volume",
             f"{workspace_path}:/workspace:rw",
+            # uid 10001 has no /etc/passwd entry in the sandbox image, so $HOME is
+            # unset. Any tool that resolves a cache/config dir from $HOME/... (pip's
+            # build isolation, and anything it shells out to -- observed live: a
+            # dependency needing a from-source build tried to write its build tool's
+            # cache to the literal path "/.cache") then hits the read-only rootfs
+            # instead of the writable tmpfs above, which is only mounted at /tmp.
+            # Pointing HOME at /tmp covers the whole class of "wants a dotfile-style
+            # cache under home" failures in one shot, rather than enumerating and
+            # separately tmpfs-mounting every path a build tool might invent.
+            "--env",
+            "HOME=/tmp",
         ]
         for key, value in (env or {}).items():
             argv += ["--env", f"{key}={value}"]

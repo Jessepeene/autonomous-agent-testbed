@@ -110,11 +110,26 @@ class TestArgvHardening:
             env={"STRIPE_KEY": "sk_test_x", "OTHER": "value"},
         )
         env_pairs = [argv[i + 1] for i, arg in enumerate(argv) if arg == "--env"]
-        assert set(env_pairs) == {"STRIPE_KEY=sk_test_x", "OTHER=value"}
+        # HOME=/tmp is always present too -- see test_home_is_always_pointed_at_the_
+        # writable_tmpfs below -- this test is only about the *caller-supplied* vars.
+        assert {"STRIPE_KEY=sk_test_x", "OTHER=value"} <= set(env_pairs)
 
-    def test_no_env_flags_when_none_are_given(self, sandbox: DockerSandbox) -> None:
+    def test_no_caller_env_flags_when_none_are_given(self, sandbox: DockerSandbox) -> None:
+        """Only the always-on HOME=/tmp should appear -- nothing from a prior call
+        or an implicit default leaks in when the caller passes no env at all."""
         argv = sandbox._argv("echo hi", workspace_path="/tmp/ws", network=False, env=None)
-        assert "--env" not in argv
+        env_pairs = [argv[i + 1] for i, arg in enumerate(argv) if arg == "--env"]
+        assert env_pairs == ["HOME=/tmp"]
+
+    def test_home_is_always_pointed_at_the_writable_tmpfs(self, sandbox: DockerSandbox) -> None:
+        """uid 10001 has no /etc/passwd entry, so $HOME is otherwise unset. Observed
+        live: a dependency needing a from-source build resolved its build tool's
+        cache to the literal path "/.cache" and hit the read-only rootfs, since the
+        writable tmpfs is only mounted at /tmp. Pointing HOME at /tmp covers the
+        whole class of "wants a dotfile-style cache under home" failures."""
+        argv = sandbox._argv("echo hi", workspace_path="/tmp/ws", network=False, env=None)
+        env_pairs = [argv[i + 1] for i, arg in enumerate(argv) if arg == "--env"]
+        assert "HOME=/tmp" in env_pairs
 
     def test_command_runs_through_a_shell_inside_the_named_image(self, settings: Settings) -> None:
         argv = DockerSandbox(settings)._argv(
