@@ -62,6 +62,10 @@ key copy was sitting in the repo's own `ssh/` folder, uncommitted but one `git a
       `.env.example` template defaults, verified present.
 - [x] `DAILY_LLM_SPEND_CAP_USD=10` set (can be changed anytime — plain env var,
       no migration, just `docker compose restart factory`).
+      **Raised twice live** as real spend data came in: → `15` (2026-08-10,
+      ~16:00 UTC) → `20` (2026-08-10, ~18:05 UTC, alongside the
+      `DISCOVERY_INTERVAL_SECONDS` change below). No auto-revert — rolling 24h
+      window, stays until manually changed back.
 - [x] Telegram: bot created, chat id discovered, both set in `.env`. Verified —
       escalations arriving in Telegram in real time.
 - [x] `ANTHROPIC_API_KEY` set.
@@ -442,6 +446,42 @@ into scoring or the learning loop; `evidence_count` isn't one of the four scorin
 dimensions today, so populating it is necessary-but-not-sufficient if the goal is
 for well-evidenced ideas to actually score higher.
 
+**23. [REAL PRODUCTION BUG, severe] Generic escalation subjects silently
+swallowed every second failure on the same engine.** `_run_engine`'s
+task-failure escalations used subjects templated only on `engine.value` (e.g.
+"development task exhausted its retries", "development hit a host/environment
+failure, not a code bug") — no task_id, no per-incident identifier.
+`interrupts.request` dedupes on `(reason, subject, status)`, so once the first
+such escalation for an engine was raised, every *subsequent, unrelated* one on
+that engine collided with it via `ON CONFLICT DO NOTHING` and never reached
+Telegram at all — no error, no log above debug level, nothing. Found live: a
+product's patch task hit a genuine devops error and escalated, but the
+message never arrived because an unrelated interrupt from hours earlier (for
+an already-completed task) was still sitting open with the identical subject.
+Fixed by including `task_id` in the three task-scoped subjects, and the
+rationale text in the model-driven `_escalate` node's subject (previously a
+completely fixed string regardless of what the model was actually asking
+about). Left "Docker daemon unavailable" as a deliberate global singleton —
+correct to dedupe there, every task fails identically. Two now-stale
+interrupts from before this fix (`c1fe2b85...`, `0b80f408...`, both
+referencing a long-completed task) are still sitting open on the live
+database — harmless (new escalations no longer collide with them) but not
+yet cleaned up; the cleanup `UPDATE` was blocked by the auto-mode safety
+classifier and deferred rather than routed around.
+
+**24. [REAL PRODUCTION BUG] Codegen could pin a dependency the sandbox can
+never build.** Root-caused live, same investigation as #23: a product's patch
+task kept failing on `pydantic==2.6.4`, which has no prebuilt wheel for Python
+3.13 (the sandbox's runtime, `python:3.13-slim` — that pydantic release
+predates 3.13), forcing a from-source `pydantic-core` build that needs Rust,
+which needs to execute a downloaded installer in `/tmp` — mounted `noexec` by
+design. An unwinnable combination for any product that pins a compiled-extension
+package to an old exact version. Fixed in `SYSTEM_PROMPT`
+(`scaffold/generator.py`): use minimum-version lower bounds
+(`pydantic>=2.9,<3`) instead of exact old pins, with the exact observed
+failure quoted as a concrete example. Not yet verified against a real
+generation — will only be confirmed once a product actually builds under it.
+
 ## ⚠ Operational hazard discovered this pass
 
 **Running `pytest tests/integration` against a live deployment destroys its
@@ -502,6 +542,17 @@ misdiagnosed this way before isolating each failure confirmed it was clean.
 - Untrusted-content handling for text an agent reads off the open web
   (RESEARCHER, LEAD_SCOUT) — flagged during the earlier Fortress-checklist
   review, never picked back up. Both paths fail closed today, so not urgent.
+- `DISCOVERY_INTERVAL_SECONDS` — started this deployment at `120` (testing
+  value, ~180x the production default) to exercise the pipeline quickly.
+  Raised to `10800` (3h) on 2026-08-10 ~18:05 UTC as a middle ground once real
+  spend data showed the 120s cadence was a major cost driver (63 discovery
+  calls in one day vs. an expected ~4-8 at production cadence). Still not the
+  documented production default of `21600` (6h) — revisit before real go-live.
+- Two stale, harmless open interrupts (`c1fe2b85...`, `0b80f408...`,
+  referencing a task that completed hours ago) predate the bug #23 fix and
+  were never cleaned up — the `UPDATE` was blocked by the auto-mode safety
+  classifier mid-session and deliberately not routed around. Cosmetic only;
+  they no longer block anything since new escalations get unique subjects.
 
 ## Bugs / issues found during this pass
 
