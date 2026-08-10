@@ -145,8 +145,17 @@ class Settings(BaseSettings):
     model_general: str = "gemini-2.5-pro"
     model_fast: str = "gemini-2.5-flash"
     model_code: str = "claude-opus-5"
-    effort_code: str = "xhigh"
-    effort_review: str = "xhigh"
+    # "xhigh" was observed live to make Claude Sonnet 5's adaptive thinking consume
+    # an entire max_tokens budget without ever converging on an answer -- confirmed
+    # by reproducing the identical generate_scaffold() call at "high" instead, which
+    # completed normally (15 files, ~37k output tokens) where "xhigh" failed
+    # identically at both 32_000 and 64_000 tokens. effort_review is lowered
+    # preventively, not from its own separate reproduction: the mechanism (adaptive
+    # thinking, no budget_tokens cap available on this model, an open-ended
+    # "review and decide" task) is the same one that just failed for code
+    # generation, and Bug Council hasn't run yet in this deployment to have hit it.
+    effort_code: str = "high"
+    effort_review: str = "high"
     use_claude_code: bool = False
 
     # --- Sandbox ----------------------------------------------------------------
