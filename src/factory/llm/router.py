@@ -53,7 +53,16 @@ def model_for(task_type: TaskType, settings: Settings | None = None) -> str:
 
 def max_tokens_for(task_type: TaskType) -> int:
     if task_type is TaskType.CODE_GENERATION:
-        return 32_000
+        # 32_000 was observed live to be too tight: Claude Sonnet 5's adaptive
+        # thinking is not budget-capped (budget_tokens is rejected outright on this
+        # model), and an open-ended "produce the complete MVP" prompt let thinking
+        # alone consume the entire 32k, hitting stop_reason="max_tokens" with a
+        # single "thinking" content block and zero answer text -- every build_mvp
+        # attempt failed with SchemaViolation("claude returned no text content")
+        # this way. 64_000 is Claude Sonnet 5's supported ceiling (confirmed against
+        # the live API) and the only lever available to give thinking and the final
+        # JSON answer enough combined room.
+        return 64_000
     if task_type is TaskType.CODE_REVIEW:
         return 16_000
     if task_type is TaskType.ORCHESTRATION:
