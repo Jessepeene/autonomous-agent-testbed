@@ -88,6 +88,53 @@ yet.\
 """
 
 
+#: Mutable via the Learning Loop (see learning/allowlist.py) -- unlike SYSTEM_PROMPT
+#: above, which is permanently excluded from mutation.
+LANDING_PAGE_SYSTEM = """\
+You are the validation agent of an autonomous SaaS factory. Before any real product \
+is built, you produce a single, cheap pitch page that measures whether real people \
+actually want it.
+
+The page must include, as actual files with real contents:
+- One static HTML page (plain HTML/CSS/JS, no build step, no framework) that pitches \
+the idea clearly: the problem it solves, who it's for, and why it's worth paying for. \
+Visual polish matters directly here: this page's only job is to earn a stranger's \
+trust in the few seconds before they decide whether to leave an email address, and a \
+generic-template or amateurish look will suppress genuine interest regardless of how \
+good the idea is — a low response rate must reflect the idea, not the page. Use a \
+clear visual hierarchy, real (not lorem-ipsum) and specific copy, professional and \
+credible styling, and a mobile-responsive layout.
+- An interest-capture form (email, and an optional short message) that POSTs as JSON \
+to the exact interest URL given below. On success, replace the form with a short \
+thank-you message. On failure, show an error and leave the form intact so the visitor \
+can retry.
+- A pytest suite that serves the page (e.g. via FastAPI's StaticFiles, or an \
+equivalent minimal static server) and asserts the page loads and contains the pitch \
+and the form.
+- requirements.txt with a minimum-version lower bound per package (see the pinning \
+rule below), and a README with run instructions.
+
+This is deliberately NOT a real product:
+- No authentication, no user accounts, no database beyond nothing.
+- No Stripe or any billing integration.
+- No backend business logic of any kind beyond serving the static page. If a minimal \
+backend is needed to serve the page, its only job is that.
+
+Hard constraints:
+- Every file must be complete. No TODOs, no placeholders, no "implement this".
+- Do not write files outside the project directory. All paths are relative, with no \
+leading slash and no "..".
+- test_command must be a single shell command that runs the suite.
+- requirements.txt runs on Python 3.13 in a container with no compiler toolchain and \
+no writable-and-executable temp directory (/tmp is mounted noexec). Never pin an \
+exact old version of a package with a compiled extension — use a minimum-version \
+lower bound instead (e.g. "fastapi>=0.115,<1"), so pip resolves a release recent \
+enough to ship a Python 3.13 wheel.
+- The interest form's fetch/XHR target must be the EXACT interest URL given in the \
+prompt, verbatim. Do not invent your own endpoint path or guess at one.\
+"""
+
+
 class UnsafeGeneratedPath(ValueError):
     """A generated file path tried to escape the product workspace."""
 
@@ -132,6 +179,59 @@ async def generate_scaffold(
         prompt=prompt,
         engine=EngineName.DEVELOPMENT,
         task_id=task_id,
+    )
+
+
+async def generate_landing_page(
+    ctx: FactoryContext,
+    idea: ValidatedIdea,
+    *,
+    product_id: str,
+    system: str = LANDING_PAGE_SYSTEM,
+    tunable_parameter_id: str | None = None,
+    task_id: str | None = None,
+    existing_files: dict[str, str] | None = None,
+) -> ScaffoldPlan:
+    """A cheap, pitch-only page for the idea validation gate -- see
+    `development/graph.py::_build_landing_page`. Unlike `generate_scaffold` (whose
+    SYSTEM_PROMPT is permanently excluded from the Learning Loop), the caller is
+    expected to have already resolved `system`/`tunable_parameter_id` via
+    `learning_prompts.get_prompt(key=..., default=LANDING_PAGE_SYSTEM)` -- this
+    prompt's copy is meant to self-improve over time.
+
+    The interest-capture URL is baked into the prompt, not left for the model to
+    guess: a static page has no server-side env var to read PRODUCT_ID from the way
+    a real backend does (see `deploy.py::_runtime_env`), so `settings.public_domain`
+    + `product_id` are composed here into the one exact URL the model must use.
+    """
+    interest_url = f"https://{ctx.settings.public_domain}/interest/{product_id}"
+    prompt = (
+        f"Validated idea:\n"
+        f"- problem: {idea.problem_statement}\n"
+        f"- target niche: {idea.target_niche}\n"
+        f"- monetization: {idea.monetization_hypothesis}\n"
+        f"- evidence: {idea.source_url}\n\n"
+        f'Interest capture URL (POST JSON {{"email": ..., "message": ...}} here, '
+        f"exactly, verbatim): {interest_url}\n\n"
+    )
+    if existing_files:
+        prompt += (
+            "CURRENT CONTENTS of the workspace (this is a repair pass -- see the "
+            "system prompt for how to treat these):\n\n"
+            + "\n\n".join(
+                f"--- {path} ---\n{contents}" for path, contents in existing_files.items()
+            )
+            + "\n\n"
+        )
+    prompt += "Produce the complete validation page."
+    return await ctx.llm.parse(
+        ScaffoldPlan,
+        task_type=TaskType.CODE_GENERATION,
+        system=system,
+        prompt=prompt,
+        engine=EngineName.DEVELOPMENT,
+        task_id=task_id,
+        tunable_parameter_id=tunable_parameter_id,
     )
 
 

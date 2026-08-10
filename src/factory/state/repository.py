@@ -34,6 +34,7 @@ from factory.state.orm import (
     Product,
     ProductLock,
     Task,
+    ValidationSignal,
     new_id,
 )
 from factory.state.schemas import (
@@ -288,6 +289,24 @@ async def count_active_dev_tasks(session: AsyncSession) -> int:
     faster than Development can drain them.
     """
     stmt = select(func.count()).select_from(Product).where(Product.status.in_(ACTIVE_DEV_STATUSES))
+    return int((await session.execute(stmt)).scalar_one())
+
+
+async def count_active_validations(session: AsyncSession) -> int:
+    """Products currently running a validation (landing page + outreach).
+
+    Capped separately from `count_active_dev_tasks`/`max_concurrent_builds`: a
+    validation is deliberately much cheaper than a real MVP build and must not
+    compete with real builds for the same capacity slots, but it still needs its
+    own cap -- otherwise every approved idea spawns an unbounded parallel
+    validation, flooding the campaign-approval queue and burning the shared,
+    metered lead provider quota before any of them prove out.
+    """
+    stmt = (
+        select(func.count())
+        .select_from(Product)
+        .where(Product.status == ProductStatus.VALIDATING.value)
+    )
     return int((await session.execute(stmt)).scalar_one())
 
 
@@ -576,11 +595,69 @@ async def erase_lead(
     log.info("gdpr.erasure", email_domain=normalised.partition("@")[2])
 
 
-async def leads_for_outreach(session: AsyncSession, limit: int = 25) -> list[Lead]:
-    stmt = (
-        select(Lead).where(Lead.lia_passed.is_(True)).order_by(Lead.created_at.asc()).limit(limit)
-    )
+async def leads_for_outreach(
+    session: AsyncSession, limit: int = 25, *, product_id: str | None = None
+) -> list[Lead]:
+    """The oldest LIA-passed leads not yet contacted.
+
+    ``product_id`` scopes to leads sourced for one specific idea -- required for a
+    validation run, where the response rate must measure interest in *that* idea,
+    not a global pool. Omitted (the default), this is the existing steady-state
+    behaviour: the oldest ready leads across every product.
+    """
+    stmt = select(Lead).where(Lead.lia_passed.is_(True))
+    if product_id is not None:
+        stmt = stmt.where(Lead.product_id == product_id)
+    stmt = stmt.order_by(Lead.created_at.asc()).limit(limit)
     return list((await session.execute(stmt)).scalars().all())
+
+
+async def insert_validation_signal(
+    session: AsyncSession, *, product_id: str, email: str, message: str | None = None
+) -> str | None:
+    """Record real interest in a product still in its validation stage.
+
+    ``ON CONFLICT DO NOTHING`` on ``(product_id, email)`` -- a repeat submission
+    from the same address must never inflate the count a build-or-scrap decision is
+    gated on. Returns ``None`` on a duplicate, matching this codebase's existing
+    idempotent-insert idiom (`enqueue_task`, `open_interrupt`).
+    """
+    stmt = (
+        pg_insert(ValidationSignal)
+        .values(product_id=product_id, email=email.strip().lower(), message=message)
+        .on_conflict_do_nothing(
+            index_elements=[ValidationSignal.product_id, ValidationSignal.email]
+        )
+        .returning(ValidationSignal.id)
+    )
+    row = (await session.execute(stmt)).scalar_one_or_none()
+    return str(row) if row is not None else None
+
+
+async def tally_validation_signals(session: AsyncSession, product_id: str) -> int:
+    stmt = (
+        select(func.count())
+        .select_from(ValidationSignal)
+        .where(ValidationSignal.product_id == product_id)
+    )
+    return int((await session.execute(stmt)).scalar_one())
+
+
+async def count_outreach_sent(session: AsyncSession, product_id: str) -> int:
+    stmt = (
+        select(func.count())
+        .select_from(OutreachLog)
+        .where(OutreachLog.product_id == product_id, OutreachLog.status == "sent")
+    )
+    return int((await session.execute(stmt)).scalar_one())
+
+
+async def erase_validation_signals(session: AsyncSession, email: str) -> None:
+    """GDPR Art. 17 erasure, extended to validation-stage interest submissions --
+    a prospect-initiated form fill is still personal data. Called alongside
+    `erase_lead`, not as a replacement for it (the two tables are unrelated)."""
+    normalised = email.strip().lower()
+    await session.execute(delete(ValidationSignal).where(ValidationSignal.email == normalised))
 
 
 async def record_outreach(

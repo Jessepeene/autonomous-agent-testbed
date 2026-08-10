@@ -19,6 +19,10 @@ from typing import Any, TypedDict
 from langgraph.graph import END, START, StateGraph
 
 from factory.engines.base import get_runner
+from factory.engines.compliance.graph import (
+    VALIDATION_CAPACITY_RECHECK_SECONDS,
+    ValidationCapacityExceeded,
+)
 from factory.engines.marketing.campaign import RECHECK_SECONDS, CampaignApprovalPending
 from factory.engines.marketing.deliverability import RECHECK_SECONDS as DELIVERABILITY_RECHECK
 from factory.engines.marketing.deliverability import MarketingFrozen
@@ -201,6 +205,16 @@ async def _run_engine(
                 session, task_id, not_before=datetime.now(UTC) + timedelta(seconds=RECHECK_SECONDS)
             )
         log.info("engine.awaiting_campaign_approval", engine=str(engine), task_id=task_id)
+        return {"task_id": task_id, "note": str(exc)[:500], "error": None}
+    except ValidationCapacityExceeded as exc:
+        # Not a failure: deferred without touching attempt_count, mirroring
+        # CampaignApprovalPending exactly. The retry re-enters compliance/graph.py's
+        # run(), which short-circuits past the assessor call for an already-approved
+        # idea -- capacity freeing up costs no extra LLM spend to detect.
+        recheck = timedelta(seconds=VALIDATION_CAPACITY_RECHECK_SECONDS)
+        async with session_scope(ctx.settings) as session:
+            await repository.defer_task(session, task_id, not_before=datetime.now(UTC) + recheck)
+        log.info("engine.awaiting_validation_capacity", engine=str(engine), task_id=task_id)
         return {"task_id": task_id, "note": str(exc)[:500], "error": None}
     except SandboxUnavailable as exc:
         async with session_scope(ctx.settings) as session:

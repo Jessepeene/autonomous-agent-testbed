@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from factory.engines.marketing import campaign, deliverability, outreach
@@ -10,7 +12,7 @@ from factory.logging import get_logger
 from factory.settings import EngineName
 from factory.state import repository
 from factory.state.orm import Idea, Product, Task
-from factory.state.schemas import TaskKind
+from factory.state.schemas import ProductStatus, TaskKind
 from factory.supervisor.context import FactoryContext
 
 log = get_logger(__name__)
@@ -44,19 +46,37 @@ async def _product_summary(session: AsyncSession, product_id: str | None) -> tup
     return summary, product_id
 
 
+async def _is_validating(session: AsyncSession, product_id: str | None) -> bool:
+    if not product_id:
+        return False
+    product = await session.get(Product, product_id)
+    return product is not None and product.status == ProductStatus.VALIDATING.value
+
+
 async def _harvest(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
     product_id = task.product_id or task.payload.get("product_id")
     summary, resolved_id = await _product_summary(session, product_id)
 
+    # A validation run sources roughly as many leads as it intends to email, not
+    # the steady-state default -- over-sourcing for a cheap pre-build check burns
+    # the shared, metered lead provider quota before the idea has proven out.
+    validating = await _is_validating(session, resolved_id)
+    limit = ctx.settings.validation_outreach_batch_size if validating else 50
+
     report = await leads_module.ingest(
-        ctx, session, product_summary=summary, product_id=resolved_id, task_id=task.id
+        ctx, session, product_summary=summary, product_id=resolved_id, limit=limit, task_id=task.id
     )
     if report.stored:
+        # Validation harvest uses a distinct idempotency-key namespace from the
+        # real post-launch one below (outreach:{id}:*) -- if this validation later
+        # succeeds and a genuine build goes LIVE for the same product_id, that
+        # product's real outreach must still be able to fire.
+        key_prefix = "outreach:validate" if validating else "outreach"
         await repository.enqueue_task(
             session,
             kind=TaskKind.SEND_OUTREACH,
             engine=EngineName.MARKETING,
-            idempotency_key=f"outreach:{resolved_id or 'general'}:{report.stored}",
+            idempotency_key=f"{key_prefix}:{resolved_id or 'general'}:{report.stored}",
             payload={"product_id": resolved_id},
             product_id=resolved_id,
             priority=150,
@@ -68,7 +88,16 @@ async def _outreach(ctx: FactoryContext, session: AsyncSession, task: Task) -> s
     product_id = task.product_id or task.payload.get("product_id")
     summary, resolved_id = await _product_summary(session, product_id)
 
-    candidates = await repository.leads_for_outreach(session, limit=_OUTREACH_BATCH)
+    validating = await _is_validating(session, resolved_id)
+    if validating:
+        # Scoped to leads sourced for *this* idea -- a validation's response rate
+        # must measure interest in this idea specifically, not a global pool that
+        # may be dominated by leads harvested for something else entirely.
+        candidates = await repository.leads_for_outreach(
+            session, limit=ctx.settings.validation_outreach_batch_size, product_id=resolved_id
+        )
+    else:
+        candidates = await repository.leads_for_outreach(session, limit=_OUTREACH_BATCH)
     if not candidates:
         return "marketing/outreach: no LIA-approved leads are waiting"
 
@@ -112,4 +141,23 @@ async def _outreach(ctx: FactoryContext, session: AsyncSession, task: Task) -> s
             outcome.suppressed += 1
 
     log.info("marketing.outreach_batch", summary=outcome.summary(), dry_run=ctx.dry_run)
+
+    if validating and resolved_id:
+        # Anchored here, at real send completion, not at landing-page deploy time:
+        # campaign.ensure_approval above is a human-paced, unbounded wait (it defers
+        # this whole task via CampaignApprovalPending until approved), so anchoring
+        # any earlier would silently shrink the real observation window by however
+        # long approval took.
+        not_before = datetime.now(UTC) + timedelta(days=ctx.settings.validation_window_days)
+        await repository.enqueue_task(
+            session,
+            kind=TaskKind.EVALUATE_VALIDATION,
+            engine=EngineName.DEVELOPMENT,
+            idempotency_key=f"evaluate-validation:{resolved_id}",
+            payload={"product_id": resolved_id},
+            product_id=resolved_id,
+            not_before=not_before,
+            priority=100,
+        )
+
     return f"marketing/outreach: {outcome.summary()}"

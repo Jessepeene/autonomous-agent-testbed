@@ -55,6 +55,12 @@ class TaskKind(StrEnum):
     SEND_OUTREACH = "send_outreach"
     RECONCILE_REVENUE = "reconcile_revenue"
     MAINTENANCE = "maintenance"
+    #: Builds and deploys a cheap pitch-only page for an idea, before any real MVP
+    #: work happens -- see the validation gate in development/graph.py.
+    BUILD_LANDING_PAGE = "build_landing_page"
+    #: Tallies a validation run's interest signals against a threshold and either
+    #: enqueues BUILD_MVP or retires the product.
+    EVALUATE_VALIDATION = "evaluate_validation"
 
 
 class TaskStatus(StrEnum):
@@ -67,6 +73,10 @@ class TaskStatus(StrEnum):
 
 
 class ProductStatus(StrEnum):
+    #: A landing page is live and gathering real interest signals; no MVP code
+    #: exists yet. Exits to either PLANNED (validated, proceed to build_mvp) or
+    #: RETIRED (not enough interest).
+    VALIDATING = "validating"
     PLANNED = "planned"
     BUILDING = "building"
     REVIEWING = "reviewing"

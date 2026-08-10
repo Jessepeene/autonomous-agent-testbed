@@ -93,10 +93,36 @@ class Settings(BaseSettings):
 
     # --- Operational ------------------------------------------------------------
     factory_dry_run: bool = True
+    # The domain Caddy terminates TLS for (see Caddyfile's `{$PUBLIC_DOMAIN}`).
+    # Not read anywhere else in Python until validation: a generated landing page
+    # is static HTML/JS with no build step, so it cannot read a server-side env var
+    # the way the backend can (PRODUCT_ID) -- the factory's own public base URL has
+    # to be baked into the page's fetch() target at generation time instead.
+    public_domain: str | None = None
     log_level: str = "INFO"
     api_host: str = "0.0.0.0"  # noqa: S104 - bound inside a container, published by compose
     api_port: int = 8000
     max_concurrent_builds: int = Field(default=2, ge=1, le=32)
+    # Separate from max_concurrent_builds: a validation (landing page + outreach) is
+    # deliberately much cheaper than a real MVP build and must not compete with real
+    # builds for the same capacity slots, but it still needs *some* cap -- otherwise
+    # every approved idea spawns an unbounded parallel validation, flooding the
+    # campaign-approval queue and burning the shared, metered lead provider quota
+    # before any of them prove out.
+    max_concurrent_validations: int = Field(default=2, ge=1, le=32)
+    # How long a validation's landing page stays up gathering interest signals
+    # before EVALUATE_VALIDATION judges it. Anchored to outreach-send completion,
+    # not landing-page deploy time (campaign approval is a human-paced, unbounded
+    # wait that would otherwise silently shrink the real observation window).
+    validation_window_days: int = Field(default=7, ge=1)
+    # Below this many leads contacted, a response rate is statistically meaningless
+    # -- same reasoning as deliverability_min_sample_size just above.
+    validation_min_sample_size: int = Field(default=10, ge=1)
+    validation_min_response_rate: float = Field(default=0.05, ge=0.0, le=1.0)
+    # Separate from marketing/graph.py's steady-state per-tick _OUTREACH_BATCH (15):
+    # a validation run needs a batch sized for one real decision, not the ongoing
+    # per-tick cap a live product's outreach uses.
+    validation_outreach_batch_size: int = Field(default=30, ge=1)
     compliance_min_confidence: float = Field(default=0.85, ge=0.0, le=1.0)
     # Hard ceiling on aggregate LLM spend in any trailing 24h window. `None` (the
     # default) leaves the breaker disabled — an operator opts in deliberately, since

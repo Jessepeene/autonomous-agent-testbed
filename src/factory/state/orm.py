@@ -126,6 +126,11 @@ class Product(Base):
     workspace_path: Mapped[str | None] = mapped_column(String(1000))
     deploy_url: Mapped[str | None] = mapped_column(String(1000))
     heal_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: Which Learning-Loop version of LANDING_PAGE_SYSTEM built this product's
+    #: validation page, if it went through validation. Set once, read by
+    #: EVALUATE_VALIDATION (run after HARVEST_LEADS/SEND_OUTREACH have both
+    #: intervened) to credit the right tunable_parameter_id.
+    landing_page_prompt_version: Mapped[str | None] = mapped_column(String(32))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -134,6 +139,29 @@ class Product(Base):
     )
 
     __table_args__ = (Index("ix_products_status", "status"),)
+
+
+class ValidationSignal(Base):
+    """Real-world interest captured by a validation-stage landing page, before any
+    MVP is built. Deliberately not lead-attributed -- same product-level-only
+    scoping as revenue attribution (see `OutreachLog.converted_at`); a landing-page
+    form submission has the identical "we can't prove which lead this was" problem.
+    """
+
+    __tablename__ = "validation_signals"
+
+    id: Mapped[str] = _pk()
+    product_id: Mapped[str] = mapped_column(ForeignKey("products.id"), nullable=False)
+    email: Mapped[str] = mapped_column(String(320), nullable=False)
+    message: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("product_id", "email", name="uq_validation_signals_product_email"),
+        Index("ix_validation_signals_product", "product_id"),
+    )
 
 
 class ProductLock(Base):

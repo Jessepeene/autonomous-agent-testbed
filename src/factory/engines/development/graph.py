@@ -17,13 +17,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from factory.engines.development import bug_council
 from factory.engines.development import deploy as deploy_module
 from factory.engines.development.scaffold.generator import (
+    LANDING_PAGE_SYSTEM,
     clear_workspace,
+    generate_landing_page,
     generate_scaffold,
     read_workspace,
     write_plan,
 )
 from factory.hitl import interrupts
+from factory.learning import prompts as learning_prompts
 from factory.logging import get_logger
+from factory.memory import store as memory_store
 from factory.sandbox.runner import DevOpsError, SandboxUnavailable, is_devops_error
 from factory.settings import EngineName
 from factory.state import repository
@@ -43,17 +47,26 @@ MAX_HEAL_CYCLES = 3
 
 
 async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
+    kind = TaskKind(task.kind)
+
+    # EVALUATE_VALIDATION is a pure DB decision -- no code generation, no sandbox
+    # execution -- so it must not be blocked by sandbox unavailability the way every
+    # other Development task kind correctly is.
+    if kind is TaskKind.EVALUATE_VALIDATION:
+        return await _evaluate_validation(ctx, session, task)
+
     if not ctx.sandbox.available:
         # Fail loudly rather than running model-written code on the host.
         raise SandboxUnavailable(
             "Development requires a Docker sandbox; generated code is never run on the host."
         )
 
-    kind = TaskKind(task.kind)
     if kind is TaskKind.BUILD_MVP:
         return await _build(ctx, session, task)
     if kind is TaskKind.PATCH_PRODUCT:
         return await _patch(ctx, session, task)
+    if kind is TaskKind.BUILD_LANDING_PAGE:
+        return await _build_landing_page(ctx, session, task)
     return f"development: unsupported task kind {task.kind}"
 
 
@@ -118,6 +131,156 @@ async def _build(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
             )
     except LockUnavailable:
         return f"development: product {product_id} is locked by another worker"
+
+
+_LANDING_PAGE_KEY = "factory.engines.development.scaffold.generator:LANDING_PAGE_SYSTEM"
+
+
+async def _build_landing_page(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
+    """The idea validation gate's first step: a cheap pitch page, not a real MVP.
+
+    Same lock/status shape as `_build`, same `_verify_and_ship` pipeline (same
+    sandboxed pytest + full Bug Council rigor -- the page is still public-facing
+    code handling submitted email addresses) -- the only difference is what happens
+    after a successful deploy, via `_verify_and_ship`'s `is_validation` flag: the
+    product stays VALIDATING (not LIVE) and gets a validation-scoped lead harvest,
+    not the real post-launch one.
+    """
+    idea_id = task.idea_id or str(task.payload.get("idea_id", ""))
+    idea = await _load_idea(session, idea_id) if idea_id else None
+    if idea is None:
+        return f"development: idea {idea_id!r} not found"
+
+    product_id = task.product_id or str(task.payload.get("product_id", ""))
+    if not product_id:
+        return f"development: task carried no product_id for validation of {idea_id}"
+    workspace = f"product-{product_id[:12]}"
+
+    try:
+        async with product_lock(
+            session,
+            product_id=product_id,
+            holder=EngineName.DEVELOPMENT,
+            reason="building validation page",
+        ):
+            prompt_text, prompt_version = await learning_prompts.get_prompt(
+                session, key=_LANDING_PAGE_KEY, default=LANDING_PAGE_SYSTEM
+            )
+            await repository.set_product_status(
+                session,
+                product_id,
+                ProductStatus.BUILDING,
+                workspace_path=workspace,
+                landing_page_prompt_version=prompt_version,
+            )
+            plan = await generate_landing_page(
+                ctx,
+                idea,
+                product_id=product_id,
+                system=prompt_text,
+                tunable_parameter_id=prompt_version,
+                task_id=task.id,
+            )
+            clear_workspace(workspace, ctx.settings)
+            written = write_plan(plan, workspace, ctx.settings)
+            log.info("development.validation_scaffolded", product_id=product_id, files=len(written))
+
+            return await _verify_and_ship(
+                ctx,
+                session,
+                product_id=product_id,
+                product_name=plan.product_name or idea.target_niche[:80],
+                workspace=workspace,
+                test_command=plan.test_command,
+                idea_id=idea.id,
+                task_id=task.id,
+                is_validation=True,
+            )
+    except LockUnavailable:
+        return f"development: product {product_id} is locked by another worker"
+
+
+async def _evaluate_validation(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
+    """The idea validation gate's decision point: enough real interest to build, or
+    scrap it.
+
+    Tallies distinct `validation_signals` against outreach actually sent, judged
+    against a fixed threshold that is never learned or tuned -- see
+    `learning/allowlist.py` for the one thing this stage DOES feed into the
+    Learning Loop: the landing page copy itself (`LANDING_PAGE_SYSTEM`), not the
+    bar it's judged against. A learnable bar would multiply the confound surface
+    for no clear win, same reasoning as the existing non-learnable SCORE_THRESHOLD.
+    """
+    product_id = task.product_id or str(task.payload.get("product_id", ""))
+    product = await session.get(Product, product_id) if product_id else None
+    if product is None:
+        return f"development: product {product_id!r} not found for validation evaluation"
+
+    sent = await repository.count_outreach_sent(session, product_id)
+    signals = await repository.tally_validation_signals(session, product_id)
+    response_rate = (signals / sent) if sent else 0.0
+    passed = (
+        sent >= ctx.settings.validation_min_sample_size
+        and response_rate >= ctx.settings.validation_min_response_rate
+    )
+
+    if product.landing_page_prompt_version:
+        await learning_prompts.record_outcome(
+            session,
+            tunable_parameter_id=product.landing_page_prompt_version,
+            success=passed,
+            detail={"sent": sent, "signals": signals, "response_rate": response_rate},
+            task_id=task.id,
+        )
+
+    if passed:
+        await repository.set_product_status(session, product_id, ProductStatus.PLANNED)
+        await repository.enqueue_task(
+            session,
+            kind=TaskKind.BUILD_MVP,
+            engine=EngineName.DEVELOPMENT,
+            idempotency_key=f"build:{product.idea_id}",
+            payload={"idea_id": product.idea_id, "product_id": product_id},
+            idea_id=product.idea_id,
+            product_id=product_id,
+            priority=50,
+        )
+        log.info(
+            "development.validation_passed",
+            product_id=product_id,
+            sent=sent,
+            signals=signals,
+            response_rate=response_rate,
+        )
+        return f"development: validation for {product_id} passed ({signals}/{sent}), building"
+
+    await repository.set_product_status(session, product_id, ProductStatus.RETIRED)
+    # RETIRED is shared with the heal-exhaustion retirement path (see
+    # repository.retire_product's docstring), and Product carries no reason field --
+    # this memory row is the durable trail that lets a future audit tell the two
+    # apart, matching this codebase's instinct to never leave a terminal decision
+    # unexplained.
+    await memory_store.remember(
+        session,
+        content=(
+            f"Product {product.name} did not clear the validation gate: "
+            f"{signals}/{sent} interest signals ({response_rate:.1%}), below the "
+            f"{ctx.settings.validation_min_response_rate:.1%} bar on "
+            f"{ctx.settings.validation_min_sample_size}+ sent required. Retired "
+            "without a real build ever being attempted."
+        ),
+        kind=memory_store.MemoryKind.FAILURE,
+        scope=memory_store.scope_for(product_id=product_id),
+        origin="development:evaluate_validation",
+    )
+    log.info(
+        "development.validation_failed",
+        product_id=product_id,
+        sent=sent,
+        signals=signals,
+        response_rate=response_rate,
+    )
+    return f"development: validation for {product_id} failed ({signals}/{sent}), retired"
 
 
 async def _patch(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
@@ -186,6 +349,7 @@ async def _verify_and_ship(
     test_command: str,
     idea_id: str,
     task_id: str | None = None,
+    is_validation: bool = False,
 ) -> str:
     await repository.set_product_status(session, product_id, ProductStatus.REVIEWING)
 
@@ -300,6 +464,27 @@ async def _verify_and_ship(
         )
 
     await repository.resolve_pending_heal_attempts(session, product_id, "healed")
+    if is_validation:
+        # Stays VALIDATING, not LIVE -- this is a pitch page, not a real product.
+        # A distinct idempotency-key namespace (leads:validate:*) is deliberate:
+        # the real post-launch harvest below uses leads:{product_id}, and if
+        # this validation later succeeds and a genuine BUILD_MVP goes LIVE for
+        # the same product_id, that harvest must still be able to fire -- reusing
+        # the same key would make it silently no-op via ON CONFLICT DO NOTHING.
+        await repository.set_product_status(
+            session, product_id, ProductStatus.VALIDATING, deploy_url=result.url, heal_attempts=0
+        )
+        await repository.enqueue_task(
+            session,
+            kind=TaskKind.HARVEST_LEADS,
+            engine=EngineName.MARKETING,
+            idempotency_key=f"leads:validate:{product_id}",
+            payload={"product_id": product_id},
+            product_id=product_id,
+            priority=120,
+        )
+        return f"development: validation page for {product_id} deployed to {result.url}"
+
     await repository.set_product_status(
         session, product_id, ProductStatus.LIVE, deploy_url=result.url, heal_attempts=0
     )

@@ -35,6 +35,11 @@ MIN_TRIAL_N: dict[str, int] = {
     "planner_effective_rate": 30,
     "outreach_content_pass_rate": 100,
     "outreach_conversion_rate": 200,
+    # Every approved idea now generates exactly one validation episode, so this
+    # reaches useful n faster than outreach's per-send metrics -- but still
+    # lower-volume than idea/planner episodes (one per discriminated idea/lead),
+    # hence its own, intermediate threshold rather than reusing 30.
+    "landing_page_interest_rate": 20,
 }
 _DEFAULT_MIN_N = 30
 

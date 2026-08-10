@@ -17,12 +17,31 @@ from factory.state.orm import Idea, Task
 from factory.state.schemas import (
     ComplianceStatus,
     InterruptReason,
+    ProductStatus,
     TaskKind,
     ValidatedIdea,
 )
 from factory.supervisor.context import FactoryContext
 
 log = get_logger(__name__)
+
+#: How long before a compliance task deferred on validation capacity is retried.
+#: Same order of magnitude as marketing/campaign.py's RECHECK_SECONDS -- cheap (no
+#: LLM call on retry, see the idea.status short-circuit below), so a lower bound
+#: costs nothing while avoiding a tight reschedule loop.
+VALIDATION_CAPACITY_RECHECK_SECONDS = 3600
+
+
+class ValidationCapacityExceeded(RuntimeError):
+    """Raised when an idea is approved but `max_concurrent_validations` is already
+    full.
+
+    Caught in `supervisor/graph.py::_run_engine`, which defers the task
+    (`repository.defer_task`) rather than treating it as a failure -- mirrors
+    `marketing.campaign.CampaignApprovalPending` exactly: capacity freeing up is
+    not something this task caused or can control, and must never count toward
+    `max_task_attempts`.
+    """
 
 
 async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
@@ -33,6 +52,13 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
     row = await session.get(Idea, idea_id)
     if row is None:
         return f"compliance: idea {idea_id} no longer exists"
+
+    # A retry after ValidationCapacityExceeded: the idea was already assessed and
+    # approved on a previous pass, just deferred for capacity. Skip straight to the
+    # validation-creation step rather than paying for another assessor call to
+    # re-derive the same answer.
+    if row.status == "approved":
+        return await _create_validation(session, ctx, row)
 
     idea = ValidatedIdea(
         id=row.id,
@@ -55,18 +81,7 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
 
     if assessment.status is ComplianceStatus.APPROVED:
         await repository.set_idea_status(session, idea_id, "approved")
-        # Approved ideas become build candidates. The Orchestrator's throttle decides
-        # when Development actually picks this up.
-        await repository.enqueue_task(
-            session,
-            kind=TaskKind.BUILD_MVP,
-            engine=EngineName.DEVELOPMENT,
-            idempotency_key=f"build:{idea_id}",
-            payload={"idea_id": idea_id},
-            idea_id=idea_id,
-            priority=50,
-        )
-        return f"compliance: idea {idea_id} approved and queued for build"
+        return await _create_validation(session, ctx, row)
 
     if assessment.status is ComplianceStatus.REJECTED:
         await repository.set_idea_status(session, idea_id, "rejected")
@@ -86,3 +101,39 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
         task_id=task.id,
     )
     return f"compliance: idea {idea_id} flagged for human review"
+
+
+async def _create_validation(session: AsyncSession, ctx: FactoryContext, idea_row: Idea) -> str:
+    """Approved ideas no longer go straight to a full build. A lightweight Product
+    is created (VALIDATING) so leads/outreach/interest signals have somewhere to
+    attach; BUILD_MVP only gets queued later, by EVALUATE_VALIDATION, if real
+    interest clears the bar. See the idea validation gate design:
+    development/graph.py's _build_landing_page / _evaluate_validation, and
+    marketing/graph.py's validation-aware outreach.
+
+    Capped by `max_concurrent_validations`, separate from real build capacity --
+    checked here, before anything is created, so a retry after
+    ValidationCapacityExceeded starts clean rather than needing to reconcile a
+    half-created product.
+    """
+    active = await repository.count_active_validations(session)
+    if active >= ctx.settings.max_concurrent_validations:
+        raise ValidationCapacityExceeded(
+            f"{active}/{ctx.settings.max_concurrent_validations} validations already running"
+        )
+
+    product_id = await repository.create_product(
+        session, name=idea_row.target_niche[:80], idea_id=idea_row.id
+    )
+    await repository.set_product_status(session, product_id, ProductStatus.VALIDATING)
+    await repository.enqueue_task(
+        session,
+        kind=TaskKind.BUILD_LANDING_PAGE,
+        engine=EngineName.DEVELOPMENT,
+        idempotency_key=f"validate:{idea_row.id}",
+        payload={"idea_id": idea_row.id, "product_id": product_id},
+        idea_id=idea_row.id,
+        product_id=product_id,
+        priority=50,
+    )
+    return f"compliance: idea {idea_row.id} approved and queued for validation"

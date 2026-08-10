@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response
+from pydantic import BaseModel, Field
 
 from factory.engines.finance import graph as finance_graph
 from factory.engines.finance.webhooks import SignatureInvalid, process_event, verify
@@ -148,6 +149,9 @@ async def unsubscribe(token: str) -> Response:
         if email is None:
             raise HTTPException(status_code=404, detail="unknown unsubscribe token")
         await repository.erase_lead(session, str(email))
+        # Same address may also have submitted interest on a validation landing
+        # page -- a separate table, but the same GDPR erasure obligation.
+        await repository.erase_validation_signals(session, str(email))
 
     return Response(
         content=(
@@ -156,3 +160,41 @@ async def unsubscribe(token: str) -> Response:
         ),
         media_type="text/plain",
     )
+
+
+class InterestSubmission(BaseModel):
+    #: No `pydantic[email]`/`email-validator` dependency in this project (see
+    #: `fisher_exact_less` using stdlib `math.comb` for the same reason) -- a loose
+    #: length/shape check is enough here since this only gates a build-or-scrap
+    #: decision, never sends anything to the address.
+    email: str = Field(min_length=3, max_length=320, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    message: str | None = Field(default=None, max_length=2000)
+
+
+@app.post("/interest/{product_id}")
+async def interest(product_id: str, submission: InterestSubmission) -> dict[str, Any]:
+    """Interest capture for a validation-stage landing page.
+
+    The first unauthenticated public write endpoint in this factory -- every other
+    one is either read-only or signature-verified (Stripe/Mailgun webhooks). It
+    directly feeds a spend-gating decision (`EVALUATE_VALIDATION`), so dedup by
+    email is load-bearing, not optional: `insert_validation_signal` is a unique
+    `(product_id, email)` upsert, so repeat submissions from the same address
+    (accidental or hostile) can never inflate the count. Always returns success —
+    whether the row was new or a duplicate is not information this endpoint should
+    leak back to the caller.
+    """
+    async with session_scope() as session:
+        product = await repository.get_product(session, product_id)
+        if product is None:
+            # validation_signals.product_id is a real FK -- a nonexistent id would
+            # otherwise 500 on the INSERT rather than giving the caller (or a
+            # probing scanner) a clean, unsurprising response.
+            raise HTTPException(status_code=404, detail="unknown product")
+        await repository.insert_validation_signal(
+            session,
+            product_id=product_id,
+            email=submission.email,
+            message=submission.message,
+        )
+    return {"received": True}
