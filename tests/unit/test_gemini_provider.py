@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from factory.llm.providers.gemini_provider import (
     _billable_input_tokens,
@@ -68,6 +68,34 @@ def test_strip_additional_properties_is_a_no_op_on_a_clean_schema() -> None:
     schema = {"type": "object", "properties": {"name": {"type": "string"}}}
     _strip_additional_properties(schema)
     assert schema == {"type": "object", "properties": {"name": {"type": "string"}}}
+
+
+class _ComplexItem(BaseModel):
+    """Mirrors the field mix that reproduced the live `maxItems` bug: string-length,
+    HttpUrl (`format: uri`), and numeric-range constraints together on one item."""
+
+    text: str
+    score: float
+
+
+class _ListWithMaxItems(BaseModel):
+    items: list[_ComplexItem] = Field(max_length=25)
+
+
+def test_strip_additional_properties_also_removes_max_and_min_items() -> None:
+    # Reproduced directly against the live Gemini API: maxItems/minItems on an array
+    # whose items schema is a $ref'd nested model triggers a bare
+    # `400 INVALID_ARGUMENT: Request contains an invalid argument` once that nested
+    # model is complex enough (DiscriminatedIdeas.ideas: list[ScoredIdea], 11 fields,
+    # was the real failure). Safe to drop: model_validate_json() re-enforces the same
+    # bound locally once the response comes back.
+    schema = _ListWithMaxItems.model_json_schema()
+    assert schema["properties"]["items"]["maxItems"] == 25
+
+    _strip_additional_properties(schema)
+
+    assert "maxItems" not in schema["properties"]["items"]
+    assert "minItems" not in schema["properties"]["items"]
 
 
 def test_sanitize_tools_for_gemini_strips_additional_properties_from_parameters() -> None:

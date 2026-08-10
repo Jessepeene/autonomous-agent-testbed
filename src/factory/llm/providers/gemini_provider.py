@@ -40,23 +40,38 @@ _RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504}
 
 
 def _strip_additional_properties(node: Any) -> None:
-    """Recursively delete ``additionalProperties``/``additional_properties`` in place.
+    """Recursively delete JSON Schema keywords the Gemini Developer API's structured-
+    output validator can't handle, in place.
 
-    Pydantic's ``model_json_schema()`` sets this wherever a ``dict[str, ...]``-typed
-    field appears, including inside a ``$defs`` sub-schema for a nested model. The
-    Gemini *Developer* API (as opposed to Vertex AI / Gemini Enterprise) does not
-    support this JSON Schema keyword in ``response_schema`` at all -- google-genai's
-    own schema processor hard-raises a local ``ValueError`` if it sees the key rather
-    than dropping it, and prior to that check even reaching it, this key was observed
-    passing straight through unrenamed into the literal request body, which the live
-    API then rejects with `Unknown name "additional_properties" ... Cannot find
-    field.`. Every structured-output Gemini call failed until this was stripped --
-    this was never exercised against the real API before, since every existing test
-    mocks the client.
+    - ``additionalProperties``/``additional_properties``: not supported at all outside
+      Vertex AI / Gemini Enterprise -- google-genai's own schema processor hard-raises
+      a local ``ValueError`` if it sees the key rather than dropping it, and prior to
+      that check even reaching it, this key was observed passing straight through
+      unrenamed into the literal request body, which the live API then rejects with
+      `Unknown name "additional_properties" ... Cannot find field.`. Pydantic's
+      ``model_json_schema()`` sets this wherever a ``dict[str, ...]``-typed field
+      appears, including inside a ``$defs`` sub-schema for a nested model. Every
+      structured-output Gemini call failed until this was stripped.
+    - ``maxItems``/``minItems``: triggers a bare `400 INVALID_ARGUMENT: Request
+      contains an invalid argument` -- with no further detail in the response body --
+      whenever the array's items schema (reached via a ``$ref``'d nested model) is
+      complex enough. Reproduced directly against the live API by bisection: an
+      array capped with ``maxItems`` of a one-field item works; the identical cap on
+      an array of an 11-field item (mixing string-length, ``format: uri``, and
+      numeric-range constraints -- i.e. exactly ``DiscriminatedIdeas.ideas: list
+      [ScoredIdea]``) does not, regardless of which specific fields are on the item.
+      Safe to drop: Pydantic's own ``model_validate_json()`` re-enforces the same
+      ``max_length``/``min_length`` bound locally once the response comes back, so
+      nothing downstream ever relied on Gemini enforcing it server-side.
+
+    Neither of these was ever exercised against the real API before either bug
+    surfaced: every existing test mocks the client.
     """
     if isinstance(node, dict):
         node.pop("additionalProperties", None)
         node.pop("additional_properties", None)
+        node.pop("maxItems", None)
+        node.pop("minItems", None)
         for value in node.values():
             _strip_additional_properties(value)
     elif isinstance(node, list):
@@ -65,7 +80,8 @@ def _strip_additional_properties(node: Any) -> None:
 
 
 def _sanitize_tools_for_gemini(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Strip additionalProperties from each tool's parameter schema for Gemini.
+    """Strip unsupported JSON Schema keywords from each tool's parameter schema for
+    Gemini (see ``_strip_additional_properties``).
 
     Deep-copies first: each tool dict's ``"parameters"`` is the *same shared dict
     object* as ``ToolDescriptor.input_schema`` (``registry.py``'s ``to_gemini()``
