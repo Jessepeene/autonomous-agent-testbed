@@ -340,6 +340,27 @@ task, a plain reply only resolves the interrupt, no-task_id doesn't crash,
 and the match is case-insensitive/whole-word. Deployed and confirmed healthy
 live (clean restart, no claimed/running tasks disrupted).
 
+**19. [RELIABILITY GAP, not a bug — feature, user-requested] A missed or
+forgotten Telegram escalation had no follow-up.** Companion to #18, from the
+same "what happens if X fails and nobody notices" question. `deliver_pending()`
+guarantees a message was *sent*; nothing previously guaranteed a human *saw*
+it. Fixed: a new deterministic maintenance job (`remind-stale-interrupts`,
+6h cadence, no LLM call — same family as `prune-memory`/
+`reconcile-outreach-conversions`) finds open interrupts older than
+`settings.stale_interrupt_reminder_hours` (default 12h,
+`repository.stale_open_interrupts()`) and sends **one** consolidated
+reminder for all of them, not one message per interrupt. Verified with a new
+integration suite (nothing fires for fresh interrupts, stale ones land in
+one message, a resolved interrupt is never reminded, an unavailable
+notifier no-ops) plus a dispatch test driving `engines.maintenance.run()`
+end-to-end. Full 558-test suite (unit + integration) verified clean on the
+server against the scratch database before deploying; live restart
+confirmed healthy, zero in-flight tasks disrupted. Not yet observed firing
+live — the daily spend cap (a separate, correctly-functioning circuit
+breaker) is currently paused and blocks *all* routing including maintenance
+until the rolling 24h window ages out, so the first live firing is still
+pending.
+
 ## ⚠ Operational hazard discovered this pass
 
 **Running `pytest tests/integration` against a live deployment destroys its
