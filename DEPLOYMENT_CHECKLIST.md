@@ -402,6 +402,31 @@ with many failing tests, this likely hides full tracebacks for everything but th
 last failure or two behind pytest's trailing short-summary section — a plausible
 compounding cause of "3 cycles isn't enough," separate from the cycle count itself.
 
+**21. [REAL PRODUCTION BUG, structural] Heal cycles regenerate the app blind and
+never clean up, so failed attempts leave duplicate app/backend trees.** Found live:
+a product's heal cycle got tests passing on attempt 3, but Bug Council rejected the
+deploy for having the *same* bugs duplicated across `app/main.py` and
+`backend/main.py` — two independent half-copies of the app. Root cause:
+`generate_scaffold()` is called fresh every heal cycle and every retried
+`build_mvp`, with zero visibility into files a previous attempt already wrote, and
+`write_plan()` only ever adds files — never removes any. Two generations for the
+same product routinely disagree on file layout, so nothing stopped both versions,
+and both sets of bugs, from piling up side by side. This wasn't just a quality
+problem — each blind regeneration is a full ~40-60k output-token call, and a
+mangled duplicate tree is *more* likely to fail review again, wasting the next
+cycle too.
+
+Fixed with two changes: `generate_scaffold()` now takes the existing workspace
+contents and shows them to the model as a "repair pass" (soft — depends on the
+model following the guidance); `clear_workspace()` wipes the workspace before
+`write_plan()` writes the new plan, in both `_build()` and `_patch()` (hard
+guarantee — holds regardless of model behavior). Verified with new unit tests
+(prompt inclusion/omission, file clearing, and the end-to-end case: write a plan,
+clear, write a differently-named plan, assert the old tree is gone) plus the full
+567-test suite clean on the server. No schema change, no migration. Deployed
+during a natural pause (spend cap had just re-tripped at exactly $15.01, so
+nothing was in flight).
+
 ## ⚠ Operational hazard discovered this pass
 
 **Running `pytest tests/integration` against a live deployment destroys its
