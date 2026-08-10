@@ -221,6 +221,46 @@ async def reopen_escalated_task(session: AsyncSession, task_id: str) -> bool:
     return True
 
 
+async def retire_product(session: AsyncSession, product_id: str) -> bool:
+    """A human's explicit REJECT to a heal-exhaustion escalation. Terminal -- nothing
+    else in this codebase ever moves a product out of ``retired``."""
+    product = await session.get(Product, product_id)
+    if product is None:
+        return False
+    product.status = ProductStatus.RETIRED.value
+    await session.flush()
+    return True
+
+
+async def enqueue_guided_patch(
+    session: AsyncSession, *, product_id: str, guidance: str, interrupt_id: str
+) -> str | None:
+    """A human's explicit guidance reply to a heal-exhaustion escalation -- exactly
+    one more patch attempt, not a reset of the heal budget.
+
+    ``product.heal_attempts`` is left untouched (already at ``MAX_HEAL_CYCLES``): if
+    this attempt also fails, ``_heal()`` computes ``attempts > MAX_HEAL_CYCLES`` and
+    re-escalates immediately instead of silently burning further autonomous cycles --
+    a human has to explicitly ask for each additional try, which matters because each
+    one is a real code-generation call, not a free retry. ``interrupt_id`` (unique per
+    escalation) makes the idempotency key unique per guided attempt -- a product can
+    re-escalate and be guided again more than once, and a fixed key would silently
+    swallow every attempt after the first via ON CONFLICT DO NOTHING.
+    """
+    product = await session.get(Product, product_id)
+    if product is None or product.idea_id is None:
+        return None
+    return await enqueue_task(
+        session,
+        kind=TaskKind.PATCH_PRODUCT,
+        engine=EngineName.DEVELOPMENT,
+        idempotency_key=f"patch:{product_id}:human-guided:{interrupt_id}",
+        payload={"product_id": product_id, "idea_id": product.idea_id, "healing": guidance[:6000]},
+        product_id=product_id,
+        priority=40,
+    )
+
+
 async def defer_task(session: AsyncSession, task_id: str, *, not_before: datetime) -> None:
     """Return a task to the queue without counting it as a failed attempt.
 
@@ -698,6 +738,7 @@ async def open_interrupt(
     subject: str,
     detail: str,
     task_id: str | None = None,
+    product_id: str | None = None,
 ) -> str | None:
     """Raise a human escalation. Duplicate open subjects collapse into one."""
     stmt = (
@@ -707,6 +748,7 @@ async def open_interrupt(
             subject=subject[:200],
             detail=detail,
             task_id=task_id,
+            product_id=product_id,
             status="open",
         )
         .on_conflict_do_nothing(

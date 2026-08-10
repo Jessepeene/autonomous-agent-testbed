@@ -342,6 +342,10 @@ class Interrupt(Base):
     subject: Mapped[str] = mapped_column(String(200), nullable=False)
     detail: Mapped[str] = mapped_column(Text, nullable=False)
     task_id: Mapped[str | None] = mapped_column(String(32))
+    #: Set on interrupts with no task to retry (e.g. heal-cycle exhaustion, which
+    #: resets the product to PLANNED instead of leaving one task in place) so a
+    #: human's reply can still be traced back to the product it's about.
+    product_id: Mapped[str | None] = mapped_column(String(32))
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="open")
     delivered: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     response: Mapped[str | None] = mapped_column(Text)

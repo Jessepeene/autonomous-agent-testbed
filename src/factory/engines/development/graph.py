@@ -350,6 +350,7 @@ async def _heal(
                 f"{healing[:2000]}\n\n"
                 "Reply with guidance, or REJECT to retire this product."
             ),
+            product_id=product_id,
         )
         log.warning("development.heal_exhausted", product_id=product_id, attempts=attempts)
         return f"development: product {product_id} escalated after {attempts} heal cycles"

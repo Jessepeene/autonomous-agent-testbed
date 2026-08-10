@@ -33,6 +33,11 @@ _TAG = re.compile(r"#([0-9a-f]{8})\b", re.IGNORECASE)
 #: already expect to use.
 _RETRY_WORD = re.compile(r"\bretry\b", re.IGNORECASE)
 
+#: Same idea, for a heal-exhausted product (no task_id -- see graph.py's
+#: "Reply with guidance, or REJECT to retire this product" escalation text). Any
+#: other non-empty reply is treated as guidance for one more patch attempt.
+_REJECT_WORD = re.compile(r"\breject\b", re.IGNORECASE)
+
 
 class Notifier(Protocol):
     @property
@@ -54,10 +59,16 @@ async def request(
     subject: str,
     detail: str,
     task_id: str | None = None,
+    product_id: str | None = None,
 ) -> str | None:
     """Raise an escalation. Duplicate open subjects collapse into the existing one."""
     interrupt_id = await repository.open_interrupt(
-        session, reason=reason, subject=subject, detail=detail, task_id=task_id
+        session,
+        reason=reason,
+        subject=subject,
+        detail=detail,
+        task_id=task_id,
+        product_id=product_id,
     )
     if interrupt_id is None:
         log.debug("hitl.duplicate", subject=subject)
@@ -103,6 +114,14 @@ async def collect_replies(session: AsyncSession, notifier: Notifier) -> int:
     "resolved" and the task stayed `escalated` forever, needing manual DB surgery to
     move again — the exact gap that produced every escalation this deployment ever
     needed a human for.
+
+    A reply to a heal-exhausted product's interrupt (no `task_id` — there is no
+    single task to retry, see `graph.py`'s `_heal()`) is handled separately: REJECT
+    retires the product for good, anything else is guidance for exactly one more
+    patch attempt. Before this, that escalation's own "Reply with guidance, or
+    REJECT to retire this product" text was aspirational — nothing read the reply at
+    all, and the product just sat in `PLANNED` forever regardless of what a human
+    said.
     """
     if not notifier.available:
         return 0
@@ -117,12 +136,32 @@ async def collect_replies(session: AsyncSession, notifier: Notifier) -> int:
         if target is None:
             continue
         await repository.resolve_interrupt(session, target.id, answer or "acknowledged")
-        retried = False
+        action = "none"
         if target.task_id and _RETRY_WORD.search(answer):
-            retried = await repository.reopen_escalated_task(session, target.task_id)
-        log.info("hitl.resolved", interrupt_id=target.id, retried=retried)
+            action = (
+                "retried"
+                if await repository.reopen_escalated_task(session, target.task_id)
+                else "none"
+            )
+        elif target.product_id and not target.task_id:
+            action = await _act_on_product_reply(session, target.id, target.product_id, answer)
+        log.info("hitl.resolved", interrupt_id=target.id, action=action)
         resolved += 1
     return resolved
+
+
+async def _act_on_product_reply(
+    session: AsyncSession, interrupt_id: str, product_id: str, answer: str
+) -> str:
+    if _REJECT_WORD.search(answer):
+        retired = await repository.retire_product(session, product_id)
+        return "retired" if retired else "none"
+    if not answer:
+        return "none"
+    task_id = await repository.enqueue_guided_patch(
+        session, product_id=product_id, guidance=answer, interrupt_id=interrupt_id
+    )
+    return "patch_queued" if task_id else "none"
 
 
 async def _find_open_by_tag(session: AsyncSession, tag: str) -> Interrupt | None:
