@@ -17,12 +17,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from factory.logging import get_logger
 from factory.state import repository
+from factory.state.orm import Interrupt
 from factory.state.schemas import InterruptReason
 
 log = get_logger(__name__)
 
 #: Replies are matched back to their interrupt by this tag.
 _TAG = re.compile(r"#([0-9a-f]{8})\b", re.IGNORECASE)
+
+#: A reply containing this word, to an interrupt whose task exhausted its retries,
+#: reopens that task instead of only marking the interrupt resolved -- the escalation
+#: message itself already tells a human to "retry" once they've fixed the cause (see
+#: graph.py's DevOpsError/generic-failure escalation text), so this is the word they
+#: already expect to use.
+_RETRY_WORD = re.compile(r"\bretry\b", re.IGNORECASE)
 
 
 class Notifier(Protocol):
@@ -85,7 +93,16 @@ async def deliver_pending(session: AsyncSession, notifier: Notifier) -> int:
 
 
 async def collect_replies(session: AsyncSession, notifier: Notifier) -> int:
-    """Resolve interrupts from tagged human replies."""
+    """Resolve interrupts from tagged human replies.
+
+    A reply containing "retry" to an interrupt tied to a specific task (one whose
+    detail explicitly asked for this — see `graph.py`'s escalation text) reopens
+    that task, not just the interrupt. Without this, confirming the root cause is
+    fixed had no code path back to actually retrying: the interrupt marked itself
+    "resolved" and the task stayed `escalated` forever, needing manual DB surgery to
+    move again — the exact gap that produced every escalation this deployment ever
+    needed a human for.
+    """
     if not notifier.available:
         return 0
     resolved = 0
@@ -98,19 +115,20 @@ async def collect_replies(session: AsyncSession, notifier: Notifier) -> int:
         target = await _find_open_by_tag(session, tag)
         if target is None:
             continue
-        await repository.resolve_interrupt(session, target, answer or "acknowledged")
-        log.info("hitl.resolved", interrupt_id=target)
+        await repository.resolve_interrupt(session, target.id, answer or "acknowledged")
+        retried = False
+        if target.task_id and _RETRY_WORD.search(answer):
+            retried = await repository.reopen_escalated_task(session, target.task_id)
+        log.info("hitl.resolved", interrupt_id=target.id, retried=retried)
         resolved += 1
     return resolved
 
 
-async def _find_open_by_tag(session: AsyncSession, tag: str) -> str | None:
+async def _find_open_by_tag(session: AsyncSession, tag: str) -> Interrupt | None:
     from sqlalchemy import select
 
-    from factory.state.orm import Interrupt
-
-    stmt = select(Interrupt.id).where(Interrupt.status == "open")
+    stmt = select(Interrupt).where(Interrupt.status == "open")
     for row in (await session.execute(stmt)).scalars().all():
-        if tag_for(row) == tag:
-            return str(row)
+        if tag_for(row.id) == tag:
+            return row
     return None

@@ -197,6 +197,30 @@ async def fail_task(
     return exhausted
 
 
+async def reopen_escalated_task(session: AsyncSession, task_id: str) -> bool:
+    """Give an escalated task a fresh attempt budget.
+
+    The human-facing counterpart to `fail_task`'s exhaustion path: a reply
+    confirming the root cause is fixed (see `hitl.interrupts.collect_replies`)
+    turns back into exactly the state a task is in right after `enqueue_task` --
+    nothing here is retry-specific, it is just undoing exhaustion. Only acts on a
+    task that is actually `escalated`; replying to an interrupt whose task already
+    moved on (retried some other way, or the product was retired) is a no-op, not
+    an error.
+    """
+    task = await session.get(Task, task_id)
+    if task is None or task.status != TaskStatus.ESCALATED.value:
+        return False
+    task.status = TaskStatus.PENDING.value
+    task.attempt_count = 0
+    task.claimed_by = None
+    task.lease_expires_at = None
+    task.not_before = None
+    task.last_error = None
+    await session.flush()
+    return True
+
+
 async def defer_task(session: AsyncSession, task_id: str, *, not_before: datetime) -> None:
     """Return a task to the queue without counting it as a failed attempt.
 
