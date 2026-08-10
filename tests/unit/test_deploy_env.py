@@ -14,6 +14,7 @@ import httpx
 import pytest
 
 from factory.engines.development import deploy as deploy_module
+from factory.engines.development.deploy import _collect_files
 from factory.settings import Settings
 from factory.state.schemas import CouncilResult
 
@@ -107,6 +108,26 @@ async def test_stripe_key_is_omitted_not_sent_empty_when_unconfigured(
 
     assert "STRIPE_API_KEY" not in captured["env"]
     assert captured["env"]["PRODUCT_ID"] == "prod-123"
+
+
+def test_collect_files_excludes_installed_dependencies(settings: Settings) -> None:
+    """.deps is where _verify_and_ship's install step puts dependencies for the
+    sandbox test run (development/graph.py). Vercel installs from requirements.txt
+    itself at deploy time, so shipping this tree too is both pointless and, for
+    anything non-trivial, likely to blow the file-count/size limits of a
+    no-linked-repo file-upload deployment."""
+    root = settings.workspace_root / "product-1"
+    (root / "app").mkdir(parents=True)
+    (root / "app" / "main.py").write_bytes(b"print('hi')")
+    deps_dir = root / ".deps" / "fastapi"
+    deps_dir.mkdir(parents=True)
+    (deps_dir / "__init__.py").write_bytes(b"# fastapi")
+
+    files = _collect_files("product-1", settings)
+
+    paths = {entry["file"] for entry in files}
+    assert "app/main.py" in paths
+    assert not any(path.startswith(".deps") for path in paths)
 
 
 async def test_dry_run_never_calls_the_deploy_api_at_all(

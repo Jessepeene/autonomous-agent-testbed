@@ -117,7 +117,13 @@ def write_plan(plan: ScaffoldPlan, workspace: str, settings: Settings | None = N
 def read_workspace(workspace: str, settings: Settings | None = None) -> dict[str, str]:
     """Read back the generated source for review. Skips binaries and vendored trees."""
     root = resolve_workspace(workspace, settings)
-    skip_dirs = {".git", "__pycache__", "node_modules", ".venv", "venv", "dist", "build"}
+    # .deps: where _verify_and_ship's install step puts dependencies (see graph.py)
+    # so they survive into the separate test-run container. Without this, Bug
+    # Council reviews third-party library source as if it were the model's own
+    # code -- observed live: pytest/sqlalchemy/pydantic's legitimate internal
+    # eval()/exec()/shell=True usage tripped the privilege scanner and blocked
+    # every deploy.
+    skip_dirs = {".git", "__pycache__", "node_modules", ".venv", "venv", "dist", "build", ".deps"}
     sources: dict[str, str] = {}
     for path in sorted(root.rglob("*")):
         if not path.is_file():

@@ -6,7 +6,11 @@ import pytest
 
 from factory.engines.development import bug_council
 from factory.engines.development.deploy import DeployNotPermitted, deploy_requires_approval
-from factory.engines.development.scaffold.generator import UnsafeGeneratedPath, safe_target
+from factory.engines.development.scaffold.generator import (
+    UnsafeGeneratedPath,
+    read_workspace,
+    safe_target,
+)
 from factory.llm.providers.base import Provider, ProviderUnavailable
 from factory.llm.providers.fake import FakeProvider
 from factory.state.schemas import (
@@ -177,6 +181,26 @@ def test_generated_path_inside_workspace_is_allowed(tmp_path) -> None:
     root = (tmp_path / "ws").resolve()
     root.mkdir()
     assert safe_target(root, "app/main.py").is_relative_to(root)
+
+
+def test_read_workspace_excludes_installed_dependencies_from_review(settings) -> None:
+    """.deps is where _verify_and_ship's install step puts dependencies so they
+    survive into the separate test-run container (development/graph.py). Observed
+    live: without this exclusion, Bug Council reviewed third-party library source
+    as if it were the model's own code, and pytest/sqlalchemy/pydantic's legitimate
+    internal eval()/exec()/shell=True usage tripped the privilege scanner and
+    blocked every deploy."""
+    root = settings.workspace_root / "product-1"
+    (root / "app").mkdir(parents=True)
+    (root / "app" / "main.py").write_text("print('hi')")
+    deps_dir = root / ".deps" / "sqlalchemy" / "orm"
+    deps_dir.mkdir(parents=True)
+    (deps_dir / "_orm_constructors.py").write_text("eval('1')")
+
+    sources = read_workspace("product-1", settings)
+
+    assert "app/main.py" in sources
+    assert not any(path.startswith(".deps") for path in sources)
 
 
 def test_scaffold_plan_requires_files() -> None:

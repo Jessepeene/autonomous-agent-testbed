@@ -44,7 +44,12 @@ def deploy_requires_approval(council: CouncilResult) -> None:
 
 def _collect_files(workspace: str, settings: Settings) -> list[dict[str, str]]:
     root = resolve_workspace(workspace, settings)
-    skip = {".git", "__pycache__", "node_modules", ".venv", "venv"}
+    # .deps: where _verify_and_ship's install step puts dependencies for the sandbox
+    # test run (see development/graph.py) -- Vercel installs from requirements.txt
+    # itself at deploy time, so shipping this tree too is both pointless and, for
+    # anything non-trivial, likely to blow the file-count/size limits of a
+    # no-linked-repo file-upload deployment.
+    skip = {".git", "__pycache__", "node_modules", ".venv", "venv", ".deps"}
     payload: list[dict[str, str]] = []
     for path in sorted(root.rglob("*")):
         if not path.is_file() or any(part in skip for part in path.parts):
