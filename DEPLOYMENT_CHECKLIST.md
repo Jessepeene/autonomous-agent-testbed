@@ -262,6 +262,35 @@ strip `maxItems`/`minItems` — safe, since Pydantic's own
 `model_validate_json()` re-enforces the same bound locally after the
 response comes back.
 
+**16. [REAL PRODUCTION BUG, severe] `effort_code="xhigh"` made every
+`build_mvp` attempt fail — Claude's adaptive thinking never converged.**
+First real Development run: `generate_scaffold()` failed with
+`SchemaViolation("claude returned no text content")` on all 3 attempts
+(`max_task_attempts` exhausted, task escalated). The enriched diagnostic
+added earlier this session (bug #16's own fix, see below) showed exactly
+why: `stop_reason='max_tokens'`, `content_block_types=['thinking']` —
+100% of the token budget spent thinking, zero text ever produced.
+**Doubling `max_tokens_for(CODE_GENERATION)` from 32k to 64k did not fix
+it** — the very next attempt failed identically, just at the higher
+ceiling, proving this wasn't a budget-size problem. The real cause:
+`effort_code="xhigh"` (the maximum reasoning-effort level) on Claude Sonnet
+5, which has no `budget_tokens` cap available (rejected outright by the
+API on this model) — at max effort, an open-ended "produce the complete
+MVP" instruction let thinking run indefinitely regardless of how much room
+it was given. Reproduced the identical failing call at `effort="high"`
+instead and it completed normally: 15 files, ~37k output tokens. Fixed by
+lowering both `effort_code` and `effort_review` from `xhigh` to `high` —
+review is lowered preventively (same mechanism, Bug Council just hadn't run
+yet to hit it independently), stated as such rather than claimed as
+separately proven. `max_tokens=64_000` is kept regardless, since even at
+`high` effort the real output (~37k tokens) exceeds the original 32k
+ceiling.
+
+**Preflight-relevant note**: this means a Development build can genuinely
+fail 3/3 times and escalate for reasons that have nothing to do with the
+generated code or the idea itself — worth remembering before assuming an
+escalated `build_mvp` task means a bad idea or a sandbox problem.
+
 ## ⚠ Operational hazard discovered this pass
 
 **Running `pytest tests/integration` against a live deployment destroys its
