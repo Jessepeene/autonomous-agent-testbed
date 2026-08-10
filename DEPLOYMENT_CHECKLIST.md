@@ -242,6 +242,22 @@ balance.
 - [ ] `select * from interrupts where status='open';` checked daily, staying near zero.
 - [ ] Telegram arriving as expected, not something we have to go looking for.
 
+## ⚠ Operational hazard discovered this pass
+
+**Running `pytest tests/integration` against a live deployment destroys its
+data.** There is no separate test database — `docker compose run --rm factory
+... pytest tests/integration` uses the exact same `DATABASE_URL` as the live
+`factory` service, and the integration suite drops/recreates tables as part
+of its fixture setup. Every integration-suite run this session against this
+server silently wiped whatever real dry-run state had accumulated (ideas,
+products, learning-loop weights, everything) — discovered when a `build_mvp`
+task and its parent idea vanished entirely after a routine
+verification run. Nothing of real value was lost (dry-run data only), but
+**do not run the integration suite against this server again** once real
+data matters — either provision a genuinely separate database for that
+purpose, or verify future changes with the unit suite only (isolated, no
+shared state) as this pass now does.
+
 ## Known open items (not blocking, tracked on purpose)
 
 - Untrusted-content handling for text an agent reads off the open web
