@@ -482,6 +482,39 @@ package to an old exact version. Fixed in `SYSTEM_PROMPT`
 failure quoted as a concrete example. Not yet verified against a real
 generation — will only be confirmed once a product actually builds under it.
 
+**25. [MAJOR FEATURE] The idea validation gate — landing page + real outreach
+before any MVP gets built.** Full design discussed with the user, planned via
+plan mode (see the design rationale: fixed threshold not learned, one outreach
+batch not multiple waves, validation capacity capped separately from real
+build capacity, Learning Loop integration limited to one new key so it can
+never corrupt the existing outreach/planner trial statistics), then
+implemented, tested, and deployed in one pass. Full writeup: see the commit
+message on `b8e6bd2`. Two real bugs found and fixed *during* implementation
+(not anticipated by the plan): `EVALUATE_VALIDATION` was being blocked by the
+sandbox-availability check every other Development task correctly needs but
+this pure-DB decision doesn't; `leads_for_outreach` never filtered by
+`product_id` at all, a pre-existing gap that would have made validation
+outreach measure nothing specific to the idea being tested.
+
+**Not yet observed firing live** — the daily spend cap tripped again right as
+this deployed ($20.40/$20), so no idea has been routed through the new
+`VALIDATING` path in production yet. First real exercise of this pipeline is
+still pending.
+
+**Deliberate follow-up, not built this pass:** while building the landing-page
+generator, the user flagged that neither it nor the main MVP codegen has any
+visual-design review — one code-focused LLM call writes the HTML/CSS directly,
+with Bug Council checking security/quality, never look-and-feel. This matters
+more for the landing page specifically, since a bad-looking page could produce
+a false "no interest" signal for a genuinely good idea. Applied a cheap
+mitigation (strengthened `LANDING_PAGE_SYSTEM`'s visual-polish requirements,
+free — same call). The user's direction for the real fix: a new `DESIGNER`
+role added to the fixed role catalogue (`agents/roles.py` — currently
+`RESEARCHER`/`ANALYST`/`REPAIR_ENGINEER`/`AUDITOR`/`LEAD_SCOUT`), spawnable by
+the orchestrator's existing model-driven deliberation when it judges a page
+needs design attention — not a hardcoded pipeline step. Real, separate work on
+the same scale as this pass; not started.
+
 ## ⚠ Operational hazard discovered this pass
 
 **Running `pytest tests/integration` against a live deployment destroys its
@@ -536,6 +569,21 @@ their own fixture, not a real regression. **If a full-suite run against scratch
 shows failures, re-run the specific failing files alone before concluding
 anything is actually broken** — this pass's own PR (`0008`) was nearly
 misdiagnosed this way before isolating each failure confirmed it was clean.
+
+**Fourth hazard, found writing `/interest` endpoint tests:** `fastapi
+.testclient.TestClient` is sync and drives the app from a second,
+internally-managed event loop (anyio's `BlockingPortal`). Mixed with a test
+file's own async DB fixture, this crashed with an asyncpg cross-loop/
+closed-loop error on connection cleanup — reproduced identically on **both**
+Windows and Linux, so it is not the Windows-ProactorEventLoop hazard above
+despite looking similar at a glance. Fix: use `httpx.AsyncClient(transport=
+httpx.ASGITransport(app=app), ...)` instead, which stays on the single
+already-running event loop. Also needed the same `_reset_global_engine`
+autouse fixture (`db_module.dispose_engine()` after each test) already used
+in `test_scheduler_integration.py`/`test_interrupt_subject_uniqueness.py` —
+any endpoint that calls `session_scope()` internally (i.e. anything in
+`api/app.py`) draws on the same process-wide cached engine those files were
+already guarding against connection leakage from.
 
 ## Known open items (not blocking, tracked on purpose)
 
