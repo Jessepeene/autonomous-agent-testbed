@@ -242,6 +242,26 @@ balance.
 - [ ] `select * from interrupts where status='open';` checked daily, staying near zero.
 - [ ] Telegram arriving as expected, not something we have to go looking for.
 
+**15. [REAL PRODUCTION BUG, severe] Gemini rejects `maxItems`/`minItems` on an
+array of complex items — every `discriminate()` call was failing.** Surfaced
+as a bare `400 INVALID_ARGUMENT: Request contains an invalid argument`
+mid-way through verifying the `adoption_ease` change, with no further detail
+in the response body. Bisected directly against the live API (not guessed):
+an array capped with `maxItems` works fine when its items are a simple
+one-field model; the identical cap on an array of an 11-field item — mixing
+string-length, `HttpUrl` (`format: uri`), and numeric-range constraints,
+exactly `DiscriminatedIdeas.ideas: list[ScoredIdea]` — fails every time,
+confirmed independent of the `adoption_ease` change by reproducing the same
+failure with the *original* 3-dimension `ScoredIdea` and with a synthetic
+item carrying the same field-type mix under generic names. This predates
+today entirely; it was invisible before because every existing test mocks
+the client, and `generate_ideas()`'s simpler 3-field `GeneratedIdea` schema
+doesn't trip it, only `discriminate()`'s. Fixed by extending the existing
+Gemini schema sanitizer (already stripping `additionalProperties`) to also
+strip `maxItems`/`minItems` — safe, since Pydantic's own
+`model_validate_json()` re-enforces the same bound locally after the
+response comes back.
+
 ## ⚠ Operational hazard discovered this pass
 
 **Running `pytest tests/integration` against a live deployment destroys its
