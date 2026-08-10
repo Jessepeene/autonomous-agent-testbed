@@ -28,6 +28,7 @@ def _idea(**overrides: Any) -> ScoredIdea:
         "pain_severity": 0.8,
         "willingness_to_pay": 0.7,
         "build_feasibility": 0.6,
+        "adoption_ease": 0.8,
     }
     base.update(overrides)
     return ScoredIdea(**base)

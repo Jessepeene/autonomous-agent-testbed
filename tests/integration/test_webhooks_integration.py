@@ -49,6 +49,7 @@ async def _make_product(session: AsyncSession, name: str) -> str:
         pain_severity=0.8,
         willingness_to_pay=0.7,
         build_feasibility=0.6,
+        adoption_ease=0.8,
     )
     idea_id = await repository.upsert_idea(session, idea)
     assert idea_id is not None
@@ -72,9 +73,7 @@ async def test_revenue_is_attributed_to_the_product_that_generated_it(
     product_id = await _make_product(session, "Reconciliation Assistant")
     await session.commit()
 
-    outcome = await process_event(
-        session, _revenue_event("evt_1", client_reference_id=product_id)
-    )
+    outcome = await process_event(session, _revenue_event("evt_1", client_reference_id=product_id))
     await session.commit()
 
     assert outcome.handled is True

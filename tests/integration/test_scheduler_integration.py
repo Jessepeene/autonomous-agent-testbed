@@ -95,6 +95,7 @@ async def _make_live_product(session: AsyncSession, name: str) -> str:
         pain_severity=0.8,
         willingness_to_pay=0.7,
         build_feasibility=0.6,
+        adoption_ease=0.8,
     )
     idea_id = await repository.upsert_idea(session, idea)
     assert idea_id is not None

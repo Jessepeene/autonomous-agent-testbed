@@ -54,6 +54,7 @@ class WeightsCandidate(Contract):
     pain_severity: Annotated[float, Field(ge=0.0, le=1.0)]
     willingness_to_pay: Annotated[float, Field(ge=0.0, le=1.0)]
     build_feasibility: Annotated[float, Field(ge=0.0, le=1.0)]
+    adoption_ease: Annotated[float, Field(ge=0.0, le=1.0)]
     rationale: str = Field(min_length=20, max_length=1000)
 
 
@@ -133,6 +134,7 @@ async def propose_mutations(ctx: FactoryContext, session: AsyncSession, task: Ta
                     "pain_severity": weights_candidate.pain_severity,
                     "willingness_to_pay": weights_candidate.willingness_to_pay,
                     "build_feasibility": weights_candidate.build_feasibility,
+                    "adoption_ease": weights_candidate.adoption_ease,
                 }
             else:
                 prompt_candidate = await ctx.llm.parse(

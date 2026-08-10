@@ -145,9 +145,10 @@ class ScoredIdea(Contract):
     #: as before. `discovery/graph.py` is the only caller that fetches tuned weights
     #: and calls `weighted_score()` directly instead.
     _DEFAULT_WEIGHTS: ClassVar[dict[str, float]] = {
-        "pain_severity": 0.4,
-        "willingness_to_pay": 0.4,
-        "build_feasibility": 0.2,
+        "pain_severity": 0.3,
+        "willingness_to_pay": 0.3,
+        "adoption_ease": 0.25,
+        "build_feasibility": 0.15,
     }
 
     problem_statement: str = Field(min_length=20, max_length=800)
@@ -157,6 +158,15 @@ class ScoredIdea(Contract):
     pain_severity: Annotated[float, Field(ge=0.0, le=1.0)]
     willingness_to_pay: Annotated[float, Field(ge=0.0, le=1.0)]
     build_feasibility: Annotated[float, Field(ge=0.0, le=1.0)]
+    #: How easily a buyer in this niche can actually adopt self-serve software,
+    #: independent of pain or price -- 1.0 means they already discover and buy
+    #: similar tools online unassisted; 0.0 means the industry's procurement
+    #: culture, compliance sign-off, or low tech adoption makes a self-serve sale
+    #: implausible regardless of how strong the other three scores are (construction,
+    #: healthcare, and government are common low-scoring examples). Required, not
+    #: defaulted, like the other three score dimensions: it needs the discriminator
+    #: to actually reason about it for every idea, not silently skip it.
+    adoption_ease: Annotated[float, Field(ge=0.0, le=1.0)]
     rejection_reason: str | None = None
     #: Self-serve / PLG constraint inputs (see `discovery.score.passes_plg_constraint`).
     #: Defaulted rather than required so every existing caller that predates this
@@ -178,7 +188,8 @@ class ScoredIdea(Contract):
         return round(
             (self.pain_severity * weights.get("pain_severity", 0.0))
             + (self.willingness_to_pay * weights.get("willingness_to_pay", 0.0))
-            + (self.build_feasibility * weights.get("build_feasibility", 0.0)),
+            + (self.build_feasibility * weights.get("build_feasibility", 0.0))
+            + (self.adoption_ease * weights.get("adoption_ease", 0.0)),
             4,
         )
 
