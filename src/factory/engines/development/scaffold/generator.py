@@ -8,6 +8,7 @@ rejected write rather than an exfiltrated credential.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from factory.logging import get_logger
@@ -65,7 +66,16 @@ at all are the *environment*, not your code — rewriting application logic will
 fix a missing binary or a host permission. If everything you are shown is one of \
 these, say so plainly in your summary rather than guessing at a code change: change \
 nothing risky, and if a dependency genuinely needs pinning to a specific version or \
-platform to avoid the failure, do only that.\
+platform to avoid the failure, do only that.
+
+If you are shown the CURRENT CONTENTS of an existing workspace, this is a repair
+pass on real, already-written code — not a blank slate. Keep every existing file
+path and module name exactly as given wherever the fix allows it, and edit those
+files in place. Do not invent a second, differently-named copy of the app (e.g.
+a new "backend/" tree alongside an existing "app/") to work around a problem —
+that produces two divergent implementations of the same bugs, which is worse than
+either one. Only add a new file for functionality that genuinely does not exist
+yet.\
 """
 
 
@@ -74,20 +84,43 @@ class UnsafeGeneratedPath(ValueError):
 
 
 async def generate_scaffold(
-    ctx: FactoryContext, idea: ValidatedIdea, *, task_id: str | None = None
+    ctx: FactoryContext,
+    idea: ValidatedIdea,
+    *,
+    task_id: str | None = None,
+    existing_files: dict[str, str] | None = None,
 ) -> ScaffoldPlan:
+    """``existing_files`` (from `read_workspace`) turns this into a repair pass:
+    the model sees exactly what is already on disk instead of regenerating a whole
+    MVP blind to its own previous attempt. Without this, two generations for the
+    same product routinely disagree on file layout (one calls its package `app/`,
+    the next `backend/`), and since `write_plan` only ever adds files, both
+    versions -- and both sets of bugs -- pile up in the workspace side by side.
+    Observed live: Bug Council rejected a build for exactly this, having found the
+    same N+1 query bug duplicated across `app/main.py` and `backend/main.py`.
+    """
+    prompt = (
+        f"Validated idea:\n"
+        f"- problem: {idea.problem_statement}\n"
+        f"- target niche: {idea.target_niche}\n"
+        f"- monetization: {idea.monetization_hypothesis}\n"
+        f"- evidence: {idea.source_url}\n\n"
+    )
+    if existing_files:
+        prompt += (
+            "CURRENT CONTENTS of the workspace (this is a repair pass -- see the "
+            "system prompt for how to treat these):\n\n"
+            + "\n\n".join(
+                f"--- {path} ---\n{contents}" for path, contents in existing_files.items()
+            )
+            + "\n\n"
+        )
+    prompt += "Produce the complete MVP."
     return await ctx.llm.parse(
         ScaffoldPlan,
         task_type=TaskType.CODE_GENERATION,
         system=SYSTEM_PROMPT,
-        prompt=(
-            f"Validated idea:\n"
-            f"- problem: {idea.problem_statement}\n"
-            f"- target niche: {idea.target_niche}\n"
-            f"- monetization: {idea.monetization_hypothesis}\n"
-            f"- evidence: {idea.source_url}\n\n"
-            "Produce the complete MVP."
-        ),
+        prompt=prompt,
         engine=EngineName.DEVELOPMENT,
         task_id=task_id,
     )
@@ -99,6 +132,27 @@ def safe_target(root: Path, relative: str) -> Path:
     if candidate == root or root not in candidate.parents:
         raise UnsafeGeneratedPath(f"generated path escapes workspace: {relative!r}")
     return candidate
+
+
+def clear_workspace(workspace: str, settings: Settings | None = None) -> None:
+    """Wipe everything under the workspace root before `write_plan` writes a fresh
+    scaffold.
+
+    `write_plan` only ever adds files -- it never removes ones that existed from a
+    previous attempt. Every heal cycle, and every `build_mvp` retried after a crash
+    (both reuse the same product-scoped workspace directory), call `generate_scaffold`
+    again, and two generations rarely agree on exact file layout. Without clearing
+    first, stale files from the previous attempt silently persist alongside the new
+    ones regardless of how well the model reuses the existing structure -- this is
+    the deterministic guarantee; the prompt guidance in `generate_scaffold` is the
+    complementary attempt to avoid needing it in the first place.
+    """
+    root = resolve_workspace(workspace, settings)
+    for child in root.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink(missing_ok=True)
 
 
 def write_plan(plan: ScaffoldPlan, workspace: str, settings: Settings | None = None) -> list[str]:

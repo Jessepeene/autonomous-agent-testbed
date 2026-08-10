@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from factory.engines.development import bug_council
 from factory.engines.development import deploy as deploy_module
 from factory.engines.development.scaffold.generator import (
+    clear_workspace,
     generate_scaffold,
     read_workspace,
     write_plan,
@@ -98,6 +99,10 @@ async def _build(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
                 workspace_path=workspace,
             )
             plan = await generate_scaffold(ctx, idea, task_id=task.id)
+            # A retried build_mvp task (after a crash mid-attempt) reuses this same
+            # product-scoped workspace -- clear it so a stale partial write from the
+            # earlier attempt can't survive alongside this one.
+            clear_workspace(workspace, ctx.settings)
             written = write_plan(plan, workspace, ctx.settings)
             log.info("development.scaffolded", product_id=product_id, files=len(written))
 
@@ -136,6 +141,7 @@ async def _patch(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
             reason="patching product",
         ):
             await repository.set_product_status(session, product_id, ProductStatus.PATCHING)
+            existing = read_workspace(workspace, ctx.settings)
             plan = await generate_scaffold(
                 ctx,
                 idea.model_copy(
@@ -147,7 +153,13 @@ async def _patch(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
                     }
                 ),
                 task_id=task.id,
+                existing_files=existing,
             )
+            # Clear *after* generating (so the model saw the old files) and *before*
+            # writing (so nothing from the previous attempt survives alongside the
+            # new plan) -- see clear_workspace's docstring for the failure this
+            # prevents: two divergent, independently-buggy copies of the app.
+            clear_workspace(workspace, ctx.settings)
             write_plan(plan, workspace, ctx.settings)
 
             return await _verify_and_ship(
