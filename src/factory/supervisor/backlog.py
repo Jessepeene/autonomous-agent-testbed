@@ -127,6 +127,19 @@ CATALOGUE: tuple[MaintenanceItem, ...] = (
         engine=EngineName.SUPERVISOR,
         cadence_hours=24,
     ),
+    # --- HITL follow-through -----------------------------------------------------
+    # `deliver_pending` guarantees a stale escalation was *sent*, not that a human
+    # *saw* it. Deterministic, no LLM call -- handled by a dedicated branch in
+    # `engines/maintenance.py::run()`.
+    MaintenanceItem(
+        slug="remind-stale-interrupts",
+        objective=(
+            "Send one consolidated reminder for every open interrupt that has been "
+            "waiting for a human reply past the staleness threshold."
+        ),
+        engine=EngineName.SUPERVISOR,
+        cadence_hours=6,
+    ),
 )
 
 

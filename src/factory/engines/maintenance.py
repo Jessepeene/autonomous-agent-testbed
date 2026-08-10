@@ -64,6 +64,14 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
             f"memory/prune: {prune_report.pruned} evicted across "
             f"{prune_report.scopes_checked} scope(s)"
         )
+    if slug == "remind-stale-interrupts":
+        from datetime import timedelta
+
+        from factory.hitl.interrupts import remind_stale
+
+        threshold = timedelta(hours=ctx.settings.stale_interrupt_reminder_hours)
+        count = await remind_stale(session, ctx.notifier, older_than=threshold)
+        return f"hitl/remind: {count} stale interrupt(s) reminded"
 
     objective = str(task.payload.get("objective", "Improve the factory."))
     role = ROLE_BY_SLUG.get(slug, RoleName.ANALYST)

@@ -11,6 +11,7 @@ answered at 09:00 survives every reboot in between.
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -132,3 +133,37 @@ async def _find_open_by_tag(session: AsyncSession, tag: str) -> Interrupt | None
         if tag_for(row.id) == tag:
             return row
     return None
+
+
+async def remind_stale(session: AsyncSession, notifier: Notifier, *, older_than: timedelta) -> int:
+    """Send one consolidated nudge for interrupts a human has had time to see but not
+    answered.
+
+    `deliver_pending` only guarantees the *first* message went out; it does not
+    guarantee a human read it. A reminder that fires per-interrupt would spam one
+    message per stale escalation every cadence window it stays open -- instead this
+    sends exactly one summary listing all of them, so a factory with several stale
+    escalations produces one Telegram message, not several.
+    """
+    if not notifier.available:
+        return 0
+    stale = await repository.stale_open_interrupts(session, older_than=older_than)
+    if not stale:
+        return 0
+    lines = [f"#{tag_for(row.id)} ({_age(row.created_at)} old): {row.subject}" for row in stale]
+    text = (
+        f"⏰ {len(stale)} escalation(s) still waiting on a reply:\n\n"
+        + "\n".join(lines)
+        + '\n\nReply with: #<tag> <your answer> (include "retry" to reopen a stuck task)'
+    )
+    await notifier.send(text)
+    log.info("hitl.reminded", count=len(stale))
+    return len(stale)
+
+
+def _age(created_at: datetime) -> str:
+    delta = datetime.now(UTC) - created_at
+    hours = int(delta.total_seconds() // 3600)
+    if hours < 24:
+        return f"{hours}h"
+    return f"{hours // 24}d"

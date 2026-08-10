@@ -131,6 +131,11 @@ class Settings(BaseSettings):
     compliance_batch_size: int = Field(default=1, ge=1, le=10)
     max_task_attempts: int = Field(default=3, ge=1, le=10)
     task_lease_seconds: int = Field(default=900, ge=30)
+    # How long an open interrupt waits with no reply before the "remind-stale-
+    # interrupts" maintenance job nudges again. Deliberately longer than the
+    # maintenance item's own 6h cadence, so a fresh escalation gets its normal
+    # delivery first and this only fires once the human has clearly had time to see it.
+    stale_interrupt_reminder_hours: int = Field(default=12, ge=1)
     discovery_interval_seconds: int = Field(default=6 * 3600, ge=60)
     supervisor_tick_seconds: int = Field(default=15, ge=1)
     # The model is consulted on this cadence even when the deterministic route is

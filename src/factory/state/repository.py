@@ -723,6 +723,22 @@ async def undelivered_interrupts(session: AsyncSession) -> list[Interrupt]:
     return list((await session.execute(stmt)).scalars().all())
 
 
+async def stale_open_interrupts(session: AsyncSession, *, older_than: timedelta) -> list[Interrupt]:
+    """Interrupts still waiting on a human past ``older_than`` since they were raised.
+
+    Delivery already happened by the time something qualifies here (see
+    ``undelivered_interrupts``) — this is for the case the human missed or forgot the
+    original message, not the case the message never arrived.
+    """
+    cutoff = _now() - older_than
+    stmt = (
+        select(Interrupt)
+        .where(Interrupt.status == "open", Interrupt.created_at < cutoff)
+        .order_by(Interrupt.created_at.asc())
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
 async def mark_interrupt_delivered(session: AsyncSession, interrupt_id: str) -> None:
     await session.execute(
         update(Interrupt).where(Interrupt.id == interrupt_id).values(delivered=True)
