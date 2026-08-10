@@ -75,6 +75,13 @@ class FactorySnapshot:
     pending_by_engine: dict[str, int]
     active_dev_products: int
     max_concurrent_builds: int
+    #: Repairs of products *already* counted in `active_dev_products` -- claiming one
+    #: does not admit a new product into the pipeline, so the capacity gate must never
+    #: hold these back the way it holds back a fresh `build_mvp`. Without this
+    #: distinction, a product stuck in PATCHING keeps `dev_at_capacity` true forever,
+    #: which blocks the very patch task that would resolve PATCHING: a permanent
+    #: deadlock, observed live.
+    pending_patch_tasks: int
     approved_ideas_waiting: int
     pending_ideas: int
     open_interrupts: int

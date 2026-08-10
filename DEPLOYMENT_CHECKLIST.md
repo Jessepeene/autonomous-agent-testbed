@@ -291,6 +291,33 @@ fail 3/3 times and escalate for reasons that have nothing to do with the
 generated code or the idea itself — worth remembering before assuming an
 escalated `build_mvp` task means a bad idea or a sandbox problem.
 
+**17. [REAL PRODUCTION BUG, severe, structural] Development could permanently
+deadlock on its own in-flight work.** Found live, mid-dry-run, not from a
+test: both products in flight got stuck in `PATCHING` with their
+`patch_product` tasks sitting `pending`, unclaimed, while the orchestrator
+repeated `HOLD_DISCOVERY` every single tick for over an hour. Root cause:
+`orchestrator.decide()`'s capacity gate (`if snapshot.dev_at_capacity:
+...`) blocked *all* routing to Development whenever
+`active_dev_products >= max_concurrent_builds` — with no distinction
+between admitting a **new** product (correctly throttled) and continuing
+repair work on a product **already counted** in that capacity (incorrectly
+blocked). Since a product cannot leave `PATCHING` without its patch task
+running, and the patch task could never be routed to because the product
+being `PATCHING` was itself the reason capacity read as full, this was a
+permanent, self-sustaining deadlock — dry-run or live, this would have
+silently stalled Development forever the first time two products needed
+repair at once, without ever raising an interrupt (no error occurred; the
+system just never chose to make progress).
+
+Fixed by adding `pending_patch_tasks` to the routing snapshot and checking
+it first, ahead of even Marketing: a queued repair for an already-admitted
+product now always routes to Development regardless of capacity, while a
+**new** `build_mvp` still waits its turn — verified safe by task priority
+alone (`patch_product`=40, `build_mvp`=50; lower claims first), not just by
+the new capacity carve-out. Verified live: `orchestrator.capacity_prefers_repair`
+fired on the very first tick after deploying, and Development immediately
+claimed the first queued patch task instead of holding.
+
 ## ⚠ Operational hazard discovered this pass
 
 **Running `pytest tests/integration` against a live deployment destroys its

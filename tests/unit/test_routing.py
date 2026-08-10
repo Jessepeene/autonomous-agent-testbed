@@ -29,6 +29,7 @@ def _snapshot(**overrides: Any) -> routing.FactorySnapshot:
         "pending_by_engine": {"discovery": 5},
         "active_dev_products": 0,
         "max_concurrent_builds": 2,
+        "pending_patch_tasks": 0,
         "approved_ideas_waiting": 3,
         "pending_ideas": 10,
         "open_interrupts": 0,

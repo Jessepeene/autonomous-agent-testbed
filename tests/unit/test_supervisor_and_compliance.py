@@ -39,6 +39,7 @@ def _snapshot(**overrides: Any) -> orchestrator.FactorySnapshot:
         "pending_by_engine": {"discovery": 5},
         "active_dev_products": 0,
         "max_concurrent_builds": 2,
+        "pending_patch_tasks": 0,
         "approved_ideas_waiting": 3,
         "pending_ideas": 10,
         "open_interrupts": 0,
@@ -136,6 +137,52 @@ async def test_dev_at_capacity_with_no_marketing_work_still_holds_discovery(
     decision = await orchestrator.decide(None, ctx)  # type: ignore[arg-type]
 
     assert decision.next_action is NextAction.HOLD_DISCOVERY
+
+
+async def test_a_pending_patch_task_routes_to_development_even_at_capacity(
+    ctx: FactoryContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for a real deadlock: a product stuck in PATCHING is already
+    counted in active_dev_products, so claiming its own patch task cannot admit a
+    new product into the pipeline. Blocking it anyway (the old behavior) meant the
+    product could never leave PATCHING, which kept dev_at_capacity true forever --
+    observed live as HOLD_DISCOVERY repeating every tick with the patch task sitting
+    pending indefinitely."""
+
+    async def fake_snapshot(session: Any, context: Any) -> orchestrator.FactorySnapshot:
+        return _snapshot(
+            active_dev_products=2,
+            max_concurrent_builds=2,
+            pending_by_engine={"development": 1},
+            pending_patch_tasks=1,
+        )
+
+    monkeypatch.setattr(orchestrator, "build_snapshot", fake_snapshot)
+    decision = await orchestrator.decide(None, ctx)  # type: ignore[arg-type]
+
+    assert decision.next_action is NextAction.ROUTE
+    assert decision.target_engine is EngineName.DEVELOPMENT
+
+
+async def test_a_pending_patch_task_outranks_marketing_at_capacity(
+    ctx: FactoryContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fixing a live product outranks starting one *and* outranks selling one --
+    the patch check runs before the marketing check for exactly this reason."""
+
+    async def fake_snapshot(session: Any, context: Any) -> orchestrator.FactorySnapshot:
+        return _snapshot(
+            active_dev_products=2,
+            max_concurrent_builds=2,
+            pending_by_engine={"development": 1, "marketing": 3},
+            pending_patch_tasks=1,
+        )
+
+    monkeypatch.setattr(orchestrator, "build_snapshot", fake_snapshot)
+    decision = await orchestrator.decide(None, ctx)  # type: ignore[arg-type]
+
+    assert decision.next_action is NextAction.ROUTE
+    assert decision.target_engine is EngineName.DEVELOPMENT
 
 
 # --- financial circuit breaker ------------------------------------------------

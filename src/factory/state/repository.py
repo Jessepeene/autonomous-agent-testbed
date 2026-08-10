@@ -227,10 +227,17 @@ async def count_active_dev_tasks(session: AsyncSession) -> int:
     return int((await session.execute(stmt)).scalar_one())
 
 
-async def count_pending_tasks(session: AsyncSession, engine: EngineName | None = None) -> int:
+async def count_pending_tasks(
+    session: AsyncSession,
+    engine: EngineName | None = None,
+    *,
+    kind: TaskKind | None = None,
+) -> int:
     stmt = select(func.count()).select_from(Task).where(Task.status == TaskStatus.PENDING.value)
     if engine is not None:
         stmt = stmt.where(Task.engine == engine.value)
+    if kind is not None:
+        stmt = stmt.where(Task.kind == kind.value)
     return int((await session.execute(stmt)).scalar_one())
 
 
