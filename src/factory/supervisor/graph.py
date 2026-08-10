@@ -141,7 +141,7 @@ async def _run_engine(
             await interrupts.request(
                 session,
                 reason=InterruptReason.LEGAL_UNCERTAINTY,
-                subject=f"{engine.value} task refused by safety classifier",
+                subject=f"{engine.value} task {task_id} refused by safety classifier",
                 detail=(
                     f"Task {task_id} ({task_kind}) was declined "
                     f"(category={exc.category}). A human decision is needed on whether "
@@ -165,7 +165,10 @@ async def _run_engine(
                 await interrupts.request(
                     session,
                     reason=InterruptReason.MISSING_CREDENTIAL,
-                    subject=f"{engine.value} hit a host/environment failure, not a code bug",
+                    subject=(
+                        f"{engine.value} task {task_id} hit a host/environment "
+                        "failure, not a code bug"
+                    ),
                     detail=(
                         f"Task {task_id} ({task_kind}) failed "
                         f"{ctx.settings.max_task_attempts} times with what looks like an "
@@ -222,7 +225,7 @@ async def _run_engine(
                 await interrupts.request(
                     session,
                     reason=InterruptReason.LEGAL_UNCERTAINTY,
-                    subject=f"{engine.value} task exhausted its retries",
+                    subject=f"{engine.value} task {task_id} exhausted its retries",
                     detail=(
                         f"Task {task_id} ({task_kind}) failed "
                         f"{ctx.settings.max_task_attempts} times. Last error: {exc!r}"
@@ -277,12 +280,18 @@ async def _budget_paused(state: SupervisorState, *, ctx: FactoryContext) -> Supe
 
 
 async def _escalate(state: SupervisorState, *, ctx: FactoryContext) -> SupervisorState:
+    # The subject carries the rationale (truncated), not a fixed string: interrupts
+    # dedupe on (reason, subject, status), so a second, genuinely different
+    # escalation with the same fixed subject would have silently collided with an
+    # already-open, unrelated one and never reached Telegram at all -- the same bug
+    # class as the generic per-engine task-failure subjects above.
+    rationale = state.get("rationale", "no rationale supplied")
     async with session_scope(ctx.settings) as session:
         await interrupts.request(
             session,
             reason=InterruptReason.LEGAL_UNCERTAINTY,
-            subject="Supervisor requested human review",
-            detail=state.get("rationale", "no rationale supplied"),
+            subject=f"Supervisor requested human review: {rationale[:120]}",
+            detail=rationale,
         )
     return {"note": "escalated"}
 

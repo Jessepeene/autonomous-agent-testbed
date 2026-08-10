@@ -32,7 +32,8 @@ The MVP must include, as actual files with real contents:
   PRODUCT_ID environment variable, read at request time. Never hard-code it, never
   omit it — it is the only way a payment can be attributed back to this product.
 - A pytest suite covering the core feature and the auth boundary.
-- requirements.txt pinned to major versions, and a README with run instructions.
+- requirements.txt with a minimum-version lower bound per package (e.g. \
+"pydantic>=2.9,<3"), and a README with run instructions.
 
 Hard constraints:
 - Every file must be complete. No TODOs, no placeholders, no "implement this".
@@ -43,6 +44,14 @@ leading slash and no "..".
 - No unbounded loops, no unbounded recursion, no retry loop without a maximum, and \
 no sleep longer than 5 seconds. This code runs unattended in a metered container.
 - test_command must be a single shell command that runs the suite.
+- requirements.txt runs on Python 3.13 in a container with no compiler toolchain and \
+no writable-and-executable temp directory (/tmp is mounted noexec). Never pin an \
+exact old version of a package with a compiled extension (pydantic, cryptography, \
+orjson, and similar) — an old exact pin can predate the prebuilt wheel for Python \
+3.13, which forces pip to compile from source, which cannot succeed here. Observed \
+live: "pydantic==2.6.4" forced a from-source build of pydantic-core that failed \
+trying to install a Rust toolchain. Use a lower-bound range instead, so pip resolves \
+a release recent enough to ship a Python 3.13 wheel.
 
 Request/response validation:
 - Define an explicit Pydantic model for every request body and response — never a \
