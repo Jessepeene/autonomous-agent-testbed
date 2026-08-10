@@ -183,8 +183,18 @@ async def _verify_and_ship(
     # real failure now surfaces (as a devops escalation or a heal cycle, whichever
     # it actually is) instead of silently leaving requirements uninstalled and
     # producing a confusing downstream test failure.
+    #
+    # --target=/workspace/.deps, not a bare install: this and the test run below are
+    # two *separate* `docker run` invocations (kept separate deliberately, so a
+    # dependency-install failure and a test failure get distinct devops-error
+    # detail). Nothing outside the bind-mounted /workspace survives between them --
+    # a plain install lands in the ephemeral container's own filesystem (or, once
+    # $HOME pointed at the tmpfs, in a tmpfs that dies with that container) and is
+    # gone by the time the test container starts. Installing into /workspace and
+    # pointing PYTHONPATH there for the test run is what makes the install actually
+    # visible to it.
     install = await ctx.sandbox.execute(
-        "python -m pip install --quiet --no-input -r requirements.txt",
+        "python -m pip install --quiet --no-input --target=/workspace/.deps -r requirements.txt",
         workspace=workspace,
         network=True,
     )
@@ -213,7 +223,20 @@ async def _verify_and_ship(
             category="dependency_failure",
         )
 
-    tests = await ctx.sandbox.execute(test_command, workspace=workspace)
+    # PATH is extended in the command itself, not via `env=`: an `--env PATH=...`
+    # would *replace* the container's existing PATH rather than extend it, and that
+    # base value depends on SANDBOX_IMAGE (configurable), so it can't be safely
+    # hardcoded here. `$PATH` in the shell command expands to whatever it actually
+    # is at runtime. Covers `test_command` invoking an installed console script
+    # directly (e.g. a bare `pytest`) -- `pip install --target` does not reliably
+    # put those on PATH the way a normal install does; `python -m pytest` would
+    # have worked from PYTHONPATH alone, but nothing constrains the model to that
+    # form.
+    tests = await ctx.sandbox.execute(
+        f'export PATH="/workspace/.deps/bin:$PATH"; {test_command}',
+        workspace=workspace,
+        env={"PYTHONPATH": "/workspace/.deps"},
+    )
     if is_devops_error(tests):
         raise DevOpsError(
             "The test run failed with what looks like a host/environment error, not "

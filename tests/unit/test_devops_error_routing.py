@@ -91,7 +91,7 @@ class _ScriptedSandbox:
         network: bool = False,
         env: dict[str, str] | None = None,
     ) -> SandboxResult:
-        self.calls.append({"command": command, "network": network})
+        self.calls.append({"command": command, "network": network, "env": env})
         return self.results.pop(0)
 
 
@@ -235,3 +235,47 @@ async def test_a_genuine_install_failure_still_heals_as_before(
 
     assert result == "healed"
     assert healed_with["category"] == "dependency_failure"
+
+
+# --- install/test cross-container persistence -----------------------------------
+
+
+async def test_install_and_test_are_separate_containers_that_do_not_share_state(
+    ctx: FactoryContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The install step and the test run are two separate `docker run` invocations
+    (kept separate deliberately, for distinct devops-error detail) -- nothing
+    outside the bind-mounted /workspace survives between them. Installing into a
+    workspace-relative --target and pointing PYTHONPATH/PATH there for the test run
+    is what makes the install actually visible to it; a bare `pip install` would
+    land in the install container's own (ephemeral) filesystem and be gone by the
+    time the test container starts."""
+    sandbox = _ScriptedSandbox(
+        results=[
+            SandboxResult(exit_code=0, stdout="", stderr=""),  # install
+            SandboxResult(exit_code=1, stdout="1 failed, 4 passed", stderr=""),  # tests
+        ]
+    )
+    ctx.sandbox = sandbox
+
+    async def fake_heal(*args: object, **kwargs: object) -> str:
+        return "healed"
+
+    monkeypatch.setattr(dev_graph, "_heal", fake_heal)
+
+    result = await dev_graph._verify_and_ship(
+        ctx,
+        None,  # type: ignore[arg-type]
+        product_id="prod-1",
+        product_name="Test Product",
+        workspace="product-1",
+        test_command="pytest -q",
+        idea_id="idea-1",
+    )
+
+    assert result == "healed"
+    install_call, test_call = sandbox.calls[0], sandbox.calls[1]
+    assert "--target=/workspace/.deps" in str(install_call["command"])
+    assert test_call["env"] == {"PYTHONPATH": "/workspace/.deps"}
+    assert "/workspace/.deps/bin" in str(test_call["command"])
+    assert "pytest -q" in str(test_call["command"])
