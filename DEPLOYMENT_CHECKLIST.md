@@ -361,6 +361,47 @@ breaker) is currently paused and blocks *all* routing including maintenance
 until the rolling 24h window ages out, so the first live firing is still
 pending.
 
+**20. [RELIABILITY GAP, not a bug — feature, user-requested] "Reply with guidance,
+or REJECT to retire this product" did nothing.** Discovered when the user forwarded
+a real live heal-exhaustion Telegram message and asked how the 3-cycle system
+works. Traced the code: heal exhaustion resets the product to `PLANNED` with no
+task left to retry, so nothing consumed the human's reply at all — the product just
+sat in `PLANNED` forever no matter what was said. Same audit also found the
+identical gap in two other places ("Reply APPROVE/REJECT" in compliance/graph.py's
+idea-flag and compliance/lia.py's LIA segment-flag) — this pass fixed the
+heal-exhaustion one only; the other two are tracked as follow-up, not yet built.
+
+Fixed: migration `0008_interrupt_product_id` adds `Interrupt.product_id` (bare
+column, matching `task_id`'s existing pattern) so a reply can be traced to a
+product with no task. `collect_replies()` now retires the product on REJECT, or
+enqueues exactly **one** more patch attempt for any other non-empty reply —
+`heal_attempts` is deliberately left untouched, so a second failure re-escalates
+immediately instead of quietly burning further autonomous cycles. Idempotency key
+includes the interrupt id, so a product can be guided again after re-escalating
+without the second attempt silently no-opping. Backfilled `product_id` on the one
+live interrupt that predated the migration (parsed from its subject text) so
+replying to it works immediately. Deployed after rebuilding the image — the
+migration file didn't exist in the already-running image, a real near-miss caught
+by checking `alembic_version` after the first `upgrade head` came back suspiciously
+quiet.
+
+**Cost note, since this came up in the same conversation:** real spend breakdown
+for the first ~30h live (`llm_calls` table): $9.26 of $10.69 (86%) was
+`code_generation` on Claude Sonnet 5 — 14 calls, avg ~44k output tokens each. This
+was day one with all six engines enabled for the first time, two brand-new product
+builds, and both hitting worst-case heal-cycle × task-attempt retry compounding
+(up to 9 code_generation calls per product before final escalation, not 3) — not
+representative of steady state. Every dollar this new feature can spend is
+human-gated behind an explicit reply, same as the design already used for campaign
+approval.
+
+**Also noted, not yet fixed (not requested this pass):** the escalation's failure
+detail is truncated to `(tests.stderr or tests.stdout)[-2000:]` before being
+handed to the LLM each heal cycle (`graph.py` `_verify_and_ship`). For a build
+with many failing tests, this likely hides full tracebacks for everything but the
+last failure or two behind pytest's trailing short-summary section — a plausible
+compounding cause of "3 cycles isn't enough," separate from the cycle count itself.
+
 ## ⚠ Operational hazard discovered this pass
 
 **Running `pytest tests/integration` against a live deployment destroys its
@@ -399,6 +440,22 @@ copy before mounting it in; all 480 unit tests then passed cleanly, matching
 the local (non-server) run exactly. **Do this — or otherwise ensure no `.env`
 is reachable from cwd — every time unit tests run against a mounted copy of
 this repo on the server.**
+
+**Third hazard found this pass:** running the *entire* integration suite
+together (all files in one `pytest` invocation) against the scratch database is
+flaky — a run flagged 9 failures across 5 unrelated files
+(`test_heal_attempts_and_attribution.py`, `test_webhooks_integration.py`,
+`test_scheduler_integration.py`, `test_repository.py`,
+`test_hitl_stale_reminder.py`), every one of which passed cleanly both alone and
+on a full-suite re-run. A separate local (Windows) run flagged a *different* 10
+failures the same way. Root cause not fully chased down (time-boxed given the
+session's cost focus), but the pattern — different files fail on different runs,
+100% pass in isolation — points at contention between the many integration test
+files that each independently `drop_all`/`create_all` the same physical schema in
+their own fixture, not a real regression. **If a full-suite run against scratch
+shows failures, re-run the specific failing files alone before concluding
+anything is actually broken** — this pass's own PR (`0008`) was nearly
+misdiagnosed this way before isolating each failure confirmed it was clean.
 
 ## Known open items (not blocking, tracked on purpose)
 
