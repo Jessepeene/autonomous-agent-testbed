@@ -192,7 +192,19 @@ class AnthropicProvider:
             block.text for block in response.content if getattr(block, "type", None) == "text"
         )
         if not text.strip():
-            raise SchemaViolation("claude returned no text content")
+            # Deliberately over-informative: this fires rarely enough (and burns a full
+            # paid call each time) that guessing the cause from a bare message wastes a
+            # whole retry cycle. The likely culprit is adaptive thinking consuming the
+            # entire max_tokens budget before any answer text is produced -- stop_reason
+            # "max_tokens" with only a "thinking" block confirms that; anything else
+            # points elsewhere.
+            block_types = [getattr(block, "type", "?") for block in response.content]
+            raise SchemaViolation(
+                "claude returned no text content "
+                f"(stop_reason={getattr(response, 'stop_reason', None)!r}, "
+                f"content_block_types={block_types}, max_tokens={max_tokens}, "
+                f"usage={getattr(response, 'usage', None)!r})"
+            )
 
         try:
             value = schema.model_validate_json(text)
