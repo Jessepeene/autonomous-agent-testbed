@@ -318,6 +318,28 @@ the new capacity carve-out. Verified live: `orchestrator.capacity_prefers_repair
 fired on the very first tick after deploying, and Development immediately
 claimed the first queued patch task instead of holding.
 
+**18. [RELIABILITY GAP, not a bug — feature, user-requested] A human reply
+confirming an escalation's root cause had no way to actually retry the
+task.** Raised by the user after asking what happens on a rate limit, crash,
+or other transient failure: `collect_replies()` only ever called
+`resolve_interrupt()` — marking the Telegram message answered — with no code
+path back to the task itself, which stayed `escalated` forever. Every
+escalation this deployment has needed a human for so far required manual DB
+surgery (`UPDATE tasks SET status='pending', attempt_count=0 ...`) to move
+again, done by hand 5+ times this session. Fixed: `repository
+.reopen_escalated_task()` gives an escalated task a fresh attempt budget, and
+`collect_replies()` calls it when a reply contains the word "retry" **and**
+the interrupt carries a `task_id` — matching the exact word the
+DevOps-error/generic-failure escalation text already asks for. Escalations
+with no `task_id` (heal-cycle exhaustion, which resets the product to
+`PLANNED` instead of leaving one task to retry — confirmed live, see
+`f4e49f5b0304`'s escalation at 13:44:59 UTC 2026-08-10) no-op safely instead
+of crashing. Verified with a new integration suite against a genuinely
+separate throwaway Postgres (see hazard note below) — retry reopens the
+task, a plain reply only resolves the interrupt, no-task_id doesn't crash,
+and the match is case-insensitive/whole-word. Deployed and confirmed healthy
+live (clean restart, no claimed/running tasks disrupted).
+
 ## ⚠ Operational hazard discovered this pass
 
 **Running `pytest tests/integration` against a live deployment destroys its
@@ -333,6 +355,29 @@ verification run. Nothing of real value was lost (dry-run data only), but
 data matters — either provision a genuinely separate database for that
 purpose, or verify future changes with the unit suite only (isolated, no
 shared state) as this pass now does.
+
+**Update (reply-driven-retry pass):** used a genuinely separate throwaway
+Postgres (`docker run -d --name scratch-pg ... postgres:16-alpine` on the
+`superagent_default` network, `alembic upgrade head` against it, tunneled to
+locally for the pytest run) for the new integration test in this pass — the
+first time this project has verified DB-interaction-heavy logic without
+touching the live database at all. Worth keeping as the standard pattern
+going forward instead of the unit-suite-only fallback above.
+
+**Second hazard found this pass, same family:** running unit tests from a
+container with `/opt/superagent` bind-mounted picks up the **live `.env`**
+(pydantic-settings' `Settings.model_config` uses `env_file=".env"`, resolved
+relative to cwd) and silently populates real API keys into every test's
+default `Settings` fixture. 19 unit tests that assert "refuses when
+unconfigured" (Mailgun send, lead-provider gating, MCP tool withholding,
+orchestrator capacity routing, etc.) failed for this reason alone —
+`Settings(gemini_api_key=SecretStr(...), ...)` instead of the unconfigured
+defaults they expect. Not a code bug; a test-isolation gap. Fixed for this
+pass by copying the tree to `/opt/scratch-test` with `.env` deleted from the
+copy before mounting it in; all 480 unit tests then passed cleanly, matching
+the local (non-server) run exactly. **Do this — or otherwise ensure no `.env`
+is reachable from cwd — every time unit tests run against a mounted copy of
+this repo on the server.**
 
 ## Known open items (not blocking, tracked on purpose)
 
