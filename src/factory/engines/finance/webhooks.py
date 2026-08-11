@@ -67,7 +67,7 @@ def verify(payload: bytes, signature: str, settings: Settings | None = None) -> 
     if not secret:
         raise SignatureInvalid("STRIPE_WEBHOOK_SECRET is not configured")
     try:
-        event = stripe.Webhook.construct_event(payload, signature, secret)  # type: ignore[no-untyped-call]
+        event = stripe.Webhook.construct_event(payload, signature, secret)
     except (ValueError, stripe.SignatureVerificationError) as exc:
         raise SignatureInvalid(str(exc)) from exc
     # NOT dict(event): StripeObject only implements __getitem__(str), not the

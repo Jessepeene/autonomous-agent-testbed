@@ -484,15 +484,27 @@ class LLMClient:
 
 
 def build_registry(settings: Settings | None = None) -> ProviderRegistry:
-    """Construct the real providers. Unconfigured ones report themselves unavailable."""
+    """Construct the real providers. Unconfigured ones report themselves unavailable.
+
+    ``staging_mock_expensive_calls`` swaps only the Anthropic slot for a
+    deterministic fixture provider (see ``llm/providers/staging.py``) -- Gemini is
+    never touched by this flag, and it is orthogonal to ``factory_dry_run``.
+    """
     from factory.llm.providers.anthropic_provider import AnthropicProvider
     from factory.llm.providers.gemini_provider import GeminiProvider
 
     settings = settings or get_settings()
+    anthropic: LLMProvider
+    if settings.staging_mock_expensive_calls:
+        from factory.llm.providers.staging import StagingCodeProvider
+
+        anthropic = StagingCodeProvider()
+    else:
+        anthropic = AnthropicProvider(settings)
     return ProviderRegistry(
         {
             Provider.GEMINI: GeminiProvider(settings),
-            Provider.ANTHROPIC: AnthropicProvider(settings),
+            Provider.ANTHROPIC: anthropic,
         }
     )
 

@@ -98,6 +98,18 @@ class Settings(BaseSettings):
 
     # --- Operational ------------------------------------------------------------
     factory_dry_run: bool = True
+    # Orthogonal to factory_dry_run, not a variant of it: dry_run stubs *outward*
+    # side effects (deploy, email send, card-limit sync) but never stubs an LLM
+    # call, in either mode. CODE_GENERATION/CODE_REVIEW (MVP scaffolds, landing
+    # pages, Bug Council) are 100% Anthropic-served with no failover and are the
+    # large majority of real spend -- this swaps that one provider for a
+    # deterministic, always-passing fixture (see llm/providers/staging.py) so the
+    # rest of the pipeline (real sandbox install/test, real deploy, real lead
+    # sourcing, real outreach composition) can be exercised repeatedly without
+    # paying Opus prices on every run. Gemini-routed calls are never touched by
+    # this flag -- Discovery, Compliance, lead planning, and outreach copy still
+    # run for real.
+    staging_mock_expensive_calls: bool = False
     # The domain Caddy terminates TLS for (see Caddyfile's `{$PUBLIC_DOMAIN}`).
     # Not read anywhere else in Python until validation: a generated landing page
     # is static HTML/JS with no build step, so it cannot read a server-side env var
