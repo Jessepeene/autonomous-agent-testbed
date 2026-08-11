@@ -1632,3 +1632,43 @@ Postgres), migration `0012` applies cleanly.
 `git archive HEAD`, migration `0012` applied to the live database *before* the
 restart, image rebuilt, service restarted. `/health` reports `ok`, all six
 engines enabled, `alembic current` is `0012_page_views (head)`, boot log clean.
+
+## Pre-launch validation plan, Phase 3 — SEO baseline hygiene — 2026-08-11
+
+Third phase of the 7-phase pre-launch plan. Zero SEO instruction existed anywhere
+in the codebase before this — no mention in either codegen prompt, no check in
+Bug Council's review criteria. Every generated landing page and MVP frontend
+shipped with no enforced `<title>`, no meta description, no
+`sitemap.xml`/`robots.txt`: a page nobody can find gathers no interest signal at
+all, which matters directly for a factory whose whole validation gate depends on
+real people finding and responding to a landing page.
+
+**Both prompts now ask for it, and a deterministic check enforces the checkable
+subset.** `SYSTEM_PROMPT`/`LANDING_PAGE_SYSTEM` ask for a non-empty `<title>`, a
+meta description, Open Graph tags, a canonical URL, semantic landmarks, and two
+standalone files (`sitemap.xml`, `robots.txt`). New
+`development/seo.py::missing_seo_requirements()` — same reasoning as Bug
+Council's `scan_secrets`/`scan_privilege`, a prompt asking for something is not
+the same as it being there — deterministically checks the four unambiguous items
+(title, meta description, sitemap, robots); OG tags/canonical/semantic landmarks
+stayed prompt-only, real but harder to verify by pattern match without false
+positives.
+
+**Runs in `_verify_and_ship` right after the test suite passes, *before* Bug
+Council.** Catching a missing `<title>` costs nothing (no LLM call); finding out
+only after paying for three Opus reviewers would not. A new `"seo_incomplete"`
+heal category was added to `SURGICAL_CATEGORIES` — deliberately *not* folded
+into Bug Council's own gate, since an SEO gap is exactly the narrow, targeted
+fix surgical repair exists for, and unlike a Council rejection this check is
+free to re-run after an edit.
+
+**The Phase 1 staging fixtures needed updating to match** — without it, every
+staging build would have immediately heal-cycled on its own fixture's missing
+SEO markers, defeating the "always passes cleanly" point of a staging mode.
+
+**Verified**: 626 unit + 148 integration tests green on Linux (scratch
+Postgres). No schema change this phase.
+
+**Deployed live** (2026-08-11): committed (`d7d6e63`), transferred via
+`git archive HEAD`, image rebuilt, service restarted. `/health` reports `ok`,
+all six engines enabled, boot log clean.
