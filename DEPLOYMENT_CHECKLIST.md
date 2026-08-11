@@ -1863,3 +1863,123 @@ Postgres), migration `0015` applies cleanly.
 the restart, image rebuilt, service restarted. `/health` reports `ok`, all
 six engines enabled, `alembic current` is `0015_custom_domains (head)`, boot
 log clean.
+
+## Pre-launch validation plan, Phase 7 — automated e2e test + manual runbook — 2026-08-11
+
+Seventh and final phase of the pre-launch plan. Two parts, because not
+everything can or should be automated.
+
+### 7a — automated e2e test (`tests/e2e/test_full_funnel_staging.py`)
+
+One idea, driven through the real funnel logic end to end: Compliance
+approval → a real staging-fixture landing page (real SEO markers, real
+analytics beacon, real Bug Council scanners) → real interest/response-rate
+math → `EVALUATE_VALIDATION` → a real staging-fixture MVP (real auth, real
+Stripe Checkout wiring, real Bug Council) → LIVE → a real `DOMAIN_REQUIRED`
+interrupt → a scripted human reply → `ATTACH_DOMAIN` queued → a live AB test
+seeded with a clear winner → `EVALUATE_AB_TEST` concludes it correctly →
+`GROWTH_REVIEW` still marks the product reviewed even though `GROWTH_ANALYST`
+itself is correctly refused under `FACTORY_DRY_RUN` → no interrupt is left
+open, nothing half-finished.
+
+**"Under the staging harness" means the Anthropic slot is the real
+`StagingCodeProvider`** (Phase 1), not a placeholder — this test exercises
+the actual generated-content shape and the real deterministic checks against
+it. The Gemini slot is `FakeProvider`, scripted per call: Discovery/
+Compliance decisions are cheap structured-output calls, and a real network
+call here would make an automated regression test flaky and non-free to run
+on every change. `factory_dry_run=True` stubs the Vercel deploy call
+(matching existing `FACTORY_DRY_RUN` behaviour exactly); real Apollo/Hunter
+sourcing and a real outreach send are seeded directly rather than exercised,
+per your own explicit decision to keep outreach stubbed even in a live
+staging run. None of these three are testable offline and automatically —
+they are 7b's job below.
+
+**A real bug caught while writing this test, not shipped**: the first
+version called `_verify_and_ship` with the default `DisabledSandbox`, which
+fails before ever reaching deploy — fixed with the same passing-sandbox-fake
+pattern already established in `test_seo_gate.py` and Phase 6's own tests.
+
+**Verified**: passes cleanly, twice in a row against a freshly-migrated
+scratch Postgres, alongside the full 670 unit + 188 integration suite.
+
+### 7b — manual runbook: the pieces that need real external state
+
+Not automatable: a real domain you own, real (bounded) Apollo/Hunter calls,
+and a real Vercel project. Run these against the live deployment, not a
+separate staging copy — the live factory already runs under
+`FACTORY_DRY_RUN=false` with real credentials, so these checkpoints are
+about *watching* real, already-scheduled work rather than standing up a
+parallel environment. Work through them in order; each depends on the
+previous one having actually happened.
+
+- [ ] **Discovery → one idea.** Watch `docker compose logs factory -f` (or
+  Telegram) until a `compliance.idea_approved`-shaped event appears. Confirm
+  in the DB that exactly one `products` row exists in `validating` for that
+  idea, and that a `build_landing_page` task completed.
+- [ ] **The landing page gathers real interest.** Open the deployed
+  validation URL (`products.deploy_url`) in a real browser. Confirm the page
+  looks credible (not a generic template), submit the interest form
+  yourself, and confirm a row lands in `validation_signals`. Confirm the
+  analytics beacon fires too (`page_views` gets a row on page load, before
+  any form submission).
+- [ ] **SEO markers are present in the shipped HTML**, not just asserted by
+  the deterministic gate that already ran server-side: `curl` the deployed
+  URL and confirm a real `<title>`, `<meta name="description">`, and that
+  `/sitemap.xml` and `/robots.txt` both return real content.
+- [ ] **Outreach composes correctly.** Once real leads exist
+  (`harvest_leads` ran — see below), inspect the composed email body a
+  `SEND_OUTREACH` task would have sent (it stays stubbed per your original
+  decision — check the task's own record of what it *would* have sent, or
+  temporarily point `outbound_from_address` at an inbox you control for one
+  cohort if you want to see a real send). Confirm the copy is specific to
+  the product and niche, not generic.
+- [ ] **Real, bounded lead sourcing.** Confirm `HUNTER_API_KEY`/
+  `APOLLO_API_KEY` are configured, and that a `harvest_leads` task actually
+  called out (check `llm_calls`/provider logs for the request, not just that
+  leads appeared) and respected the configured `limit`. Spot-check 2-3
+  returned leads for a real, plausible job title/company — not obviously
+  wrong data.
+- [ ] **Leads stay current.** Confirm the periodic `HARVEST_LEADS` sweep
+  (every 12h, `scheduler.py`) fires again for the same LIVE product without
+  you doing anything — a product that has been live for a while should
+  accumulate more than one harvest's worth of leads over a few days.
+- [ ] **The real build ships with working Stripe Checkout.** Once the
+  product goes `live`, open its real MVP URL, attempt a Checkout flow with a
+  Stripe test-mode card, and confirm the Checkout Session's
+  `client_reference_id` is set to the exact `PRODUCT_ID` (check the Stripe
+  dashboard for the session, not just that checkout redirected
+  successfully) — that is the only mechanism that lets a webhook later
+  attribute revenue back to this product.
+- [ ] **Domain: requested, attached, and verified for real.** Reply to the
+  Telegram `DOMAIN_REQUIRED` message with a real hostname you control DNS
+  for. Confirm the `ATTACH_DOMAIN` task's real Vercel API call succeeds
+  (check `domain_status` flips to `'attached'` and you receive the DNS
+  records over Telegram) — this is the actual, first-ever live exercise of
+  `development/domain.py`'s Vercel contract; if the endpoint shape is wrong,
+  this is where you find out. Add the DNS records at your registrar, then
+  confirm the periodic `VERIFY_DOMAIN` sweep flips `domain_status` to
+  `'verified'` within a few hours (DNS propagation varies) and that
+  `deploy_url` switches to the custom domain.
+- [ ] **A live AB test runs and concludes with a real winner.** Either wait
+  for `GROWTH_ANALYST` to start one on its own judgement (check Telegram/
+  memory for its reasoning), or start one yourself via the same
+  `start_ab_test_action` path. Visit the product from two different
+  browsers/incognito sessions, confirm each is pinned to one variant
+  (`localStorage`), and confirm real visits accumulate in `page_views` split
+  by `variant`. Let it run until `EVALUATE_AB_TEST` concludes it — confirm
+  the winner and the memory `LESSON` it wrote.
+- [ ] **The Learning Loop and the growth roles both fire without manual
+  intervention.** Over a few days of normal operation, confirm in logs/
+  memory that: a landing-page prompt trial advances on its own cadence
+  (`learning/trials.py`); `GROWTH_REVIEW` fires for each LIVE product on its
+  configured interval (`growth_review_interval_days`, default 7) without you
+  enqueuing it; `CHANNEL_SCOUT_REVIEW` fires on its own longer interval
+  (`channel_scout_interval_days`, default 14) and, if it finds a genuine
+  candidate, raises a real `CHANNEL_APPROVAL` interrupt with a real drafted
+  post you can read and judge.
+
+This closes the 7-phase pre-launch plan. Everything above it in this
+document is the record of how each phase was built, verified, and deployed;
+this runbook is what turns "the code is correct" into "the system actually
+works," which only real external state can prove.
