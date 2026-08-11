@@ -254,12 +254,13 @@ async def _evaluate_validation(ctx: FactoryContext, session: AsyncSession, task:
         )
         return f"development: validation for {product_id} passed ({signals}/{sent}), building"
 
-    await repository.set_product_status(session, product_id, ProductStatus.RETIRED)
-    # RETIRED is shared with the heal-exhaustion retirement path (see
-    # repository.retire_product's docstring), and Product carries no reason field --
-    # this memory row is the durable trail that lets a future audit tell the two
-    # apart, matching this codebase's instinct to never leave a terminal decision
-    # unexplained.
+    # retire_product (not a bare set_product_status) so this path also gets PII
+    # retention -- see purge_product_pii -- exactly like the heal-exhaustion
+    # retirement path. RETIRED itself is shared between the two (Product carries no
+    # reason field), so the memory row below is the durable trail that lets a future
+    # audit tell them apart, matching this codebase's instinct to never leave a
+    # terminal decision unexplained.
+    await repository.retire_product(session, product_id)
     await memory_store.remember(
         session,
         content=(
@@ -305,15 +306,23 @@ async def _patch(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
         ):
             await repository.set_product_status(session, product_id, ProductStatus.PATCHING)
             existing = read_workspace(workspace, ctx.settings)
+            # Surfaces this product's own heal-cycle history (written by _heal() on
+            # every cycle) so a recurring category of failure is visible to the model
+            # attempting the fix, not just to a future audit -- the whole point of
+            # closing this loop is that repeating the same failed approach should get
+            # less likely each cycle, not equally likely every time.
+            recalled = await memory_store.recall_block(
+                session,
+                query=healing,
+                scopes=memory_store.scopes_for(product_id=product_id),
+            )
+            repairs = f"REQUIRED REPAIRS (from the previous review):\n{healing}"
+            if recalled:
+                repairs = f"{repairs}\n\n{recalled}"
             plan = await generate_scaffold(
                 ctx,
                 idea.model_copy(
-                    update={
-                        "problem_statement": (
-                            f"{idea.problem_statement}\n\n"
-                            f"REQUIRED REPAIRS (from the previous review):\n{healing}"
-                        )
-                    }
+                    update={"problem_statement": f"{idea.problem_statement}\n\n{repairs}"}
                 ),
                 task_id=task.id,
                 existing_files=existing,
@@ -538,6 +547,23 @@ async def _heal(
         session, product_id, ProductStatus.PATCHING, heal_attempts=attempts
     )
 
+    # Recorded on every cycle, not only at exhaustion: this is the signal that lets
+    # the SAME category of failure recurring on this product be recognised as a
+    # pattern (near-duplicate content reinforces one memory rather than piling up
+    # fifty near-identical rows -- see memory/store.py's remember()), and it is what
+    # _patch() recalls before its next generation attempt so the model sees what
+    # already failed instead of repeating it blind. The attempt number is
+    # deliberately left out of the text itself -- it would be a token that differs
+    # every cycle and could push otherwise-identical repeats below the near-
+    # duplicate threshold, defeating the reinforcement this exists for.
+    await memory_store.remember(
+        session,
+        content=f"Heal cycle failed under category '{category}': {healing[:300]}",
+        kind=memory_store.MemoryKind.FAILURE,
+        scope=memory_store.scope_for(product_id=product_id),
+        origin="development:heal",
+    )
+
     if attempts >= MAX_HEAL_CYCLES:
         await repository.record_heal_attempt(
             session,
@@ -550,6 +576,23 @@ async def _heal(
         await repository.resolve_pending_heal_attempts(session, product_id, "escalated")
         await repository.set_product_status(session, product_id, ProductStatus.PLANNED)
         await repository.release_product_lock(session, product_id)
+        # A second, engine-scoped memory alongside the product-scoped one above: a
+        # full heal-budget exhaustion is a stronger signal than one failed cycle, and
+        # engine scope is what future spawned diagnostic agents draw on (see
+        # agents/spawner.py's recall_block call), so a category that keeps burning
+        # the whole heal budget across *different* products becomes visible there
+        # too, not just to this one product's own future attempts.
+        await memory_store.remember(
+            session,
+            content=(
+                f"A product exhausted all {MAX_HEAL_CYCLES} heal cycles on category "
+                f"'{category}' and was escalated to a human. Last blocking feedback: "
+                f"{healing[:300]}"
+            ),
+            kind=memory_store.MemoryKind.FAILURE,
+            scope=memory_store.scope_for(engine=EngineName.DEVELOPMENT),
+            origin="development:heal_exhausted",
+        )
         await interrupts.request(
             session,
             reason=InterruptReason.LEGAL_UNCERTAINTY,

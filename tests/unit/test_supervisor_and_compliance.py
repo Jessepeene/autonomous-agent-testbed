@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -26,6 +27,7 @@ from factory.state.schemas import (
     LeadRecord,
     LIAVerdict,
     NextAction,
+    ValidatedIdea,
 )
 from factory.supervisor import orchestrator
 from factory.supervisor.context import FactoryContext
@@ -421,6 +423,77 @@ def test_refusal_helper_never_approves() -> None:
     assert refusal.confidence == 0.0
     assert refusal.lia_verdict is not None
     assert refusal.lia_verdict.passed is False
+
+
+# --- idea-level compliance thresholding --------------------------------------
+
+_IDEA = ValidatedIdea(
+    id="idea-1",
+    problem_statement="Bookkeepers reconcile invoices by hand every week.",
+    target_niche="bookkeeping",
+    source_url="https://example.test/thread",
+    monetization_hypothesis="Bookkeepers pay EUR 49/month per seat.",
+    score=0.8,
+    evidence_count=3,
+    created_at=datetime.now(UTC),
+)
+
+
+def _idea_assessment(status: ComplianceStatus, confidence: float) -> ComplianceAssessment:
+    return ComplianceAssessment(status=status, justification="j" * 30, confidence=confidence)
+
+
+async def test_low_confidence_rejection_is_not_upgraded_to_flag_for_review(
+    ctx: FactoryContext, gemini_fake: FakeProvider, settings: Settings
+) -> None:
+    """A REJECTED verdict is already the safe, conservative outcome -- unlike an
+    APPROVED one, it must never be escalated to FLAG_FOR_REVIEW just because the
+    model's stated confidence fell under the threshold. Doing so used to leave an
+    already-decided idea sitting in the pipeline awaiting a human reply that was
+    never actually needed."""
+    assert settings.compliance_min_confidence == 0.85
+    gemini_fake.register(ComplianceAssessment, _idea_assessment(ComplianceStatus.REJECTED, 0.1))
+
+    result = await assessor.assess_idea(ctx, _IDEA)
+
+    assert result.status is ComplianceStatus.REJECTED
+    assert result.approved is False
+
+
+async def test_low_confidence_approval_is_still_downgraded_to_flag_for_review(
+    ctx: FactoryContext, gemini_fake: FakeProvider, settings: Settings
+) -> None:
+    """Regression guard for the fix above: only REJECTED is exempt from the
+    confidence bar. An uncertain APPROVED verdict must still be downgraded --
+    approving requires being sure."""
+    assert settings.compliance_min_confidence == 0.85
+    gemini_fake.register(ComplianceAssessment, _idea_assessment(ComplianceStatus.APPROVED, 0.1))
+
+    result = await assessor.assess_idea(ctx, _IDEA)
+
+    assert result.status is ComplianceStatus.FLAG_FOR_REVIEW
+    assert result.approved is False
+
+
+async def test_high_confidence_rejection_stays_rejected(
+    ctx: FactoryContext, gemini_fake: FakeProvider
+) -> None:
+    gemini_fake.register(ComplianceAssessment, _idea_assessment(ComplianceStatus.REJECTED, 0.95))
+
+    result = await assessor.assess_idea(ctx, _IDEA)
+
+    assert result.status is ComplianceStatus.REJECTED
+
+
+async def test_high_confidence_approval_stays_approved(
+    ctx: FactoryContext, gemini_fake: FakeProvider
+) -> None:
+    gemini_fake.register(ComplianceAssessment, _idea_assessment(ComplianceStatus.APPROVED, 0.95))
+
+    result = await assessor.assess_idea(ctx, _IDEA)
+
+    assert result.status is ComplianceStatus.APPROVED
+    assert result.approved is True
 
 
 # --- preflight --------------------------------------------------------------

@@ -34,7 +34,8 @@ from factory.llm.router import ProviderRegistry
 from factory.sandbox.disabled import DisabledSandbox
 from factory.settings import EngineName, Settings
 from factory.state import repository
-from factory.state.orm import Base, Lead, OutreachLog
+from factory.state.orm import Base, CampaignApproval, Interrupt, Lead, OutreachLog, Product
+from factory.state.schemas import InterruptReason, ScoredIdea
 from factory.supervisor.context import FactoryContext
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -176,9 +177,7 @@ async def test_blocked_send_also_stores_a_resolvable_token(
     )
     ctx = _ctx(provider=provider, workspace_root=tmp_path, blacklist_path=blacklist_file)
 
-    sent = await send_to_lead(
-        ctx, session, lead, product_summary="A tool.", product_id=None
-    )
+    sent = await send_to_lead(ctx, session, lead, product_summary="A tool.", product_id=None)
     assert sent is False
     await session.flush()
 
@@ -256,6 +255,140 @@ async def test_unsubscribe_endpoint_completes_erasure_end_to_end(
         ).scalar_one()
         assert surviving.lead_id is None
     await verify_engine.dispose()
+
+
+# --- PII retention tied to product lifecycle (retire_product / purge_product_pii) --
+
+
+async def _make_product(session: AsyncSession, name: str) -> str:
+    idea = ScoredIdea(
+        problem_statement="Bookkeepers reconcile invoices by hand every week.",
+        target_niche=name,
+        source_url="https://example.test/thread",
+        monetization_hypothesis="Bookkeepers pay EUR 49/month per seat.",
+        pain_severity=0.8,
+        willingness_to_pay=0.7,
+        build_feasibility=0.6,
+        adoption_ease=0.8,
+    )
+    idea_id = await repository.upsert_idea(session, idea)
+    assert idea_id is not None
+    return await repository.create_product(session, name=name, idea_id=idea_id)
+
+
+async def test_retiring_a_product_redacts_its_campaign_brief(session: AsyncSession) -> None:
+    product_id = await _make_product(session, "retention-brief")
+    task_id = await repository.enqueue_task(
+        session,
+        kind=repository.TaskKind.SEND_OUTREACH,
+        engine=EngineName.MARKETING,
+        idempotency_key=f"outreach:{product_id}",
+        product_id=product_id,
+    )
+    assert task_id is not None
+    approval = await repository.get_or_create_campaign_approval(
+        session,
+        product_id=product_id,
+        task_id=task_id,
+        lead_count=3,
+        brief="Sample recipients: Head of Finance at Analytical Engines BV.",
+    )
+    await session.flush()
+
+    retired = await repository.retire_product(session, product_id)
+
+    assert retired is True
+    row = await session.get(CampaignApproval, approval.id)
+    assert row is not None
+    assert "Analytical Engines" not in row.brief
+    assert row.lead_count == 3  # audit-relevant fields survive the redaction
+
+
+async def test_retiring_a_product_redacts_interrupts_linked_directly_and_via_task(
+    session: AsyncSession,
+) -> None:
+    product_id = await _make_product(session, "retention-interrupts")
+
+    direct_interrupt_id = await repository.open_interrupt(
+        session,
+        reason=InterruptReason.LEGAL_UNCERTAINTY,
+        subject="failed 3 heal cycles",
+        detail="Automated repair did not converge. Contact role: CFO.",
+        product_id=product_id,
+    )
+    assert direct_interrupt_id is not None
+
+    task_id = await repository.enqueue_task(
+        session,
+        kind=repository.TaskKind.SEND_OUTREACH,
+        engine=EngineName.MARKETING,
+        idempotency_key=f"outreach:{product_id}:2",
+        product_id=product_id,
+    )
+    assert task_id is not None
+    via_task_interrupt_id = await repository.open_interrupt(
+        session,
+        reason=InterruptReason.CAMPAIGN_APPROVAL,
+        subject="campaign approval needed",
+        detail="Sample recipients: Head of Finance at Analytical Engines BV.",
+        task_id=task_id,
+    )
+    assert via_task_interrupt_id is not None
+    await session.flush()
+
+    await repository.retire_product(session, product_id)
+
+    direct_row = await session.get(Interrupt, direct_interrupt_id)
+    via_task_row = await session.get(Interrupt, via_task_interrupt_id)
+    assert direct_row is not None and "CFO" not in direct_row.detail
+    assert via_task_row is not None and "Analytical Engines" not in via_task_row.detail
+    # subject/status/reason survive -- only the free-text detail is redacted
+    assert direct_row.subject == "failed 3 heal cycles"
+
+
+async def test_retiring_one_product_does_not_redact_a_different_products_interrupt(
+    session: AsyncSession,
+) -> None:
+    product_a = await _make_product(session, "retention-a")
+    product_b = await _make_product(session, "retention-b")
+
+    interrupt_b = await repository.open_interrupt(
+        session,
+        reason=InterruptReason.LEGAL_UNCERTAINTY,
+        subject="product b escalation",
+        detail="Product B detail must survive.",
+        product_id=product_b,
+    )
+    assert interrupt_b is not None
+    await session.flush()
+
+    await repository.retire_product(session, product_a)
+
+    row = await session.get(Interrupt, interrupt_b)
+    assert row is not None
+    assert row.detail == "Product B detail must survive."
+    product_b_row = await session.get(Product, product_b)
+    assert product_b_row is not None
+    assert product_b_row.status != "retired"
+
+
+async def test_purge_product_pii_is_idempotent(session: AsyncSession) -> None:
+    product_id = await _make_product(session, "retention-idempotent")
+    interrupt_id = await repository.open_interrupt(
+        session,
+        reason=InterruptReason.LEGAL_UNCERTAINTY,
+        subject="failed 3 heal cycles",
+        detail="Some detail.",
+        product_id=product_id,
+    )
+    assert interrupt_id is not None
+    await session.flush()
+
+    first = await repository.purge_product_pii(session, product_id)
+    second = await repository.purge_product_pii(session, product_id)
+
+    assert first == 1
+    assert second == 0
 
 
 async def _client(*, blacklist_path: Path) -> httpx.AsyncClient:

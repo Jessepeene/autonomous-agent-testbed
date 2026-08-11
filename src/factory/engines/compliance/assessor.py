@@ -285,7 +285,25 @@ async def assess_idea(
         log.warning("compliance.idea_assessment_failed", detail=str(exc)[:300])
         return _refuse(f"assessment could not be completed: {exc}")
 
+    if assessment.status is ComplianceStatus.REJECTED:
+        # A rejection is already the safe, conservative outcome regardless of how
+        # confident the model was reaching it -- unlike finalise_lead_assessment
+        # (which checks lia_verdict.passed first and returns REJECTED immediately,
+        # never reaching its own confidence check below), this used to apply the
+        # confidence bar unconditionally, so a low-confidence REJECTED verdict got
+        # silently upgraded to FLAG_FOR_REVIEW: a needless human escalation for an
+        # idea that was already decided, and one more "uncertain" idea left
+        # sitting in the pipeline pending a reply that was never actually needed.
+        # Only APPROVED needs a confidence bar -- approving requires being sure;
+        # rejecting cautiously is already the safe default the system prompt asks
+        # for.
+        return assessment
     if assessment.confidence < settings.compliance_min_confidence:
+        log.info(
+            "compliance.low_confidence",
+            confidence=assessment.confidence,
+            threshold=settings.compliance_min_confidence,
+        )
         return assessment.model_copy(update={"status": ComplianceStatus.FLAG_FOR_REVIEW})
     return assessment
 

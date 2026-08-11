@@ -13,7 +13,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, delete, func, select, text, update
+from sqlalchemy import CursorResult, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -222,15 +222,81 @@ async def reopen_escalated_task(session: AsyncSession, task_id: str) -> bool:
     return True
 
 
+#: Retention is tied to the owning product's lifecycle, not a fixed calendar cutoff
+#: -- see `purge_product_pii`. Left short and unambiguous so a human auditing the
+#: table can tell a purge from a normal empty/short escalation reply at a glance.
+_PII_REDACTED = "[redacted: retention tied to product lifecycle, see purge_product_pii]"
+
+
 async def retire_product(session: AsyncSession, product_id: str) -> bool:
-    """A human's explicit REJECT to a heal-exhaustion escalation. Terminal -- nothing
-    else in this codebase ever moves a product out of ``retired``."""
+    """The single terminal transition for a product, however it was reached (a
+    human's explicit REJECT to a heal-exhaustion escalation, or a validation gate
+    that never cleared its interest bar). Terminal -- nothing else in this codebase
+    ever moves a product out of ``retired``.
+
+    Also the one place PII retention is enforced: once a product can never do
+    anything else, the free-text fields that carried professional contact context
+    about real people (`CampaignApproval.brief`, `Interrupt.detail`) have no further
+    operational purpose.
+    """
     product = await session.get(Product, product_id)
     if product is None:
         return False
     product.status = ProductStatus.RETIRED.value
+    await purge_product_pii(session, product_id)
     await session.flush()
     return True
+
+
+async def purge_product_pii(session: AsyncSession, product_id: str) -> int:
+    """Redact the free-text fields a retired product no longer needs.
+
+    Subject/status/timestamps are left intact everywhere -- the audit trail (what
+    kind of thing happened, when, how it was resolved) survives; only the free text
+    a human or model wrote role/company detail into does not. Idempotent: already-
+    redacted rows are excluded from the ``WHERE``, so calling this twice (e.g. a
+    retry after a crash) does not inflate the returned count.
+    """
+    interrupt_ids = (
+        (
+            await session.execute(
+                select(Interrupt.id).where(
+                    or_(
+                        Interrupt.product_id == product_id,
+                        Interrupt.task_id.in_(select(Task.id).where(Task.product_id == product_id)),
+                    )
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    purged = 0
+    if interrupt_ids:
+        result = cast(
+            "CursorResult[Any]",
+            await session.execute(
+                update(Interrupt)
+                .where(Interrupt.id.in_(interrupt_ids), Interrupt.detail != _PII_REDACTED)
+                .values(detail=_PII_REDACTED)
+            ),
+        )
+        purged += result.rowcount or 0
+
+    result = cast(
+        "CursorResult[Any]",
+        await session.execute(
+            update(CampaignApproval)
+            .where(
+                CampaignApproval.product_id == product_id,
+                CampaignApproval.brief != _PII_REDACTED,
+            )
+            .values(brief=_PII_REDACTED)
+        ),
+    )
+    purged += result.rowcount or 0
+    return purged
 
 
 async def enqueue_guided_patch(

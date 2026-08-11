@@ -17,9 +17,10 @@ from typing import Protocol
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from factory.logging import get_logger
+from factory.settings import EngineName
 from factory.state import repository
-from factory.state.orm import Interrupt
-from factory.state.schemas import InterruptReason
+from factory.state.orm import Interrupt, Task
+from factory.state.schemas import InterruptReason, TaskKind
 
 log = get_logger(__name__)
 
@@ -37,6 +38,12 @@ _RETRY_WORD = re.compile(r"\bretry\b", re.IGNORECASE)
 #: "Reply with guidance, or REJECT to retire this product" escalation text). Any
 #: other non-empty reply is treated as guidance for one more patch attempt.
 _REJECT_WORD = re.compile(r"\breject\b", re.IGNORECASE)
+
+#: A flagged idea's escalation (compliance/graph.py's FLAG_FOR_REVIEW branch) asks
+#: for APPROVE or REJECT specifically -- distinct vocabulary from the task-retry and
+#: product-guidance replies above, matched only once the interrupt is identified as
+#: an ASSESS_COMPLIANCE escalation (see _act_on_idea_reply).
+_APPROVE_WORD = re.compile(r"\bapprove\b", re.IGNORECASE)
 
 
 class Notifier(Protocol):
@@ -122,6 +129,13 @@ async def collect_replies(session: AsyncSession, notifier: Notifier) -> int:
     REJECT to retire this product" text was aspirational — nothing read the reply at
     all, and the product just sat in `PLANNED` forever regardless of what a human
     said.
+
+    A reply to a flagged idea's interrupt (`task_id` set, no `product_id` — see
+    `compliance/graph.py`'s FLAG_FOR_REVIEW branch, raised before any product
+    exists) is handled the same way: before this, its own "Reply APPROVE to allow
+    the build, or REJECT to discard the idea" text was equally aspirational --
+    neither word did anything, and the idea just sat `flagged` forever, invisible to
+    every pipeline count but never actually resolved either way.
     """
     if not notifier.available:
         return 0
@@ -137,7 +151,14 @@ async def collect_replies(session: AsyncSession, notifier: Notifier) -> int:
             continue
         await repository.resolve_interrupt(session, target.id, answer or "acknowledged")
         action = "none"
-        if target.task_id and _RETRY_WORD.search(answer):
+        target_task = await session.get(Task, target.task_id) if target.task_id else None
+        if (
+            target_task is not None
+            and target_task.kind == TaskKind.ASSESS_COMPLIANCE.value
+            and target_task.idea_id
+        ):
+            action = await _act_on_idea_reply(session, target_task.idea_id, answer)
+        elif target.task_id and _RETRY_WORD.search(answer):
             action = (
                 "retried"
                 if await repository.reopen_escalated_task(session, target.task_id)
@@ -148,6 +169,31 @@ async def collect_replies(session: AsyncSession, notifier: Notifier) -> int:
         log.info("hitl.resolved", interrupt_id=target.id, action=action)
         resolved += 1
     return resolved
+
+
+async def _act_on_idea_reply(session: AsyncSession, idea_id: str, answer: str) -> str:
+    if _REJECT_WORD.search(answer):
+        await repository.set_idea_status(session, idea_id, "rejected")
+        return "rejected"
+    if _APPROVE_WORD.search(answer):
+        await repository.set_idea_status(session, idea_id, "approved")
+        # A fresh idempotency key -- the original ASSESS_COMPLIANCE task already
+        # completed -- but the same task kind, so compliance/graph.py's run() takes
+        # its existing "already approved on a previous pass" short-circuit straight
+        # to _create_validation: zero further LLM spend, and the real
+        # max_concurrent_validations capacity check runs instead of this module
+        # duplicating that business rule.
+        await repository.enqueue_task(
+            session,
+            kind=TaskKind.ASSESS_COMPLIANCE,
+            engine=EngineName.COMPLIANCE,
+            idempotency_key=f"compliance:idea:{idea_id}:approved",
+            payload={"idea_id": idea_id},
+            idea_id=idea_id,
+            priority=50,
+        )
+        return "approved"
+    return "none"
 
 
 async def _act_on_product_reply(
