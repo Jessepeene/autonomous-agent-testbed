@@ -287,11 +287,16 @@ async def test_tripped_budget_overrides_dev_capacity_and_everything_else(
 def test_system_prompt_renders_the_role_catalogue_not_a_literal_placeholder() -> None:
     """Regression: the template's ``{roles}`` slot was once left unformatted, so the
     literal string "{roles}" was sent to the model instead of the actual catalogue."""
-    from factory.agents.roles import RoleName
+    from factory.agents.roles import WORKSPACE_SCOPED_ROLES, RoleName
 
     rendered = orchestrator._system_prompt()
     assert "{roles}" not in rendered
     for name in RoleName:
+        # Workspace-scoped roles are deliberately absent -- the Orchestrator must not
+        # be offered a role that is only safe inside development/graph.py's _patch.
+        if name in WORKSPACE_SCOPED_ROLES:
+            assert name.value not in rendered
+            continue
         assert name.value in rendered
 
 

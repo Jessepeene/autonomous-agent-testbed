@@ -131,6 +131,13 @@ class Product(Base):
     #: EVALUATE_VALIDATION (run after HARVEST_LEADS/SEND_OUTREACH have both
     #: intervened) to credit the right tunable_parameter_id.
     landing_page_prompt_version: Mapped[str | None] = mapped_column(String(32))
+    #: The shell command that runs this product's test suite, captured from the
+    #: `ScaffoldPlan` that built it. Persisted because the agentic repair path edits
+    #: the workspace in place instead of regenerating it, so nothing reproduces the
+    #: plan -- both the repair agent and the verification gate read it from here.
+    #: NULL for products built before this was recorded; the repair path treats that
+    #: as "fall back to full regeneration" rather than guessing a default.
+    test_command: Mapped[str | None] = mapped_column(String(400))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

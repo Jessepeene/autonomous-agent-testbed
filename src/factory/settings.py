@@ -162,6 +162,17 @@ class Settings(BaseSettings):
     compliance_batch_size: int = Field(default=1, ge=1, le=10)
     max_task_attempts: int = Field(default=3, ge=1, le=10)
     task_lease_seconds: int = Field(default=900, ge=30)
+    # Ceiling on one surgical-repair agent run. Unlike a single code-generation call,
+    # an agent re-sends its whole transcript every step, so spend grows superlinearly
+    # in step count -- `max_steps` alone is a poor proxy for cost when tool results
+    # are large. Set below the ~$1.15 a full regeneration costs today, because a
+    # repair that costs more than regenerating has no reason to exist. The run stops
+    # cleanly and its edits are rolled back; the heal cycle is not consumed.
+    repair_agent_cost_cap_usd: float = Field(default=0.75, gt=0.0)
+    # Refuse to *start* a repair agent unless this much of the daily LLM budget is
+    # still unspent. The global breaker is only consulted between ticks, so without
+    # this a run starting just under the cap could carry it well past.
+    repair_agent_min_budget_headroom_usd: float = Field(default=1.0, ge=0.0)
     # How long an open interrupt waits with no reply before the "remind-stale-
     # interrupts" maintenance job nudges again. Deliberately longer than the
     # maintenance item's own 6h cadence, so a fresh escalation gets its normal

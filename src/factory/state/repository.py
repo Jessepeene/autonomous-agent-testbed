@@ -322,7 +322,17 @@ async def enqueue_guided_patch(
         kind=TaskKind.PATCH_PRODUCT,
         engine=EngineName.DEVELOPMENT,
         idempotency_key=f"patch:{product_id}:human-guided:{interrupt_id}",
-        payload={"product_id": product_id, "idea_id": product.idea_id, "healing": guidance[:6000]},
+        payload={
+            "product_id": product_id,
+            "idea_id": product.idea_id,
+            "healing": guidance[:6000],
+            # Routes to the surgical repair path (see `_should_repair_surgically`).
+            # A human who has diagnosed the problem and said what to change is the
+            # single best case for editing in place: regenerating an entire live
+            # product from scratch over one instruction is both the most expensive
+            # option and the one most likely to break things that currently work.
+            "category": "guided",
+        },
         product_id=product_id,
         priority=40,
     )

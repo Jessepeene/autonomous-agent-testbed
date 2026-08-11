@@ -35,6 +35,37 @@ log = get_logger(__name__)
 _TOOL_TIMEOUT_SECONDS = 120
 _MAX_RESULT_CHARS = 20_000
 
+#: Marker inserted where `_truncate_middle` removed content, so the model can tell a
+#: dropped middle from a genuinely short result and does not reason about the gap as
+#: if it were absence.
+_ELISION = "\n...[{dropped} characters elided]...\n"
+
+
+def _truncate_middle(content: str, limit: int) -> str:
+    """Keep both ends of an oversized tool result, dropping the middle.
+
+    Head-only truncation was actively harmful here. A tool result is JSON with the
+    keys in insertion order, and `run_in_sandbox` returns
+    ``exit_code, stdout, stderr, timed_out`` -- so a chatty pytest run (collection
+    output, hundreds of passing dots) filled the budget with noise and cut `stderr`,
+    the actual traceback, off the end entirely. `_verify_and_ship` has always taken
+    ``[-2000:]`` of test output for exactly this reason: pytest puts the failure
+    summary at the *end*.
+
+    Keeping both ends preserves the JSON preamble (exit code, how the command
+    started) and the tail (what actually failed), which is what a repair agent needs
+    to diagnose rather than guess.
+    """
+    if len(content) <= limit:
+        return content
+    marker = _ELISION.format(dropped=len(content) - limit)
+    budget = max(limit - len(marker), 0)
+    # Tail-weighted: the end of a failing command's output carries the diagnosis,
+    # the beginning carries context. 40/60 keeps enough of both.
+    head = budget * 2 // 5
+    tail = budget - head
+    return f"{content[:head]}{marker}{content[-tail:]}" if tail else content[:head]
+
 
 @dataclass(slots=True)
 class ToolInvocation:
@@ -98,6 +129,9 @@ class AgentRuntime:
         deadline_seconds: int = 600,
         docker_available: bool = False,
         context: str = "",
+        max_result_chars: int = _MAX_RESULT_CHARS,
+        cost_cap_usd: float | None = None,
+        cost_model: str | None = None,
     ) -> AgentResult:
         descriptors = self.available_tools(tool_categories, docker_available=docker_available)
         by_name = {d.name: d for d in descriptors}
@@ -111,6 +145,21 @@ class AgentRuntime:
         for step in range(1, max_steps + 1):
             if time.monotonic() - started > deadline_seconds:
                 result.stopped_because = "deadline"
+                break
+            # Checked here, at the top of a step, rather than mid-tool-round: the last
+            # thing that happened is then always a complete tool round, so the caller
+            # inherits a coherent state rather than one with a tool call issued and
+            # its result never folded in. `max_steps` alone is a poor proxy for spend
+            # -- an agent re-sends its whole transcript every step, so a run with big
+            # tool results can cost several times another run of the same length.
+            if cost_cap_usd is not None and _spent_usd(result.usage, cost_model) >= cost_cap_usd:
+                result.stopped_because = "cost_cap"
+                log.warning(
+                    "agent.cost_cap",
+                    step=step,
+                    cap_usd=cost_cap_usd,
+                    spent_usd=round(_spent_usd(result.usage, cost_model), 4),
+                )
                 break
             result.steps = step
 
@@ -173,7 +222,9 @@ class AgentRuntime:
                 if time.monotonic() - started > deadline_seconds:
                     deadline_hit_mid_step = True
                     break
-                invocation, tool_result = await self._execute(call, by_name)
+                invocation, tool_result = await self._execute(
+                    call, by_name, max_result_chars=max_result_chars
+                )
                 result.invocations.append(invocation)
                 tool_results.append(tool_result)
             if deadline_hit_mid_step:
@@ -193,7 +244,11 @@ class AgentRuntime:
         return result
 
     async def _execute(
-        self, call: Any, by_name: dict[str, ToolDescriptor]
+        self,
+        call: Any,
+        by_name: dict[str, ToolDescriptor],
+        *,
+        max_result_chars: int = _MAX_RESULT_CHARS,
     ) -> tuple[ToolInvocation, Any]:
         from factory.llm.providers.base import ToolResult
 
@@ -215,7 +270,7 @@ class AgentRuntime:
                 descriptor.handler(**call.arguments), timeout=_TOOL_TIMEOUT_SECONDS
             )
             content = raw if isinstance(raw, str) else json.dumps(raw, default=str)
-            content = content[:_MAX_RESULT_CHARS]
+            content = _truncate_middle(content, max_result_chars)
             return (
                 ToolInvocation(call.name, call.arguments, ok=True, detail="ok"),
                 ToolResult(call_id=call.id, name=call.name, content=content),
@@ -233,6 +288,27 @@ class AgentRuntime:
             ToolInvocation(call.name, call.arguments, ok=False, detail=detail),
             ToolResult(call_id=call.id, name=call.name, content=detail, is_error=True),
         )
+
+
+def _spent_usd(usage: Usage, model: str | None) -> float:
+    """Cost of an in-flight run so far.
+
+    ``model`` is passed in rather than inferred because the runtime does not know
+    which provider served a step. For the one task type that uses a cost cap today
+    (CODE_GENERATION) that is deterministic -- it is in ``NO_FAILOVER``, so it can
+    only ever have been served by the configured code model -- and ``estimate_usd``
+    falls back to a mid-range default price for an unknown name, which errs toward
+    stopping early rather than overspending.
+    """
+    from factory.observability.costs import estimate_usd
+
+    return estimate_usd(
+        model or "",
+        usage.input_tokens,
+        usage.output_tokens,
+        usage.cache_read_tokens,
+        usage.cache_write_tokens,
+    )
 
 
 def _accumulate(total: Usage, step: Usage) -> None:

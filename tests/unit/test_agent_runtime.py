@@ -86,6 +86,87 @@ def _echo_tool(calls: list[dict[str, Any]] | None = None) -> ToolDescriptor:
     )
 
 
+def _costly_turn(calls: list[ToolCall] | None = None, *, output_tokens: int = 50_000) -> AgentTurn:
+    return AgentTurn(
+        text="working",
+        tool_calls=calls or [],
+        stop_reason="end_turn" if not calls else "tool_use",
+        provider=Provider.ANTHROPIC,
+        model="claude-opus-5",
+        usage=Usage(input_tokens=50_000, output_tokens=output_tokens),
+    )
+
+
+async def test_a_run_stops_once_it_has_spent_its_cost_cap(
+    gemini_fake: FakeProvider, settings: Settings
+) -> None:
+    """`max_steps` alone is a poor proxy for spend: an agent re-sends its whole
+    transcript every step, so a run with large tool results can cost several times
+    another run of the same length. Without a dollar-denominated stop, a stubborn
+    repair could cost multiples of the full regeneration it exists to undercut."""
+    call = ToolCall(id="1", name="echo", arguments={"text": "hi"})
+    # Each step bills ~$1.50 at Opus-5 pricing (50k in @ $5/Mtok, 50k out @ $25/Mtok).
+    gemini_fake.register_turns(*[_costly_turn([call]) for _ in range(8)])
+    runtime = AgentRuntime(
+        _client(settings, gemini=gemini_fake),
+        settings=settings,
+        tools=_registry_with(_echo_tool()),
+    )
+
+    result = await runtime.run(
+        objective="Fix it.",
+        system="s",
+        tool_categories=["test"],
+        max_steps=8,
+        cost_cap_usd=2.0,
+        cost_model="claude-opus-5",
+    )
+
+    assert result.stopped_because == "cost_cap"
+    assert result.steps < 8, "the cap must stop the run before its step ceiling"
+
+
+async def test_a_cheap_run_is_never_stopped_by_the_cost_cap(
+    gemini_fake: FakeProvider, settings: Settings
+) -> None:
+    gemini_fake.register_turns(_turn(text="done"))
+    runtime = AgentRuntime(
+        _client(settings, gemini=gemini_fake),
+        settings=settings,
+        tools=_registry_with(_echo_tool()),
+    )
+
+    result = await runtime.run(
+        objective="Fix it.",
+        system="s",
+        tool_categories=["test"],
+        cost_cap_usd=1.0,
+        cost_model="claude-opus-5",
+    )
+
+    assert result.stopped_because == "completed"
+
+
+async def test_no_cost_cap_leaves_the_run_governed_only_by_steps(
+    gemini_fake: FakeProvider, settings: Settings
+) -> None:
+    """The cap is opt-in: every existing caller passes nothing and must be unaffected."""
+    call = ToolCall(id="1", name="echo", arguments={"text": "hi"})
+    gemini_fake.register_turns(*[_costly_turn([call]) for _ in range(3)])
+    runtime = AgentRuntime(
+        _client(settings, gemini=gemini_fake),
+        settings=settings,
+        tools=_registry_with(_echo_tool()),
+    )
+
+    result = await runtime.run(
+        objective="Fix it.", system="s", tool_categories=["test"], max_steps=3
+    )
+
+    assert result.stopped_because == "step_limit"
+    assert result.steps == 3
+
+
 async def test_runtime_completes_without_calling_any_tool(
     gemini_fake: FakeProvider, settings: Settings
 ) -> None:

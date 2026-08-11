@@ -300,6 +300,10 @@ def write_plan(plan: ScaffoldPlan, workspace: str, settings: Settings | None = N
 #: code (pytest/sqlalchemy/pydantic's legitimate internal eval()/exec()/shell=True
 #: usage tripped the privilege scanner and blocked every deploy). `.pytest_cache`:
 #: sorts early (dot-prefixed) and is pure post-test-run artifact, never source.
+#: `.factory`: the durable per-product knowledge file a repair agent reads before it
+#: starts (see `development/repair.py`). It is notes *about* the product, not part of
+#: it -- reviewing it would spend Council tokens on prose no user runs, and shipping
+#: it would publish the factory's internal commentary alongside the product.
 WORKSPACE_SKIP_DIRS = frozenset(
     {
         ".git",
@@ -311,6 +315,7 @@ WORKSPACE_SKIP_DIRS = frozenset(
         "build",
         ".deps",
         ".pytest_cache",
+        ".factory",
     }
 )
 

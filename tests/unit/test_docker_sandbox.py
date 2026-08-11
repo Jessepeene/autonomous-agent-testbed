@@ -10,7 +10,6 @@ daemon.
 
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -253,6 +252,39 @@ class TestExecute:
         process.kill.assert_called_once()
         assert result.timed_out is True
         assert result.exit_code == 124
+
+    async def test_cancelling_a_run_still_kills_the_container(self, sandbox: DockerSandbox) -> None:
+        """Cleanup must not be reachable only via TimeoutError.
+
+        `process.kill()` and `_kill_container()` lived solely in the `except
+        TimeoutError` branch, so a run cancelled rather than timed out -- a shutdown,
+        or any outer task cancellation -- left the `docker run` CLI orphaned *and* the
+        daemon-side container still running, with the workspace bind-mounted
+        read-write. `--rm` never fires for a container that never exits, and the
+        container name lives only in a local variable, so nothing could afterwards
+        find and reap it: it would keep holding its --memory/--cpus slice and could
+        keep writing into a workspace the next step was about to read and test.
+        """
+        import asyncio
+
+        process = _process(hang=True)
+        kill_process = AsyncMock()
+        kill_process.wait = AsyncMock(return_value=0)
+
+        with patch(
+            "asyncio.create_subprocess_exec",
+            AsyncMock(side_effect=[process, kill_process]),
+        ):
+            task = asyncio.ensure_future(sandbox.execute("sleep 999", workspace="product-1"))
+            await asyncio.sleep(0)  # let it reach the read
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        # Cleanup ran, and the cancellation still propagated (asserted above) rather
+        # than being swallowed -- swallowing it would break every cancellation
+        # guarantee in the frames above this one.
+        process.kill.assert_called_once()
 
     async def test_available_is_always_true_for_the_docker_backend(
         self, sandbox: DockerSandbox

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from factory.engines.development import bug_council
+from factory.engines.development import bug_council, repair
 from factory.engines.development import deploy as deploy_module
 from factory.engines.development.scaffold.generator import (
     LANDING_PAGE_SYSTEM,
@@ -28,6 +28,7 @@ from factory.hitl import interrupts
 from factory.learning import prompts as learning_prompts
 from factory.logging import get_logger
 from factory.memory import store as memory_store
+from factory.observability import costs
 from factory.sandbox.runner import DevOpsError, SandboxUnavailable, is_devops_error
 from factory.settings import EngineName
 from factory.state import repository
@@ -44,6 +45,19 @@ from factory.supervisor.context import FactoryContext
 log = get_logger(__name__)
 
 MAX_HEAL_CYCLES = 3
+
+#: Failure kinds a surgical, in-place repair can actually address.
+#:
+#: `test_failure`: a real traceback to read and a suite to re-run -- the case the
+#: whole approach is built around.
+#: `guided`: a human has diagnosed the problem and said what to change, which is the
+#: highest-information repair this factory ever performs.
+#:
+#: Everything else is deliberately absent. `dependency_*` cannot be fixed by an agent
+#: whose sandbox has no network; `deploy_failure` is not a workspace bug at all;
+#: `council_rejection:*` is plausible future work but the agent cannot re-run the
+#: Council, so it would be editing blind to the only opinion that decides the outcome.
+SURGICAL_CATEGORIES = frozenset({"test_failure", "guided"})
 
 
 async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
@@ -117,6 +131,20 @@ async def _build(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
             # earlier attempt can't survive alongside this one.
             clear_workspace(workspace, ctx.settings)
             written = write_plan(plan, workspace, ctx.settings)
+            # Recorded here, from the plan that actually produced these files, so the
+            # agentic repair path can run the same suite later without regenerating
+            # the plan to rediscover the command. Generation always overwrites it; a
+            # repair never does.
+            await repository.set_product_status(
+                session, product_id, ProductStatus.BUILDING, test_command=plan.test_command
+            )
+            repair.write_initial_knowledge(
+                workspace,
+                ctx.settings,
+                product_name=plan.product_name or product_name,
+                summary=plan.summary,
+                paths=[f.path for f in plan.files],
+            )
             log.info("development.scaffolded", product_id=product_id, files=len(written))
 
             return await _verify_and_ship(
@@ -183,6 +211,9 @@ async def _build_landing_page(ctx: FactoryContext, session: AsyncSession, task: 
             )
             clear_workspace(workspace, ctx.settings)
             written = write_plan(plan, workspace, ctx.settings)
+            await repository.set_product_status(
+                session, product_id, ProductStatus.BUILDING, test_command=plan.test_command
+            )
             log.info("development.validation_scaffolded", product_id=product_id, files=len(written))
 
             return await _verify_and_ship(
@@ -284,6 +315,50 @@ async def _evaluate_validation(ctx: FactoryContext, session: AsyncSession, task:
     return f"development: validation for {product_id} failed ({signals}/{sent}), retired"
 
 
+async def _should_repair_surgically(
+    ctx: FactoryContext, session: AsyncSession, product: Product, category: str
+) -> bool:
+    """Whether this cycle edits the workspace in place instead of regenerating it.
+
+    Every condition is a case where a surgical repair is either impossible or worse
+    than a clean rebuild -- the fallback is always today's full regeneration, which
+    remains the only operation that can recover an arbitrarily damaged workspace.
+    """
+    if category not in SURGICAL_CATEGORIES:
+        # A dependency failure cannot be fixed by an agent whose sandbox has no
+        # network and therefore cannot run pip at all; a deploy failure is not a
+        # workspace bug; a council rejection is plausible future work but the agent
+        # cannot re-run the Council, so it would be editing blind to the only opinion
+        # that matters.
+        return False
+    if not product.test_command:
+        # Built before test_command was recorded. Guessing a default would have the
+        # agent optimising against a different suite than the gate runs -- a repair
+        # that looks successful right up until verification.
+        return False
+    if category != "guided" and product.heal_attempts >= MAX_HEAL_CYCLES - 1:
+        # The last autonomous cycle always regenerates: two surgical attempts have
+        # already failed, and a from-scratch rebuild is the only thing left that can
+        # recover a workspace they may have made worse.
+        #
+        # A guided attempt is exempt because the ceiling is about *autonomous* retries
+        # running out of ideas, and a guided patch is by definition not one -- it is
+        # only ever created by a human replying to an escalation, arrives with
+        # heal_attempts already at the maximum, and carries information no earlier
+        # cycle had. Regenerating a live product from scratch over one human
+        # instruction would discard everything that currently works to fix one thing.
+        return False
+    if not ctx.docker_available:
+        return False
+    cap = ctx.settings.daily_llm_spend_cap_usd
+    if cap is not None:
+        spent = await costs.total_usd(session, hours=24)
+        if cap - spent < ctx.settings.repair_agent_min_budget_headroom_usd:
+            log.info("development.repair_skipped_budget", spent_usd=spent, cap_usd=cap)
+            return False
+    return True
+
+
 async def _patch(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
     product_id = task.product_id or str(task.payload.get("product_id", ""))
     product = await session.get(Product, product_id) if product_id else None
@@ -296,6 +371,7 @@ async def _patch(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
 
     workspace = product.workspace_path or f"product-{product_id[:12]}"
     healing = str(task.payload.get("healing", "Address the outstanding review findings."))
+    category = str(task.payload.get("category", ""))
 
     try:
         async with product_lock(
@@ -305,7 +381,16 @@ async def _patch(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
             reason="patching product",
         ):
             await repository.set_product_status(session, product_id, ProductStatus.PATCHING)
-            existing = read_workspace(workspace, ctx.settings)
+            # Before anything else: a snapshot left behind by an earlier attempt means
+            # that attempt died mid-edit. Its session rolled back, so heal_attempts
+            # never moved and nothing anywhere records that the workspace was touched
+            # -- and this task gets up to max_task_attempts retries. Without restoring
+            # first, one crash becomes three successive passes over a progressively
+            # more damaged workspace, each driven by healing text that no longer
+            # describes what is actually wrong.
+            if repair.restore_snapshot(workspace, ctx.settings):
+                log.warning("development.recovered_partial_repair", product_id=product_id)
+
             # Surfaces this product's own heal-cycle history (written by _heal() on
             # every cycle) so a recurring category of failure is visible to the model
             # attempting the fix, not just to a future audit -- the whole point of
@@ -316,6 +401,19 @@ async def _patch(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
                 query=healing,
                 scopes=memory_store.scopes_for(product_id=product_id),
             )
+
+            if await _should_repair_surgically(ctx, session, product, category):
+                return await _patch_surgically(
+                    ctx,
+                    session,
+                    task,
+                    product=product,
+                    workspace=workspace,
+                    healing=healing,
+                    recalled=recalled,
+                )
+
+            existing = read_workspace(workspace, ctx.settings)
             repairs = f"REQUIRED REPAIRS (from the previous review):\n{healing}"
             if recalled:
                 repairs = f"{repairs}\n\n{recalled}"
@@ -333,6 +431,19 @@ async def _patch(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
             # prevents: two divergent, independently-buggy copies of the app.
             clear_workspace(workspace, ctx.settings)
             write_plan(plan, workspace, ctx.settings)
+            await repository.set_product_status(
+                session, product_id, ProductStatus.PATCHING, test_command=plan.test_command
+            )
+            # A full regeneration replaces the code the old notes described, so the
+            # structure *and* the repair history recorded against it are both stale --
+            # reseed rather than append.
+            repair.write_initial_knowledge(
+                workspace,
+                ctx.settings,
+                product_name=plan.product_name or product.name,
+                summary=plan.summary,
+                paths=[f.path for f in plan.files],
+            )
 
             return await _verify_and_ship(
                 ctx,
@@ -346,6 +457,109 @@ async def _patch(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
             )
     except LockUnavailable:
         return f"development: product {product_id} is locked by another worker"
+
+
+async def _patch_surgically(
+    ctx: FactoryContext,
+    session: AsyncSession,
+    task: Task,
+    *,
+    product: Product,
+    workspace: str,
+    healing: str,
+    recalled: str,
+) -> str:
+    """Repair by editing the workspace in place, then verify exactly as usual.
+
+    Called with `product_lock` already held by `_patch`, which is what makes the
+    workspace tools safe to use without taking it themselves.
+    """
+    product_id = product.id
+    test_command = product.test_command or ""
+
+    # `clear_workspace` used to wipe `.deps` on every cycle as a side effect of
+    # wiping everything. Nothing regenerates here, so it has to be explicit -- see
+    # clear_installed_deps for why a stale one silently defeats dependency fixes.
+    repair.clear_installed_deps(workspace, ctx.settings)
+    repair.take_snapshot(workspace, ctx.settings)
+
+    try:
+        outcome = await repair.attempt_repair(
+            ctx,
+            product_id=product_id,
+            workspace=workspace,
+            test_command=test_command,
+            healing=healing,
+            recalled=recalled,
+            task_id=task.id,
+        )
+    except repair.RepairBlocked:
+        # Never leave a half-edited workspace behind, and never charge this to the
+        # product: RepairBlocked means the attempt was cut short by an outage or an
+        # exhausted budget, which says nothing about whether the code is fixable.
+        # `_run_engine` defers the task instead of counting an attempt.
+        repair.restore_snapshot(workspace, ctx.settings)
+        raise
+
+    if not outcome.usable:
+        repair.restore_snapshot(workspace, ctx.settings)
+        reason = outcome.rejected_because or "no usable repair"
+        # Straight to a heal cycle without running _verify_and_ship: that is the
+        # expensive half (dependency install, full suite, three reviewers) and against
+        # a workspace that is now byte-identical to the one that already failed, it
+        # would fail in exactly the same way for exactly the same reason.
+        log.info("development.repair_unusable", product_id=product_id, reason=reason)
+        return await _heal(
+            ctx,
+            session,
+            product_id,
+            f"{healing}\n\nA surgical repair attempt was rejected: {reason}.",
+            product.idea_id,
+            category="repair_rejected",
+        )
+
+    result = await _verify_and_ship(
+        ctx,
+        session,
+        product_id=product_id,
+        product_name=product.name,
+        workspace=workspace,
+        test_command=test_command,
+        idea_id=product.idea_id,
+        task_id=task.id,
+    )
+    # Only now, with the suite and the Council having actually ruled on it, is the
+    # agent's account of what it did worth keeping. Writing it at the point the agent
+    # merely *claimed* success would persist an unverified belief that the next
+    # cycle's recall would then read back as prior advice -- and near-duplicate
+    # reinforcement would make a repeated wrong claim look progressively more
+    # confident.
+    if outcome.answer.strip():
+        await memory_store.remember(
+            session,
+            content=outcome.answer[: memory_store.MAX_MEMORY_CHARS],
+            kind=memory_store.MemoryKind.LESSON,
+            scope=memory_store.scope_for(product_id=product_id),
+            source_task_id=task.id,
+            origin="development:surgical_repair",
+        )
+    # The durable half of the same fact. Memory is scored and pruned and can be
+    # evicted; this file travels with the product and is what the next repair reads
+    # first, however many months later that is.
+    repair.record_verified_repair(
+        workspace,
+        ctx.settings,
+        changed_files=outcome.changed_files,
+        note=outcome.answer,
+    )
+    repair.discard_snapshot(workspace, ctx.settings)
+    log.info(
+        "development.repair_verified",
+        product_id=product_id,
+        files=len(outcome.changed_files),
+        agent=outcome.summary,
+    )
+    return result
 
 
 async def _verify_and_ship(
@@ -612,7 +826,15 @@ async def _heal(
         kind=TaskKind.PATCH_PRODUCT,
         engine=EngineName.DEVELOPMENT,
         idempotency_key=f"patch:{product_id}:{attempts}",
-        payload={"product_id": product_id, "idea_id": idea_id, "healing": healing[:6000]},
+        payload={
+            "product_id": product_id,
+            "idea_id": idea_id,
+            "healing": healing[:6000],
+            # Which kind of failure this is, so _patch can tell a test failure (worth
+            # a surgical, in-place repair) from a dependency or deploy failure (which
+            # an agent with no network structurally cannot fix).
+            "category": category,
+        },
         product_id=product_id,
         priority=40,  # repairing a broken product outranks starting a new one
     )

@@ -52,9 +52,7 @@ _STREAM_THRESHOLD = 16_000
 _PERMANENT_STATUS = {400, 401, 403, 404, 422}
 
 
-def _classify_status_error(
-    name: Provider, exc: anthropic.APIStatusError
-) -> ProviderUnavailable:
+def _classify_status_error(name: Provider, exc: anthropic.APIStatusError) -> ProviderUnavailable:
     detail = f"anthropic {exc.status_code}: {exc}"
     if exc.status_code in _PERMANENT_STATUS:
         return ProviderRequestRejected(name, detail, status=exc.status_code)
@@ -107,6 +105,35 @@ def _to_anthropic_message(turn: Turn) -> dict[str, Any]:
             {"type": "tool_use", "id": call.id, "name": call.name, "input": call.arguments}
         )
     return {"role": turn.role, "content": blocks or [{"type": "text", "text": "(no content)"}]}
+
+
+def _mark_conversation_prefix(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Put a cache breakpoint on the final content block of the conversation.
+
+    An agent loop re-sends the entire transcript every step, and that transcript only
+    ever grows -- tool results are the bulk of it, and a single sandbox result can be
+    thousands of tokens. Without a breakpoint here only the system block was cached
+    (see the `system` kwarg in `converse`), so every step re-paid *full* input price
+    for every prior step's output: cost grows quadratically in step count, which is
+    what made a multi-step repair agent more expensive than the one-shot full
+    regeneration it was meant to replace.
+
+    One breakpoint at the end is enough to make that incremental. Anthropic matches
+    the longest cached prefix, and step N's marked prefix is by construction a strict
+    prefix of step N+1's messages (the loop only ever appends), so each step reads
+    everything before it at 0.1x and writes only its own delta.
+
+    Deliberately not marking earlier turns as well: breakpoints are a limited budget,
+    and a prefix that is never re-read still pays the 1.25x write premium.
+    """
+    if not messages:
+        return messages
+    # The block dicts are freshly built by _to_anthropic_message on every call, so
+    # mutating the last one here cannot leak cache_control into a caller's own data.
+    content = messages[-1].get("content")
+    if isinstance(content, list) and content:
+        content[-1]["cache_control"] = {"type": "ephemeral"}
+    return messages
 
 
 class AnthropicProvider:
@@ -281,7 +308,7 @@ class AnthropicProvider:
             "model": model,
             "max_tokens": max_tokens,
             "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-            "messages": [_to_anthropic_message(turn) for turn in turns],
+            "messages": _mark_conversation_prefix([_to_anthropic_message(turn) for turn in turns]),
             "output_config": {"effort": self._effort(task_type)},
         }
         if tools:

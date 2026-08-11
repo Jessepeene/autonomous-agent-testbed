@@ -19,7 +19,13 @@ from dataclasses import replace
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from factory.agents.roles import ROLES, RoleName, get_role, role_catalogue
+from factory.agents.roles import (
+    ROLES,
+    WORKSPACE_SCOPED_ROLES,
+    RoleName,
+    get_role,
+    role_catalogue,
+)
 from factory.agents.spawner import RoleNotPermitted, SpawnRequest, can_spawn, resolve_role, spawn
 from factory.llm.providers.base import AgentTurn, Provider, Usage
 from factory.llm.providers.fake import FakeProvider
@@ -58,10 +64,24 @@ def test_unknown_role_is_not_permitted() -> None:
         resolve_role("prompt_engineer")
 
 
-def test_role_catalogue_lists_every_role_by_name() -> None:
+def test_role_catalogue_lists_every_orchestrator_selectable_role_by_name() -> None:
     rendered = role_catalogue()
     for name in RoleName:
+        if name in WORKSPACE_SCOPED_ROLES:
+            continue
         assert name.value in rendered
+
+
+def test_role_catalogue_hides_workspace_scoped_roles_from_the_orchestrator() -> None:
+    """This catalogue is literally the menu the Orchestrator picks from, so anything
+    listed here is something it can spawn with a model-chosen objective, as
+    SUPERVISOR, outside any product lock and outside heal accounting. A workspace
+    surgeon is only safe inside `_patch`, which pins it to one product, holds the
+    lock, and can roll its edits back -- none of which the Orchestrator provides."""
+    rendered = role_catalogue()
+    assert WORKSPACE_SCOPED_ROLES, "the exclusion set must not be silently emptied"
+    for name in WORKSPACE_SCOPED_ROLES:
+        assert name.value not in rendered
 
 
 # --- capability gating: checked before anything runs -------------------------

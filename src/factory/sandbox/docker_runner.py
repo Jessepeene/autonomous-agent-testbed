@@ -188,6 +188,25 @@ class DockerSandbox:
                 stderr=f"sandbox exceeded {timeout}s and was killed",
                 timed_out=True,
             )
+        except asyncio.CancelledError:
+            # An *outer* timeout cancels this coroutine instead of raising
+            # TimeoutError into it, so none of the cleanup above ran. That is not
+            # hypothetical: `AgentRuntime._execute` wraps every tool call in its own
+            # `asyncio.wait_for(..., 120)`, which is shorter than this sandbox's own
+            # default timeout (600s) -- so for any command running longer than 120s
+            # the cancellation path, not the timeout path, is the one that fires.
+            #
+            # The consequence was a container that outlives its own run with
+            # {workspace}:/workspace:rw still bind-mounted, holding its --memory and
+            # --cpus slice, unfindable (the name lives only in this frame), and free
+            # to keep writing into the workspace while the very next step reads and
+            # tests it. Clean up exactly as the timeout path does.
+            process.kill()
+            await self._kill_container(container_name, workspace)
+            log.warning("sandbox.cancelled", workspace=workspace)
+            # Never swallow a CancelledError: every cancellation guarantee above this
+            # frame depends on it propagating once the cleanup is done.
+            raise
 
         return SandboxResult(
             exit_code=process.returncode or 0,

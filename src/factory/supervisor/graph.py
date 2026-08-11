@@ -23,6 +23,7 @@ from factory.engines.compliance.graph import (
     VALIDATION_CAPACITY_RECHECK_SECONDS,
     ValidationCapacityExceeded,
 )
+from factory.engines.development.repair import RepairBlocked
 from factory.engines.marketing.campaign import RECHECK_SECONDS, CampaignApprovalPending
 from factory.engines.marketing.deliverability import RECHECK_SECONDS as DELIVERABILITY_RECHECK
 from factory.engines.marketing.deliverability import MarketingFrozen
@@ -39,6 +40,12 @@ from factory.supervisor import backlog, orchestrator
 from factory.supervisor.context import FactoryContext
 
 log = get_logger(__name__)
+
+#: How long a repair deferred for an outage or an exhausted budget waits before it is
+#: retried. Short relative to the campaign/validation rechecks above: the conditions
+#: this covers (a provider outage, the daily spend window advancing) clear on the
+#: order of minutes, and the fallback if they do not is simply another cheap defer.
+REPAIR_RECHECK_SECONDS = 600
 
 
 def engine_node_name(engine: EngineName) -> str:
@@ -215,6 +222,24 @@ async def _run_engine(
         async with session_scope(ctx.settings) as session:
             await repository.defer_task(session, task_id, not_before=datetime.now(UTC) + recheck)
         log.info("engine.awaiting_validation_capacity", engine=str(engine), task_id=task_id)
+        return {"task_id": task_id, "note": str(exc)[:500], "error": None}
+    except RepairBlocked as exc:
+        # A surgical repair that never got a fair attempt -- provider outage, or its
+        # step/time/cost budget ran out before it could finish. Deferred rather than
+        # failed for the same reason as the cases above: attempt_count must not move,
+        # because none of those say anything about whether the product is fixable.
+        # Counting them would let three consecutive outages permanently escalate a
+        # product whose repair was never actually tried. The workspace has already
+        # been rolled back by the caller.
+        async with session_scope(ctx.settings) as session:
+            await repository.defer_task(
+                session,
+                task_id,
+                not_before=datetime.now(UTC) + timedelta(seconds=REPAIR_RECHECK_SECONDS),
+            )
+        log.info(
+            "engine.repair_blocked", engine=str(engine), task_id=task_id, detail=str(exc)[:200]
+        )
         return {"task_id": task_id, "note": str(exc)[:500], "error": None}
     except SandboxUnavailable as exc:
         async with session_scope(ctx.settings) as session:
