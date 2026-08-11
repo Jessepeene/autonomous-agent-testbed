@@ -121,7 +121,10 @@ def _agent_turn(text: str = "", calls: list[ToolCall] | None = None) -> AgentTur
 def _ctx(settings: Settings, sandbox: object, provider: FakeProvider) -> FactoryContext:
     ctx = FactoryContext(
         settings=settings,
-        llm=LLMClient(ProviderRegistry({Provider.ANTHROPIC: provider}), settings=settings),
+        # backoff_base=0 exercises the real retry path without real sleeps.
+        llm=LLMClient(
+            ProviderRegistry({Provider.ANTHROPIC: provider}), settings=settings, backoff_base=0.0
+        ),
         notifier=NullNotifier(),
         sandbox=sandbox,  # type: ignore[arg-type]
         enabled_engines={EngineName.DEVELOPMENT},
@@ -359,7 +362,11 @@ async def test_a_provider_outage_defers_instead_of_consuming_a_heal_cycle(
     from factory.llm.providers.base import ProviderUnavailable
 
     provider = FakeProvider(Provider.ANTHROPIC)
-    provider.register_turns(ProviderUnavailable(Provider.ANTHROPIC, "503", status=503))
+    # `converse` retries a transport failure up to _MAX_TRANSPORT_ATTEMPTS times
+    # against the same provider, and CODE_GENERATION is in NO_FAILOVER so there is no
+    # second vendor to fall through to -- three queued failures exhaust the budget.
+    for _ in range(3):
+        provider.register_turns(ProviderUnavailable(Provider.ANTHROPIC, "503", status=503))
     ctx = _ctx(settings, sandbox, provider)
     task = await _patch_task(session, product_id, idea_id)
 
