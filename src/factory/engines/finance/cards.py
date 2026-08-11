@@ -3,6 +3,17 @@
 The spending limit on the factory's virtual card is set to the reinvestment pool and
 nothing more, so the card itself is a second, external ceiling on autonomous spend:
 even a bug in the budget module cannot charge money the factory has not earned.
+
+That claim depends on the spending-limit `interval` being ``all_time``, not
+``monthly``: a *monthly* Stripe Issuing limit is a per-calendar-month counter, so
+the full pool-derived amount becomes chargeable again every month regardless of
+what was spent the month before -- an internal-budget-module bug (or simply no
+internal debit ever being recorded, which is the case today: nothing in this
+codebase yet calls `supervisor.budget.authorize()`) would let the card be charged
+its full limit again and again, indefinitely. ``all_time`` makes Stripe track
+cumulative spend against this card for its whole life, so the limit really is a
+hard ceiling on total money ever charged to it -- independent of whether the
+internal ledger's own spend-tracking is ever wired up.
 """
 
 from __future__ import annotations
@@ -28,7 +39,7 @@ class CardSyncResult:
 def _update_card(card_id: str, limit_cents: int, api_key: str) -> None:
     stripe.issuing.Card.modify(
         card_id,
-        spending_controls={"spending_limits": [{"amount": limit_cents, "interval": "monthly"}]},
+        spending_controls={"spending_limits": [{"amount": limit_cents, "interval": "all_time"}]},
         api_key=api_key,
     )
 

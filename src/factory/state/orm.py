@@ -298,7 +298,13 @@ class OutreachLog(Base):
     __tablename__ = "outreach_log"
 
     id: Mapped[str] = _pk()
-    lead_id: Mapped[str] = mapped_column(ForeignKey("leads.id"), nullable=False)
+    #: Nullable, ON DELETE SET NULL: GDPR Art. 17 erasure (`repository.erase_lead`)
+    #: deletes the `Lead` row outright, and this send record must survive that as
+    #: an anonymous audit/attribution entry rather than block the erasure with a
+    #: foreign-key violation or cascade-delete the send history itself.
+    lead_id: Mapped[str | None] = mapped_column(
+        ForeignKey("leads.id", ondelete="SET NULL"), nullable=True
+    )
     product_id: Mapped[str | None] = mapped_column(String(32))
     channel: Mapped[str] = mapped_column(String(32), nullable=False, default="email")
     subject: Mapped[str] = mapped_column(String(500), nullable=False)

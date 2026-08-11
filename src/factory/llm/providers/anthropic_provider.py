@@ -22,6 +22,7 @@ from factory.llm.providers.base import (
     LLMError,
     Provider,
     ProviderRefusal,
+    ProviderRequestRejected,
     ProviderUnavailable,
     SchemaViolation,
     ToolCall,
@@ -42,6 +43,22 @@ _FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
 # Above this, a non-streaming request risks an HTTP timeout before the model finishes.
 _STREAM_THRESHOLD = 16_000
+
+#: Permanent failures -- retrying the identical request against Anthropic again will
+#: never succeed. A different vendor may still accept it (e.g. a schema keyword one
+#: provider's dialect rejects), so these still raise `ProviderRequestRejected`
+#: (failover-eligible), not a plain error -- only the same-provider retry loop is
+#: skipped.
+_PERMANENT_STATUS = {400, 401, 403, 404, 422}
+
+
+def _classify_status_error(
+    name: Provider, exc: anthropic.APIStatusError
+) -> ProviderUnavailable:
+    detail = f"anthropic {exc.status_code}: {exc}"
+    if exc.status_code in _PERMANENT_STATUS:
+        return ProviderRequestRejected(name, detail, status=exc.status_code)
+    return ProviderUnavailable(name, detail, status=exc.status_code)
 
 
 def _system_blocks(system: str, cache_prefix: str | None) -> list[dict[str, Any]]:
@@ -121,6 +138,20 @@ class AnthropicProvider:
             return self._settings.effort_review
         return "high"
 
+    def _usage(self, response: Any, elapsed_ms: int) -> Usage:
+        """Real usage from a response that still failed downstream (refusal, schema
+        violation) -- these are frequently billed, successful HTTP 200s, most
+        notably a refusal (`stop_reason == "refusal"` arrives as a normal 200) and a
+        thinking-budget-exhausted empty answer (a full paid generation)."""
+        usage = getattr(response, "usage", None)
+        return Usage(
+            input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
+            output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
+            cache_read_tokens=int(getattr(usage, "cache_read_input_tokens", 0) or 0),
+            cache_write_tokens=int(getattr(usage, "cache_creation_input_tokens", 0) or 0),
+            latency_ms=elapsed_ms,
+        )
+
     async def _request(self, kwargs: dict[str, Any], *, stream: bool) -> Any:
         client = self._get_client()
         if self._use_fallbacks:
@@ -130,11 +161,26 @@ class AnthropicProvider:
                     async with client.beta.messages.stream(**beta_kwargs) as s:
                         return await s.get_final_message()
                 return await client.beta.messages.create(**beta_kwargs)
-            except (TypeError, anthropic.BadRequestError) as exc:
-                # The SDK or the account does not know this beta. Degrade once, loudly,
-                # and never pay the failed attempt again.
+            except TypeError as exc:
+                # Can only mean the installed SDK does not recognise betas=/fallbacks=
+                # at all (there is no other reason this call would raise TypeError).
+                # Degrade once, loudly, and never pay the failed attempt again.
                 self._use_fallbacks = False
                 log.warning("anthropic.fallbacks_unavailable", detail=str(exc)[:300])
+            except anthropic.BadRequestError as exc:
+                detail = str(exc)
+                if "beta" not in detail.lower() and "fallback" not in detail.lower():
+                    # A genuine request error (bad schema, bad tool definition, an
+                    # unsupported `effort` value, ...) unrelated to the beta header
+                    # itself -- must not be silently retried without the beta (which
+                    # just repeats the same failure with a different symptom) and
+                    # must not permanently disable fallbacks for the rest of the
+                    # process over an unrelated one-off error. Let it propagate to
+                    # parse()/converse()'s own APIStatusError handler, which
+                    # classifies it correctly (permanent vs. retryable) by status.
+                    raise
+                self._use_fallbacks = False
+                log.warning("anthropic.fallbacks_unavailable", detail=detail[:300])
 
         if stream:
             async with client.messages.stream(**kwargs) as s:
@@ -170,9 +216,7 @@ class AnthropicProvider:
         try:
             response = await self._request(kwargs, stream=max_tokens > _STREAM_THRESHOLD)
         except anthropic.APIStatusError as exc:
-            raise ProviderUnavailable(
-                self.name, f"anthropic {exc.status_code}: {exc}", status=exc.status_code
-            ) from exc
+            raise _classify_status_error(self.name, exc) from exc
         except anthropic.APIConnectionError as exc:
             raise ProviderUnavailable(self.name, f"anthropic connection error: {exc}") from exc
 
@@ -186,6 +230,7 @@ class AnthropicProvider:
                 self.name,
                 getattr(details, "category", None),
                 f"claude declined the request ({getattr(details, 'category', 'unspecified')})",
+                usage=self._usage(response, elapsed_ms),
             )
 
         text = "".join(
@@ -203,28 +248,23 @@ class AnthropicProvider:
                 "claude returned no text content "
                 f"(stop_reason={getattr(response, 'stop_reason', None)!r}, "
                 f"content_block_types={block_types}, max_tokens={max_tokens}, "
-                f"usage={getattr(response, 'usage', None)!r})"
+                f"usage={getattr(response, 'usage', None)!r})",
+                usage=self._usage(response, elapsed_ms),
             )
 
         try:
             value = schema.model_validate_json(text)
         except (ValidationError, json.JSONDecodeError) as exc:
             raise SchemaViolation(
-                f"claude output failed {schema.__name__} validation: {exc}"
+                f"claude output failed {schema.__name__} validation: {exc}",
+                usage=self._usage(response, elapsed_ms),
             ) from exc
 
-        usage = getattr(response, "usage", None)
         return Completion(
             value=value,
             provider=self.name,
             model=str(getattr(response, "model", model)),
-            usage=Usage(
-                input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
-                output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
-                cache_read_tokens=int(getattr(usage, "cache_read_input_tokens", 0) or 0),
-                cache_write_tokens=int(getattr(usage, "cache_creation_input_tokens", 0) or 0),
-                latency_ms=elapsed_ms,
-            ),
+            usage=self._usage(response, elapsed_ms),
         )
 
     async def converse(
@@ -251,9 +291,7 @@ class AnthropicProvider:
         try:
             response = await self._request(kwargs, stream=max_tokens > _STREAM_THRESHOLD)
         except anthropic.APIStatusError as exc:
-            raise ProviderUnavailable(
-                self.name, f"anthropic {exc.status_code}: {exc}", status=exc.status_code
-            ) from exc
+            raise _classify_status_error(self.name, exc) from exc
         except anthropic.APIConnectionError as exc:
             raise ProviderUnavailable(self.name, f"anthropic connection error: {exc}") from exc
 
@@ -264,6 +302,7 @@ class AnthropicProvider:
                 self.name,
                 getattr(details, "category", None),
                 "claude declined the request",
+                usage=self._usage(response, elapsed_ms),
             )
 
         text_parts: list[str] = []
@@ -281,20 +320,13 @@ class AnthropicProvider:
                     )
                 )
 
-        usage = getattr(response, "usage", None)
         return AgentTurn(
             text="".join(text_parts),
             tool_calls=calls,
             stop_reason=str(getattr(response, "stop_reason", "") or ""),
             provider=self.name,
             model=str(getattr(response, "model", model)),
-            usage=Usage(
-                input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
-                output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
-                cache_read_tokens=int(getattr(usage, "cache_read_input_tokens", 0) or 0),
-                cache_write_tokens=int(getattr(usage, "cache_creation_input_tokens", 0) or 0),
-                latency_ms=elapsed_ms,
-            ),
+            usage=self._usage(response, elapsed_ms),
         )
 
     async def list_models(self) -> list[str]:

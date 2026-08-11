@@ -156,7 +156,21 @@ async def enqueue_maintenance(
     enabled_engines: set[EngineName],
     now: datetime | None = None,
 ) -> list[str]:
-    """Queue any maintenance item whose cadence window has no task yet."""
+    """Queue any maintenance item whose cadence window has no task yet.
+
+    ``item.engine`` is a *topic* tag, used only to decide whether an item is
+    relevant given which engines are currently enabled (e.g. don't bother auditing
+    live products if Development/Docker is unavailable) -- it is deliberately NOT
+    the engine the resulting task is dispatched to. Every real `TaskKind.MAINTENANCE`
+    handler lives in `factory.engines.maintenance.run()`, registered only for
+    `EngineName.SUPERVISOR` (`engines/base.py`); a task previously enqueued with
+    `engine=item.engine` (e.g. DEVELOPMENT for `audit-live-products`) was routed
+    instead to that engine's own `run()`, which has never heard of
+    `TaskKind.MAINTENANCE` and completed it instantly with an "unsupported task
+    kind" string -- so `audit-live-products`, `improve-test-coverage`, and
+    `reconcile-outreach-conversions` had never actually executed once, and every
+    completion looked identical to a real, successful maintenance run.
+    """
     created: list[str] = []
     for item in CATALOGUE:
         if item.engine not in enabled_engines:
@@ -165,7 +179,7 @@ async def enqueue_maintenance(
         task_id = await repository.enqueue_task(
             session,
             kind=TaskKind.MAINTENANCE,
-            engine=item.engine,
+            engine=EngineName.SUPERVISOR,
             idempotency_key=key,
             payload={"slug": item.slug, "objective": item.objective},
             priority=500,  # always yields to revenue-bearing work

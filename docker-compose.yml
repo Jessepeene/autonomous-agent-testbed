@@ -58,6 +58,14 @@ services:
       # actually works at every boot rather than assuming it from config.
       - /var/run/docker.sock:/var/run/docker.sock
       - ${WORKSPACE_HOST_PATH:-/srv/factory-workspaces}:/srv/factory-workspaces
+      # blacklist.txt was previously baked into the image (COPY'd at build time,
+      # see the Dockerfile) with no volume — every redeploy silently reset it to
+      # the git-tracked version, discarding every GDPR-erasure/unsubscribe
+      # tombstone written at runtime and re-permitting outreach to addresses that
+      # had opted out. Bind-mounted so runtime writes from erase_lead() survive a
+      # redeploy. Must be seeded once from the repo's blacklist.txt before first
+      # boot on a new host — see DEPLOYMENT.md.
+      - ${BLACKLIST_HOST_PATH:-/srv/factory-blacklist/blacklist.txt}:/app/blacklist.txt
     command: ["python", "-m", "factory.main"]
 
   caddy:

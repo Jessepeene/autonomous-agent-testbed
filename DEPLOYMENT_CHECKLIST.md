@@ -756,3 +756,315 @@ backlog drain to empty, and the tick loop reach a genuine
 All fourteen fixes are applied, verified against the real server, and ready
 to commit. Bug #13 (quota/billing) is resolved — the user enabled billing on
 the Google Cloud project.
+
+## Fix pass on the audit below — 2026-08-11
+
+User directive: "I think it's important all of these bugs are fully fixed before
+continuing with throwing more expensive tokens at it." Live spend cap also lowered
+to $5/day for this pass. Mid-pass, the user separately asked where the prior day's
+$20.40 spend went — live `llm_calls` query showed 83% ($17.03) was
+`code_generation`, and of that, $9.09 (more than half) was `patch_product` heal
+cycles across 5 products (one already retired after exhausting heal attempts, two
+more maxed out at `heal_attempts=3`) — almost no spend went to genuinely new
+products. Directly consistent with several findings below (infra failures routed
+into the repair loop, sandbox timeout container leaks, Bug Council issues).
+
+**All 10 CRITICAL findings fixed, tested, and verified against real Postgres**
+(505 unit tests + 108 integration tests, 0 regressions; new migration `0010`
+applied cleanly). Not yet deployed to the live server or committed as of this
+checkpoint — see the end of this section.
+
+1. **Ledger race** — `append_ledger` now takes a Postgres transaction-scoped
+   advisory lock before reading the running balance, serializing concurrent
+   webhook deliveries. Regression test fires two real concurrent `append_ledger`
+   calls via `asyncio.gather` against Postgres and asserts both amounts land.
+2. **Double-counted revenue** — `REVENUE_EVENTS` narrowed to exactly one canonical
+   event per money flow (`checkout.session.completed` +
+   `checkout.session.async_payment_succeeded` for one-time payments, `invoice.paid`
+   for subscriptions); `invoice.payment_succeeded`/`payment_intent.succeeded`
+   removed. `checkout.session.completed` now gated on `payment_status` so an
+   async (SEPA/ACH) session isn't booked before it actually settles. `DEPLOYMENT.md`
+   gained a "Stripe setup" section listing exactly which events to select in the
+   dashboard and which *not* to add.
+3. **GDPR erasure crash** — `outreach_log.lead_id` is now nullable with
+   `ON DELETE SET NULL` (migration `0010`) instead of a plain `NOT NULL` FK with no
+   delete action; `erase_lead` no longer raises. Unsubscribe token mismatch also
+   fixed: `send_to_lead` was generating one token for the email body and
+   `record_outreach` was silently generating a *different* one to store —
+   `record_outreach` now accepts the caller's token instead of minting its own.
+4. **Ephemeral blacklist** — `blacklist.txt` is now bind-mounted
+   (`docker-compose.yml`, `BLACKLIST_HOST_PATH`, default
+   `/srv/factory-blacklist/blacklist.txt`) instead of baked into the image, so
+   runtime erasure tombstones survive a redeploy. Seeded on the live server from
+   the current in-image copy (no real tombstones existed yet to lose).
+5. **Leads re-emailed indefinitely** — `leads_for_outreach` now excludes leads with
+   a prior `sent` `OutreachLog` row (a `blocked`/`suppressed` attempt never reached
+   the recipient, so those remain retry-eligible).
+6. **Dead debit path / monthly card reset** — Stripe Issuing card spending-limit
+   `interval` changed from `monthly` to `all_time`, so the card is a genuine
+   lifetime ceiling on spend regardless of whether `budget.authorize()` is ever
+   wired to a real caller (it currently isn't — no code path in this repo executes
+   paid spend yet, so there was nothing to wire up without inventing a feature;
+   flagged here rather than silently dropped).
+7. **Maintenance tasks silently marked done without running** —
+   `enqueue_maintenance` was tagging tasks with their catalogue item's *topic*
+   engine (e.g. DEVELOPMENT for `audit-live-products`), but only `SUPERVISOR`'s
+   `run()` handles `TaskKind.MAINTENANCE` — now every maintenance task is enqueued
+   as `engine=SUPERVISOR` regardless of topic; the topic tag still gates whether an
+   item is enqueued at all. `audit-live-products`, `improve-test-coverage`, and
+   `reconcile-outreach-conversions` had never executed once before this fix.
+8. **Scoring-weights trial could disable the idea quality filter** —
+   `WeightsCandidate` now has a `model_validator` rejecting any proposal whose four
+   weights don't sum to ~1.0 (±0.02), since `weighted_score` is an unnormalised sum
+   calibrated against a fixed `SCORE_THRESHOLD`.
+9. **Provider 4xx misclassified as retryable** — both providers now classify a
+   permanent 4xx (bad key, bad schema, model not found) as the new
+   `ProviderRequestRejected` (a `ProviderUnavailable` subclass), which skips the
+   3-attempt same-provider retry loop and fails over immediately instead of
+   burning attempts on a request that will never succeed. Anthropic's
+   `_use_fallbacks` permanent-disable no longer fires on every 400 — only ones
+   whose message actually mentions the beta/fallback header.
+10. **Silent Opus-5 failover + $0-cost failed calls** — cross-vendor failover to
+    Anthropic for a normally-cheap Gemini task (orchestration/discovery/analysis/
+    compliance/marketing copy) now uses a new `model_fallback_anthropic` setting
+    (`claude-haiku-4-5`) instead of `model_code` (Opus 5, priced for code work).
+    `ProviderRefusal`/`SchemaViolation` now carry the real `Usage` from the
+    response that triggered them (both are frequently billed, successful HTTP
+    200s) instead of being recorded as 0 tokens / $0; an intermediate
+    schema-violation attempt that succeeds on repair is now also recorded
+    (previously dropped entirely).
+
+**Verification**: built a `superagent-factory:verify` image from the full change
+set, ran `alembic upgrade head` against a fresh scratch Postgres container, then
+505 unit tests (Linux, matching the deploy target) and 108 integration tests, all
+green. Live `.env` untouched by this pass except the spend-cap change made
+earlier; nothing here has been deployed to `/opt/superagent` yet.
+
+**Not yet started**: the HIGH and MEDIUM/LOW findings below this line remain
+unfixed as of this checkpoint.
+
+## Comprehensive codebase audit — 2026-08-10 (research only, NOTHING below is fixed yet)
+
+Requested directly: "can you do a comprehensive scan of the entire codebase, to
+catch any more of these system breaking problems?" Six parallel agents each
+audited one subsystem end-to-end (call sites included, not just the module
+itself): marketing, compliance, finance, development-engine internals,
+core infra (LLM client/providers/agent runtime/memory), and the Learning Loop +
+Supervisor. This section is the consolidated, prioritized result. **Nothing in
+this section has been fixed, tested, or deployed** — this pass was scoped as
+scan-only; next step is the user picking what to fix and in what order.
+
+Full per-finding detail (exact mechanism, concrete failure scenario) lives in
+the session transcript for each subagent; this section is the prioritized
+index. File:line references are accurate as of this commit.
+
+### CRITICAL — money integrity, legal exposure, or a shipped feature that cannot work
+
+1. **Concurrent Stripe webhook deliveries corrupt the running ledger balance,
+   permanently.** `state/repository.py:764-814` `append_ledger` does
+   read-then-write on the last row's balance with no row lock, no advisory
+   lock, no serializable isolation. Two webhooks arriving together both read
+   balance=0 and both write from that stale base — the ledger silently
+   under-counts real revenue forever after, and the reinvestment card limit is
+   computed from the wrong number indefinitely.
+2. **One Stripe payment gets recorded 2-4 times.** `finance/webhooks.py:26-33`
+   `REVENUE_EVENTS` includes multiple event types Stripe fires for the *same*
+   money (`invoice.payment_succeeded` + `invoice.paid`; `checkout.session.completed`
+   + `payment_intent.succeeded`), and dedup is on `event.id` which differs per
+   event. Default outcome for a normal Stripe integration, not an edge case.
+3. **GDPR Art. 17 erasure has never once succeeded — it always crashes.**
+   Confirmed independently by both the marketing and compliance audits: the
+   unsubscribe/erasure path resolves through an `OutreachLog` row that
+   references the very `Lead` being deleted, and `OutreachLog.lead_id` has no
+   `ondelete` clause, so every erasure attempt raises a foreign-key violation.
+   Compounding: the unsubscribe token used to look up the lead is never
+   persisted correctly in the first place, so `GET /u/{token}` 404s before it
+   would even reach the crash — meaning **no unsubscribe link the factory has
+   ever sent has worked.**
+4. **The suppression list lives inside the Docker image with no volume.**
+   `blacklist.txt` — every redeploy silently resets it, un-suppressing every
+   address that ever unsubscribed. Combined with #3, there is currently no
+   working mechanism, at any layer, for honoring an unsubscribe or an erasure
+   request.
+5. **Leads are re-emailed indefinitely — nothing marks a lead "already
+   contacted."** `leads_for_outreach` has no filter excluding leads with a
+   prior successful send. Confirmed independently by both the marketing and
+   compliance audits. This is also a data-integrity problem for the
+   just-shipped validation gate: duplicate/repeat sends can inflate or corrupt
+   the response-rate math `_evaluate_validation` uses to decide build-or-scrap.
+6. **The only ledger debit path is dead code, and the card's spend ceiling
+   resets every month regardless of what's actually left.** `budget.authorize()`
+   has zero callers; no `kind="spend"` row is ever written, so the
+   reinvestment pool only ever grows. The card's Stripe Issuing control uses
+   `interval: "monthly"`, a per-interval counter — so once real revenue funds
+   a limit, that same limit is available again every month, forever, with no
+   corresponding debit anywhere. Directly contradicts `cards.py`'s own
+   docstring claim that a budget-module bug "cannot charge money the factory
+   has not earned."
+7. **Maintenance tasks not tagged `engine=SUPERVISOR` are silently marked DONE
+   without running.** `engines/base.py`'s runner map only wires
+   `TaskKind.MAINTENANCE` for the Supervisor engine; three catalogue items
+   (`improve-test-coverage`, `audit-live-products` — both DEVELOPMENT;
+   `reconcile-outreach-conversions` — MARKETING) get claimed by an engine that
+   has never heard of that task kind, return an "unsupported task kind"
+   string, and complete instantly with no error. Concretely: **revenue
+   attribution reconciliation has never executed once**, and live-product
+   health auditing has never executed once — both are fully dead code from the
+   real dispatch path, exactly like bug #14 above before it was fixed, just
+   one layer deeper. (A fourth item, `refresh-market-signals`, is worse in the
+   other direction — it silently runs a full real Discovery cycle, doubling
+   LLM spend every 12h under a slug that claims to only re-score existing
+   ideas.)
+8. **A learned scoring-weights trial can be confirmed with weights that don't
+   sum to 1, silently disabling the idea quality filter.** `WeightsCandidate`
+   bounds each weight to `[0,1]` independently with no sum constraint. A
+   proposal like `{0.5, 0.5, 0.5, 0.5}` roughly doubles every idea's score,
+   pushes survival rate to ~100%, statistically confirms as a clear win, and
+   becomes permanently active — silently turning `SCORE_THRESHOLD` into a
+   no-op with no self-correcting mechanism (the loop can ratchet this way but
+   never back).
+9. **Every permanent provider auth/schema failure (revoked key, bad schema,
+   401/403/404) is misclassified as retryable, and silently fails over to the
+   most expensive model.** Both `gemini_provider.py:200-204` and
+   `anthropic_provider.py:172-175` treat *all* 4xx errors as retryable
+   (dead branch: both code paths do the same thing). 3 paid retries, then
+   silent cross-vendor failover — and the failover model for anything normally
+   routed to cheap Gemini Flash is `settings.model_code` (Opus 5), ~10-25x the
+   price, with zero alarm anywhere. A revoked/quota-exhausted `GEMINI_API_KEY`
+   would silently move 100% of orchestration/discovery/analysis/compliance/
+   marketing traffic onto Opus-5 pricing indefinitely.
+10. **The cost ledger is structurally blind to some of the most expensive
+    failure modes.** Failed LLM calls (refusal, schema-violation) are recorded
+    with `usage=None` → `0/0/0/0` cost, even though they were billed; the
+    schema-repair retry path isn't recorded at all. A build that burns a full
+    64k-token thinking budget twice (fails schema validation, gets repaired,
+    fails again) shows up in `llm_calls` as `$0.00` — meaning the daily spend
+    cap and the cost-reduction maintenance agent cannot see or react to this
+    exact failure mode.
+
+### HIGH — real money/data loss on a less common path, or a just-shipped feature undermined
+
+- **Deploy reports success before Vercel finishes building** (`deploy.py:141-145`
+  never checks `readyState`) — product goes LIVE and marketing starts lead
+  harvest against a URL that may still 404.
+- **Infra failures get routed into the code-repair loop.** A Vercel 5xx/429/401
+  or missing `VERCEL_TOKEN`, and separately any Bug Council reviewer error
+  (including a transient 529), both trigger a full rebuild-and-heal cycle on
+  code that was never broken — can burn the entire heal budget and escalate
+  "repair did not converge" on working code.
+- **Bug Council's model reviewers silently see only the first 60KB of a build**
+  (`bug_council.py` truncates mid-file with no marker) while being told "the
+  complete codebase under review follows" — security/logic review quietly
+  degrades on any build over ~150KB, worse the bigger the product gets.
+  `dist/`/`build/` output is deployed but excluded from every reviewer's input
+  entirely — a secret or malicious code baked into build output ships
+  unreviewed by anyone.
+- **The just-shipped validation-gate trial metric (`landing_page_interest_rate`)
+  can never reach statistical significance.** One episode per product, gated
+  behind a human campaign-approval wait, `MIN_TRIAL_N=20` inside a 30-day
+  window — the realistic ceiling is ~6-8 episodes, so the trial will always
+  auto-confirm by timeout on a near-zero sample. This directly undermines the
+  feature built this week: the landing-page prompt "learning" is currently
+  statistical noise.
+- **Refund larger than the recorded balance 500s the webhook endpoint**, and
+  after repeated 500s Stripe auto-disables it — silently stopping *all* future
+  revenue recording, not just that one event.
+- **A won dispute is never unwound**, and `charge.refunded`'s cumulative
+  `amount_refunded` is double-subtracted across partial refunds — both leave
+  the ledger permanently and silently wrong in the merchant's favor or against
+  it.
+- **`EngineName.SUPERVISOR` is missing from `routing.PRIORITY`**, so whenever
+  the only pending work is maintenance, the deterministic router returns
+  "ambiguous" and fires a real orchestration LLM call every 15s tick — the
+  exact cost regression `routing.py`'s own docstring claims doesn't happen
+  anymore.
+- **The build-capacity gate only accounts for `PATCH_PRODUCT` retries.** Any
+  `BUILD_MVP` that throws leaves its product stuck `BUILDING` forever (never
+  reset on failure) without being recognized as a pending-retry case — with
+  `max_concurrent_builds=2`, two failed builds in a row permanently fills both
+  slots and the factory goes idle with pending work it will never claim.
+- **The agent loop never checks `stop_reason`.** An empty response counts as
+  success (a maintenance cycle that did nothing reports "done"); a
+  `max_tokens`-truncated answer is accepted as final and, in at least one
+  path, written into permanent memory as a "lesson."
+- **Memory dedup can't tell two different numbers apart.** The tokenizer only
+  matches alphabetic tokens, so "cap raised to 40 percent" and "cap raised to
+  60 percent" hash to the same signature and merge — the stale number can win
+  and gets replayed into future prompts with *higher* confidence than a fresh
+  correction would have.
+- **Memory pruning is dominated by content length, not by the value formula's
+  intent**, and a documented overflow-counting bug can evict every non-preference
+  memory in a scope on every run without ever bringing it under budget.
+- Marketing: per-domain contact cap is checked before any sends in a batch
+  happen (bypassable by batch composition); `SEND_OUTREACH` idempotency keys
+  and campaign-approval subjects can still collide on count coincidence /
+  truncation (same collision bug class fixed elsewhere this session, found
+  unfixed here); `bounced_at` is written but never read anywhere, so there is
+  no bounce-rate circuit breaker.
+- Any Anthropic `400` (bad schema, unsupported param) permanently disables
+  server-side model fallbacks for the rest of the process and doubles every
+  subsequent request to that provider.
+
+### MEDIUM / LOW — real bugs, smaller blast radius
+
+- Finance: `currency` field exists end-to-end but the real webhook caller
+  never populates it (hardcoded USD assumption breaks non-USD/zero-decimal
+  currencies); `checkout.session.completed` is booked without checking
+  `payment_status` (async bank-debit methods can book revenue that never
+  actually arrives); reconciliation scheduling buckets on a ~100s window
+  keyed to event time, occasionally delaying a card-limit update by up to an
+  hour (bounded by an existing hourly sweep).
+- Compliance: PII persists indefinitely in `interrupts.detail` /
+  `campaign_approvals.brief` with no retention/purge; LIA escalation subject
+  can still collide; idea-level confidence thresholding keeps uncertain-but-
+  possibly-unlawful ideas alive longer than confidently-rejected ones; the
+  generic task-exhaustion escalation's own code comment claims it says "retry"
+  when the actual text doesn't.
+- Development: a sandbox timeout kills the `docker` CLI process, not the
+  container — a runaway loop keeps burning `sandbox_cpus` on the host
+  indefinitely, un-trackable (no `--name`/`--label` anywhere); unbounded
+  stdout/stderr buffering in the parent process can OOM-kill the factory
+  itself while the sandbox stays under its own limit; `clear_workspace()`'s
+  `ignore_errors=True` can silently leave stale files behind on a permission
+  or symlink edge case — the exact bug class it exists to prevent; a
+  non-DEBUGGER-locked tool path can write into a workspace mid-`clear`;
+  `is_devops_error`'s keyword list can misroute a real application bug (an
+  auth test asserting "permission denied," or an OOM-killed generated app
+  exiting 137) as infrastructure and skip healing entirely; missing
+  `STRIPE_API_KEY` is silently dropped from deploy env with no log — product
+  ships LIVE with checkout that can never work.
+- Core infra: a hung tool call is only checked against the agent-loop deadline
+  once per step, not between calls, so a step issuing several hanging tool
+  calls can run well past its budget; a build's entire multi-minute
+  transaction wrapping every LLM call can be killed by a managed database's
+  idle-in-transaction timeout, losing a build that actually succeeded; a
+  latent (not yet triggered) crash exists for any future Gemini-routed
+  contract using `Field(gt=...)`/`multiple_of`/a `set` field/discriminated
+  unions, since Google's schema type forbids fields Claude's does not; a
+  Postgres/usage-recording outage is caught and logged with the exception text
+  discarded, so root cause is unrecoverable from logs alone.
+- Learning Loop: `trial_until`/`TRIAL_DAYS` are written and never read
+  anywhere — the real cutoff is the unrelated `MAX_TRIAL_DAYS`; maintenance
+  cadence buckets have no catch-up, so a sustained capacity-starved period can
+  cause a large backlog of maintenance tasks (each spawning multiple analyst
+  agents) to fire all at once later.
+- Marketing (smaller): outreach copy can reference the wrong product on a
+  mismatch; the Hunter lead provider fails silently with no leads and no
+  error; Apollo pagination has an unlogged cap; the LIA compliance-escalation
+  flag carries no `task_id`/`product_id` for correlation; provider quota is
+  counted by rows stored, not API calls actually consumed (can undercount
+  against the real provider-side quota).
+
+### What's next
+
+This was a scan, not a fix pass — by design, matching the request. Given the
+volume, the next step is picking priority and scope rather than fixing
+everything at once. My recommendation, in order: (1) the three GDPR/unsubscribe
+items (#3-5) — this is real legal exposure, not just a bug; (2) the ledger
+race + double-counting + dead debit path (#1, #2, #6) — money integrity while
+spend is still small is far cheaper to fix than after volume grows; (3) the
+"already contacted" gap (#5) and the validation-gate trial-sample-size bug
+(HIGH list) — both directly undermine the feature just shipped; (4) the
+silent-4xx-failover-to-Opus-5 cost bug (#9) and the maintenance-tasks-marked-
+done-without-running bug (#7) — both are silent and compounding the longer
+they run. Everything else can wait for a dedicated pass.

@@ -59,8 +59,13 @@ def _usage_recorder(settings: Settings) -> UsageRecorder:
                     cost_usd=cost_usd,
                     tunable_parameter_id=entry.tunable_parameter_id,
                 )
-        except Exception:
-            log.warning("usage.record_failed", provider=entry.provider, model=entry.model)
+        except Exception as exc:
+            log.warning(
+                "usage.record_failed",
+                provider=entry.provider,
+                model=entry.model,
+                detail=str(exc)[:300],
+            )
 
     return record
 

@@ -22,6 +22,7 @@ from factory.llm.providers.base import (
     Completion,
     Provider,
     ProviderRefusal,
+    ProviderRequestRejected,
     ProviderUnavailable,
     SchemaViolation,
     ToolCall,
@@ -37,6 +38,21 @@ SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
 _BLOCKING_FINISH_REASONS = {"SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII", "RECITATION"}
 _RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504}
+
+
+def _classify_api_error(name: Provider, exc: genai_errors.APIError) -> ProviderUnavailable:
+    """A permanent 4xx (bad key, bad schema, model not found) will never succeed no
+    matter how many times the identical request is retried against Gemini -- but a
+    *different* vendor's schema dialect or key may still accept it, so this is a
+    `ProviderRequestRejected` (still failover-eligible), not a plain
+    `ProviderUnavailable` that burns 3 same-provider retries for nothing first.
+    ``status is None`` (a genuinely unclassified failure, e.g. some transport-layer
+    surprises) is kept as ordinary retryable behaviour, unchanged.
+    """
+    status = getattr(exc, "code", None)
+    if status is not None and status not in _RETRYABLE_STATUS:
+        return ProviderRequestRejected(name, f"gemini error: {exc}", status=status)
+    return ProviderUnavailable(name, f"gemini error: {exc}", status=status)
 
 
 def _strip_additional_properties(node: Any) -> None:
@@ -198,25 +214,25 @@ class GeminiProvider:
                 config=genai_types.GenerateContentConfig(**config_kwargs),
             )
         except genai_errors.APIError as exc:
-            status = getattr(exc, "code", None)
-            if status in _RETRYABLE_STATUS or status is None:
-                raise ProviderUnavailable(self.name, f"gemini error: {exc}", status=status) from exc
-            raise ProviderUnavailable(self.name, f"gemini error: {exc}", status=status) from exc
+            raise _classify_api_error(self.name, exc) from exc
         except (OSError, TimeoutError) as exc:
             raise ProviderUnavailable(self.name, f"gemini transport error: {exc}") from exc
 
         elapsed_ms = int((time.perf_counter() - started) * 1000)
-        self._raise_if_blocked(response)
+        self._raise_if_blocked(response, elapsed_ms=elapsed_ms)
 
         text = getattr(response, "text", None) or ""
         if not text.strip():
-            raise SchemaViolation("gemini returned no text content")
+            raise SchemaViolation(
+                "gemini returned no text content", usage=self._usage(response, elapsed_ms)
+            )
 
         try:
             value = schema.model_validate_json(text)
         except (ValidationError, json.JSONDecodeError) as exc:
             raise SchemaViolation(
-                f"gemini output failed {schema.__name__} validation: {exc}"
+                f"gemini output failed {schema.__name__} validation: {exc}",
+                usage=self._usage(response, elapsed_ms),
             ) from exc
 
         meta = getattr(response, "usage_metadata", None)
@@ -232,28 +248,55 @@ class GeminiProvider:
             ),
         )
 
-    def _raise_if_blocked(self, response: Any, *, allow_max_tokens: bool = False) -> None:
+    def _usage(self, response: Any, elapsed_ms: int) -> Usage:
+        """Real usage from a response that still failed downstream (refusal, schema
+        violation) -- these are frequently billed, successful HTTP 200s."""
+        meta = getattr(response, "usage_metadata", None)
+        return Usage(
+            input_tokens=_billable_input_tokens(meta),
+            output_tokens=int(getattr(meta, "candidates_token_count", 0) or 0),
+            cache_read_tokens=int(getattr(meta, "cached_content_token_count", 0) or 0),
+            latency_ms=elapsed_ms,
+        )
+
+    def _raise_if_blocked(
+        self, response: Any, *, allow_max_tokens: bool = False, elapsed_ms: int = 0
+    ) -> None:
         feedback = getattr(response, "prompt_feedback", None)
         block_reason = getattr(feedback, "block_reason", None)
         if block_reason:
             raise ProviderRefusal(
-                self.name, str(block_reason), f"gemini blocked the prompt ({block_reason})"
+                self.name,
+                str(block_reason),
+                f"gemini blocked the prompt ({block_reason})",
+                usage=self._usage(response, elapsed_ms),
             )
 
         candidates = getattr(response, "candidates", None) or []
         if not candidates:
-            raise ProviderRefusal(self.name, None, "gemini returned no candidates")
+            raise ProviderRefusal(
+                self.name,
+                None,
+                "gemini returned no candidates",
+                usage=self._usage(response, elapsed_ms),
+            )
 
         finish_reason = str(getattr(candidates[0], "finish_reason", "") or "").upper()
         reason_name = finish_reason.rsplit(".", 1)[-1]
         if reason_name in _BLOCKING_FINISH_REASONS:
-            raise ProviderRefusal(self.name, reason_name, f"gemini stopped on {reason_name}")
+            raise ProviderRefusal(
+                self.name,
+                reason_name,
+                f"gemini stopped on {reason_name}",
+                usage=self._usage(response, elapsed_ms),
+            )
         if reason_name == "MAX_TOKENS" and not allow_max_tokens:
             # Fatal for structured output (truncated JSON is unparseable) but merely a
             # short turn in a conversation, which the agent loop can continue from.
             raise SchemaViolation(
                 "gemini hit max_output_tokens before completing the JSON object; "
-                "raise max_tokens for this call"
+                "raise max_tokens for this call",
+                usage=self._usage(response, elapsed_ms),
             )
 
     async def converse(
@@ -282,14 +325,12 @@ class GeminiProvider:
                 config=genai_types.GenerateContentConfig(**config_kwargs),
             )
         except genai_errors.APIError as exc:
-            raise ProviderUnavailable(
-                self.name, f"gemini error: {exc}", status=getattr(exc, "code", None)
-            ) from exc
+            raise _classify_api_error(self.name, exc) from exc
         except (OSError, TimeoutError) as exc:
             raise ProviderUnavailable(self.name, f"gemini transport error: {exc}") from exc
 
         elapsed_ms = int((time.perf_counter() - started) * 1000)
-        self._raise_if_blocked(response, allow_max_tokens=True)
+        self._raise_if_blocked(response, allow_max_tokens=True, elapsed_ms=elapsed_ms)
 
         text_parts: list[str] = []
         calls: list[ToolCall] = []

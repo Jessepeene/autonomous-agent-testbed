@@ -166,6 +166,7 @@ async def send_to_lead(
             status="blocked",
             product_id=product_id,
             suppressed_reason="; ".join(content_check.violations)[:200],
+            unsubscribe_token=token,
         )
         return False
 
@@ -189,6 +190,7 @@ async def send_to_lead(
         status="sent" if result.sent else "suppressed",
         product_id=product_id,
         suppressed_reason=None if result.sent else result.reason[:200],
+        unsubscribe_token=token,
     )
     return result.sent
 

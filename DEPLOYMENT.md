@@ -178,6 +178,31 @@ building this. Use the dashboard's "Test webhook" button on each event type and
 confirm the request logs a handled `complained`/`failed` event, not a silent
 "event type not tracked".
 
+## Stripe setup
+
+**1. Point Stripe's webhook** at `https://<your-host>/webhooks/stripe` (Developers →
+Webhooks → add endpoint) and select **exactly** this set of events —
+`engines/finance/webhooks.py` treats each as the single canonical signal for its
+money-movement flow, and Stripe fires more than one event for the same payment, so
+selecting extras double- or triple-books the same sale:
+
+- `checkout.session.completed` — one-time Checkout payments (synchronous methods).
+- `checkout.session.async_payment_succeeded` — the same flow when the buyer used an
+  async method (SEPA/ACH debit); `checkout.session.completed` fires first with
+  `payment_status="unpaid"` and is deliberately not booked until this event confirms
+  the money actually settled.
+- `invoice.paid` — subscription/invoice payments.
+- `charge.refunded`, `charge.dispute.created`, `charge.dispute.closed`.
+
+**Do not also select** `invoice.payment_succeeded` or `payment_intent.succeeded` —
+both fire alongside an event already in the list above, for the same money, under a
+different event id; the factory has no way to tell "the same sale, again" from "a
+second sale" across two different Stripe event types.
+
+**2. Set `STRIPE_WEBHOOK_SECRET`** (the endpoint's "Signing secret", shown once
+after creating it) in `.env`. Every delivery is signature-verified against this and
+rejected otherwise.
+
 ## Going live
 
 `FACTORY_DRY_RUN=1` is the default and it stubs **every** outbound side effect: no

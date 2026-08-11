@@ -31,12 +31,26 @@ class ProviderRefusal(LLMError):
 
     Retrying the same prompt will not help, and falling back to another provider is a
     policy-laundering move we deliberately do not make. Escalate instead.
+
+    ``usage`` is attached whenever the provider's response carried real token counts
+    (a refusal is frequently a successful, billed HTTP 200 -- Claude's refusal
+    `stop_reason` in particular). Without it, `client.py`'s cost ledger records a
+    real, billed call as 0 tokens / $0, which made the daily spend cap and the
+    cost-reduction maintenance agent both blind to this failure mode.
     """
 
-    def __init__(self, provider: Provider, category: str | None, message: str) -> None:
+    def __init__(
+        self,
+        provider: Provider,
+        category: str | None,
+        message: str,
+        *,
+        usage: Usage | None = None,
+    ) -> None:
         super().__init__(message)
         self.provider = provider
         self.category = category
+        self.usage = usage
 
 
 class ProviderUnavailable(LLMError):
@@ -48,8 +62,29 @@ class ProviderUnavailable(LLMError):
         self.status = status
 
 
+class ProviderRequestRejected(ProviderUnavailable):
+    """A permanent 4xx (bad request, auth, not found) -- the exact same request will
+    never succeed against this provider no matter how many times it is retried, so
+    retrying it wastes latency for nothing. Still a `ProviderUnavailable` subclass:
+    a different vendor may well accept the same logical request (e.g. one provider's
+    JSON Schema dialect rejecting a keyword the other allows), so failover to an
+    alternative provider still makes sense -- only the same-provider retry loop
+    should be skipped.
+    """
+
+
 class SchemaViolation(LLMError):
-    """The model returned something that does not satisfy the contract."""
+    """The model returned something that does not satisfy the contract.
+
+    ``usage`` is attached whenever the provider's response carried real token counts
+    -- a schema violation is very often a fully successful, billed generation (e.g.
+    a large `thinking` budget consuming the whole output) that simply failed
+    Pydantic validation afterward, not a free no-op.
+    """
+
+    def __init__(self, message: str, *, usage: Usage | None = None) -> None:
+        super().__init__(message)
+        self.usage = usage
 
 
 @dataclass(slots=True)

@@ -176,6 +176,14 @@ class Settings(BaseSettings):
     model_general: str = "gemini-2.5-pro"
     model_fast: str = "gemini-2.5-flash"
     model_code: str = "claude-opus-5"
+    # Used only when a Gemini-routed call (orchestration/discovery/analysis/
+    # compliance/marketing copy -- all normally cheap, high-frequency work) fails
+    # over to Anthropic. CODE_GENERATION/CODE_REVIEW are in `router.NO_FAILOVER` and
+    # never reach this path, so `model_code` (Opus 5, priced for code-quality work)
+    # is the wrong default here: every Gemini outage previously meant every one of
+    # these calls -- including the orchestration tick that runs every 15s -- silently
+    # ran on Opus-5 pricing (~10-25x the input price) with no alarm anywhere.
+    model_fallback_anthropic: str = "claude-haiku-4-5"
     # "xhigh" was observed live to make Claude Sonnet 5's adaptive thinking consume
     # an entire max_tokens budget without ever converging on an answer -- confirmed
     # by reproducing the identical generate_scaffold() call at "high" instead, which

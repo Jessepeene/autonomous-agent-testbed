@@ -262,6 +262,60 @@ async def test_leads_for_outreach_product_scoping(session: AsyncSession) -> None
     assert {lead.product_id for lead in unscoped} == {product_a, product_b}
 
 
+async def test_leads_for_outreach_excludes_already_sent_leads(session: AsyncSession) -> None:
+    """Regression test: `leads_for_outreach`'s own docstring claims "not yet
+    contacted" but the query never enforced it, so the same lead was re-selected
+    (and re-emailed) on every subsequent call indefinitely."""
+    idea_id = await _make_idea(session, "already-contacted")
+    product_id = await repository.create_product(session, name="AC", idea_id=idea_id)
+
+    def _lead(lead_id: str, email: str) -> Lead:
+        return Lead(
+            id=lead_id,
+            first_name="Test",
+            last_name="Lead",
+            job_title="Ops",
+            company="Acme",
+            work_email=email,
+            source_url="https://example.test",
+            scraped_at=datetime.now(UTC),
+            provenance_kind="direct",
+            provider="hunter",
+            lia_passed=True,
+            product_id=product_id,
+        )
+
+    contacted = _lead("contacted", "contacted@example.test")
+    blocked = _lead("blocked", "blocked@example.test")
+    fresh = _lead("fresh", "fresh@example.test")
+    session.add_all([contacted, blocked, fresh])
+    await session.flush()
+
+    await repository.record_outreach(
+        session,
+        lead_id=contacted.id,
+        subject="s",
+        status="sent",
+        product_id=product_id,
+        unsubscribe_token="tok-contacted",
+    )
+    # A blocked send never reached the recipient -- must remain eligible for retry.
+    await repository.record_outreach(
+        session,
+        lead_id=blocked.id,
+        subject="s",
+        status="blocked",
+        product_id=product_id,
+        unsubscribe_token="tok-blocked",
+    )
+    await session.flush()
+
+    result = await repository.leads_for_outreach(session, product_id=product_id)
+    ids = {lead.id for lead in result}
+    assert ids == {"blocked", "fresh"}
+    assert "contacted" not in ids
+
+
 async def test_insert_validation_signal_dedups_by_product_and_email(session: AsyncSession) -> None:
     idea_id = await _make_idea(session, "dedup-signal")
     product_id = await repository.create_product(session, name="Dedup", idea_id=idea_id)

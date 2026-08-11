@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from factory.agents.roles import RoleName
@@ -56,6 +56,33 @@ class WeightsCandidate(Contract):
     build_feasibility: Annotated[float, Field(ge=0.0, le=1.0)]
     adoption_ease: Annotated[float, Field(ge=0.0, le=1.0)]
     rationale: str = Field(min_length=20, max_length=1000)
+
+    @model_validator(mode="after")
+    def _weights_sum_to_one(self) -> "WeightsCandidate":
+        """`ScoredIdea.weighted_score` is a plain weighted sum with no normalisation
+        by the weights' own total, and `SCORE_THRESHOLD` (0.55) is a fixed constant
+        calibrated against weights that sum to 1.0 -- bounding each weight to [0,1]
+        independently is not enough. A proposal like {0.5, 0.5, 0.5, 0.5} (sum 2.0)
+        would roughly double every idea's score, pushing survival rate toward 100%
+        without SCORE_THRESHOLD ever changing, and the resulting trial would look
+        like a clear, statistically significant win with no way for the loop to
+        self-correct once confirmed. Skipped entirely (not renormalised) when it
+        recommends no change, since the numeric fields are unused defaults then.
+        """
+        if self.no_change_recommended:
+            return self
+        total = (
+            self.pain_severity
+            + self.willingness_to_pay
+            + self.build_feasibility
+            + self.adoption_ease
+        )
+        if abs(total - 1.0) > 0.02:
+            raise ValueError(
+                f"scoring weights must sum to ~1.0 (calibrated against a fixed "
+                f"SCORE_THRESHOLD), got {total:.4f}"
+            )
+        return self
 
 
 _EXTRACT_SYSTEM = """\

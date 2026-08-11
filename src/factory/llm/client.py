@@ -20,6 +20,7 @@ from factory.llm.providers.base import (
     LLMProvider,
     Provider,
     ProviderRefusal,
+    ProviderRequestRejected,
     ProviderUnavailable,
     SchemaViolation,
     Turn,
@@ -192,6 +193,22 @@ class LLMClient:
                     tools=tools,
                     cache_prefix=cache_prefix,
                 )
+            except ProviderRequestRejected:
+                # Permanent: the identical request will never succeed against this
+                # provider, so retrying it with backoff would just waste latency.
+                # Still recorded and re-raised immediately -- the outer parse()/
+                # converse() loop treats this as a ProviderUnavailable subclass and
+                # moves straight to the next candidate provider (if any).
+                await self._emit(
+                    provider,
+                    model,
+                    task_type,
+                    engine,
+                    task_id,
+                    outcome="rejected",
+                    tunable_parameter_id=tunable_parameter_id,
+                )
+                raise
             except ProviderUnavailable as exc:
                 transport_attempts += 1
                 if transport_attempts >= _MAX_TRANSPORT_ATTEMPTS:
@@ -216,7 +233,7 @@ class LLMClient:
                 )
                 await asyncio.sleep(delay)
                 continue
-            except ProviderRefusal:
+            except ProviderRefusal as exc:
                 await self._emit(
                     provider,
                     model,
@@ -224,6 +241,7 @@ class LLMClient:
                     engine,
                     task_id,
                     outcome="refusal",
+                    usage=exc.usage,
                     tunable_parameter_id=tunable_parameter_id,
                 )
                 raise
@@ -237,11 +255,25 @@ class LLMClient:
                         engine,
                         task_id,
                         outcome="schema_violation",
+                        usage=exc.usage,
                         tunable_parameter_id=tunable_parameter_id,
                     )
                     raise
                 # One corrective pass: show the model exactly what failed rather than
-                # replaying the identical prompt and hoping.
+                # replaying the identical prompt and hoping. The failed attempt was a
+                # real, billed call (often a full generation that just didn't parse),
+                # so it is recorded here even though it isn't the terminal outcome --
+                # previously only a repair that *also* failed got recorded at all.
+                await self._emit(
+                    provider,
+                    model,
+                    task_type,
+                    engine,
+                    task_id,
+                    outcome="schema_violation_repaired",
+                    usage=exc.usage,
+                    tunable_parameter_id=tunable_parameter_id,
+                )
                 effective_prompt = (
                     f"{prompt}\n\n---\nYour previous response was rejected by schema "
                     f"validation:\n{exc}\nReturn only a JSON object that satisfies the "
@@ -351,6 +383,9 @@ class LLMClient:
                     model=model,
                     max_tokens=budget,
                 )
+            except ProviderRequestRejected:
+                await self._emit(provider, model, task_type, engine, task_id, outcome="rejected")
+                raise
             except ProviderUnavailable as exc:
                 transport_attempts += 1
                 if transport_attempts >= _MAX_TRANSPORT_ATTEMPTS:
@@ -369,8 +404,16 @@ class LLMClient:
                 )
                 await asyncio.sleep(delay)
                 continue
-            except ProviderRefusal:
-                await self._emit(provider, model, task_type, engine, task_id, outcome="refusal")
+            except ProviderRefusal as exc:
+                await self._emit(
+                    provider,
+                    model,
+                    task_type,
+                    engine,
+                    task_id,
+                    outcome="refusal",
+                    usage=exc.usage,
+                )
                 raise
 
             await self._emit(
@@ -385,11 +428,19 @@ class LLMClient:
             return turn
 
     def _model_for_provider(self, provider: Provider, task_type: TaskType) -> str:
-        """Failover changes the vendor, so the model id has to change with it."""
+        """Failover changes the vendor, so the model id has to change with it.
+
+        ``model_code`` (Opus 5) is deliberately not used here: CODE_GENERATION/
+        CODE_REVIEW are in `router.NO_FAILOVER` and never reach this branch, so a
+        failover here is always some normally-cheap Gemini-routed task (orchestration,
+        discovery, analysis, compliance, marketing copy) -- using the code-tier model
+        would silently run every one of them at ~10-25x the intended price for as
+        long as the primary provider stays down.
+        """
         if provider is provider_for(task_type):
             return model_for(task_type, self._settings)
         if provider is Provider.ANTHROPIC:
-            return self._settings.model_code
+            return self._settings.model_fallback_anthropic
         return self._settings.model_general
 
     async def _emit(
