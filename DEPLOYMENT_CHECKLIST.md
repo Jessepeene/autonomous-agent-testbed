@@ -1394,3 +1394,138 @@ spend is still small is far cheaper to fix than after volume grows; (3) the
 silent-4xx-failover-to-Opus-5 cost bug (#9) and the maintenance-tasks-marked-
 done-without-running bug (#7) — both are silent and compounding the longer
 they run. Everything else can wait for a dedicated pass.
+
+## Agentic heal cycles — surgical repair instead of regeneration — 2026-08-11
+
+A heal cycle used to repair a broken product by **regenerating its entire
+codebase**: the whole product went into the prompt and came back out, at
+code-generation prices, to fix what is often one line — and the model never saw
+the real failure, only `graph.py`'s truncated summary of it. `_patch` now runs a
+bounded tool-using agent against the real workspace: it runs the suite, reads the
+real files, edits what is broken, re-runs. `_verify_and_ship` is **unchanged** —
+Bug Council and deploy still rule on the result — and `MAX_HEAL_CYCLES` is
+untouched.
+
+**598 unit + 139 integration tests green on Linux, migration `0011` applied live.**
+
+### The cost premise had to be fixed first, or this would have been worse
+
+The original motivation assumed an agentic loop is cheaper. It was not:
+`LLMClient.parse()` accepts `cache_prefix`, but `converse()` — the method the
+agent loop uses — cached only its *system* block, while the message transcript
+(the bulk of the tokens, and it grows every step) was re-sent at full price on
+every step. At Opus-5 pricing that put a 14-step run near **$3.80 against ~$1.15
+for the single full regeneration it replaces**. Three prerequisites, all shipped:
+
+1. **Conversation-prefix caching.** A cache breakpoint on the final content block
+   of each request. The loop only ever appends, so step N's marked prefix is by
+   construction a prefix of step N+1's messages — each step now reads everything
+   before it at 0.1x instead of re-paying in full.
+2. **Head+tail tool-result truncation.** Results were head-truncated at 20k, and
+   `run_in_sandbox` returns keys in the order `exit_code, stdout, stderr` — so a
+   chatty pytest run filled the budget with collection noise and cut `stderr`,
+   the actual traceback, off the end. Uncorrected the agent would have seen
+   *strictly less* than today's pre-digested string, defeating the entire premise.
+3. **Container leak on cancellation (pre-existing bug, independent of this).**
+   `DockerSandbox.execute` cleaned up in `except TimeoutError` only, but an outer
+   cancellation raises `CancelledError` — so `process.kill()` and
+   `_kill_container()` never ran. The daemon-side container kept running with
+   `{workspace}:/workspace:rw` still mounted (`--rm` never fires for a container
+   that never exits, and the name lived only in a local), free to keep writing
+   into a workspace the next step was about to read and test.
+
+### Routing: what is repaired surgically, and what still regenerates
+
+`_heal()` already tagged every failure with a precise `category`; it is now
+threaded into the patch payload and routed:
+
+- **`test_failure`** → surgical. A real traceback to read and a suite to re-run.
+- **`guided`** → surgical, and **exempt from the cycle-3 fallback**. Found while
+  wiring this: `enqueue_guided_patch` (a human replying "the bug is X, change Y")
+  built its payload with no category, so the best-informed repair the factory ever
+  performs was falling through to the *most expensive* path — regenerating an
+  entire live product from scratch over one instruction, discarding everything
+  that already worked. The cycle ceiling is about autonomous retries running out
+  of ideas; a human-directed fix is not one.
+- **`dependency_*`** → never. The agent's sandbox has no network and cannot run pip.
+- **`council_rejection:*` / `deploy_failure`** → unchanged. The agent cannot re-run
+  the Council, so it would edit blind to the only opinion that decides the outcome.
+- **Heal cycle 3 always regenerates.** A clean rebuild is the only operation that
+  can recover an arbitrarily damaged workspace.
+
+### Containment — an agent editing a live workspace cannot be undone by regenerating
+
+- **Byte-exact on-disk snapshot**, restored on any bad outcome, and restored *on
+  entry* if a previous attempt died mid-edit. Without that last part one crash
+  compounds across the task's three retries into three destructive passes over a
+  progressively more broken workspace, each driven by healing text that no longer
+  describes reality. Deliberately a real directory copy, not `read_workspace()` —
+  that helper drops non-UTF-8 files, so restoring from it would destroy a
+  product's images on the first rollback.
+- **Evidence, not self-report.** `stopped_because == "completed"` means only that
+  the model emitted a turn with no tool calls: a confident prose diagnosis that
+  touched nothing reports success just as loudly as a real fix. A repair that
+  changed no files never reaches verification — the expensive half.
+- **Deterministic guards** reject a repair that deleted a test file, dropped an
+  assertion, added `skip`/`xfail`, or deleted `requirements.txt` — the ways to make
+  a suite green without fixing anything. Prompts do not bind; this mirrors
+  `bug_council`'s existing `scan_secrets`/`scan_privilege` idiom.
+- **Blocked ≠ failed.** An outage, deadline, step limit or cost cap defers the task
+  (`defer_task`, never touching `attempt_count`) rather than consuming a heal
+  cycle — otherwise three consecutive Anthropic outages would permanently escalate
+  a product whose repair was never attempted.
+- **A per-run cost cap** (`repair_agent_cost_cap_usd`, default $0.75) plus a
+  pre-flight budget-headroom check, since the global breaker is only consulted
+  between ticks and step count is a poor proxy for spend.
+- **The tools do not take `product_lock`, and this is load-bearing.** `_patch`
+  already holds it, and its row is *uncommitted* inside `_run_engine`'s session —
+  so a second acquisition from another connection does not fail fast, it **blocks**
+  on the first transaction. Reusing `run_in_sandbox` would have hung every tool
+  call until cancellation: ~28 minutes of zero progress per repair, stalling the
+  whole (sequential) tick loop. Regression-tested against real Postgres under a
+  hard timeout, so a reintroduction fails loudly instead of hanging.
+- The workspace is **closed over, never a model argument** — `resolve_workspace`
+  *creates* what it resolves, so a hallucinated name would silently produce an
+  empty directory where every command "succeeds" against nothing.
+- A separate `workspace_surgeon` role, **filtered out of `role_catalogue()`** so
+  the Orchestrator cannot spawn it outside the one caller that pins it to a
+  product, holds the lock, and can roll its edits back.
+
+### Durable per-product knowledge
+
+Products now carry `.factory/ARCHITECTURE.md` — seeded **free** from the
+`ScaffoldPlan` already in memory (product name, summary, file list; no extra LLM
+call), read at the top of every repair, and appended to **only after** a repair is
+verified. Writing it when the agent merely *claimed* success would persist an
+unverified belief that the next cycle reads back as prior advice, and
+near-duplicate reinforcement would make a repeated wrong claim look progressively
+more confident.
+
+This is the persistence that makes repair #40 on a months-old product no more
+expensive than repair #1: not a long-lived process holding context, but durable
+written artifacts plus on-demand reading. It survives reboots and deploys, a human
+can read and correct it, and it is excluded from both Bug Council review and
+deploy (`WORKSPACE_SKIP_DIRS`) since it is notes *about* the product, not part of
+it. A rollback deliberately preserves it — deleting it would be a one-way loss
+dressed up as a restore.
+
+### Two test bugs found during verification (not production bugs)
+
+The snapshot helper cleared its destination before copying, which silently
+defeated the selective cleanup in `restore_snapshot` and would have destroyed the
+knowledge file on every rollback — **caught by the test written to prevent exactly
+that**. And the outage test queued one provider failure where `converse` retries
+three times against the same provider (`CODE_GENERATION` is `NO_FAILOVER`), so the
+retry hit an empty queue.
+
+**Deployed live** (2026-08-11): committed, transferred via `git archive HEAD`,
+migration `0011` applied to the live database *before* the restart, image rebuilt,
+service restarted. `/health` reports `ok`, all six engines enabled, `alembic
+current` is `0011_product_test_command (head)`, boot log clean.
+
+**Still deliberately out of scope**: `council_rejection` routing (revisit once
+`test_failure` has real data); agentic `_build` (first generation has no existing
+code to be surgical about); git-backed workspaces instead of copytree snapshots;
+mid-run task-lease renewal (hence `deadline_seconds` sits well under
+`task_lease_seconds`); and a feature-request pathway, which unlike a heal cycle
+has no failing test to anchor on.
