@@ -39,11 +39,19 @@ def _no_real_db(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_enqueue_task(session: object, **kwargs: object) -> str | None:
         return "task-1"
 
+    async def fake_get_product(session: object, product_id: str) -> None:
+        # None short-circuits _verify_and_ship's domain-request check (a
+        # freshly-live product it cannot look up gets asked about a domain on
+        # some later attempt instead of this one) -- exactly like every other
+        # stub here, real domain-request behaviour has its own dedicated tests.
+        return None
+
     monkeypatch.setattr(repository, "set_product_status", fake_set_product_status)
     monkeypatch.setattr(
         repository, "resolve_pending_heal_attempts", fake_resolve_pending_heal_attempts
     )
     monkeypatch.setattr(repository, "enqueue_task", fake_enqueue_task)
+    monkeypatch.setattr(repository, "get_product", fake_get_product)
 
 
 @dataclass(slots=True)

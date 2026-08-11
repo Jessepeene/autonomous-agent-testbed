@@ -638,6 +638,43 @@ async def products_needing_channel_scout(
     return list((await session.execute(stmt)).scalars().all())
 
 
+async def set_vercel_project(session: AsyncSession, product_id: str, project: str) -> None:
+    await session.execute(
+        update(Product).where(Product.id == product_id).values(vercel_project=project)
+    )
+
+
+async def set_domain_requested(session: AsyncSession, product_id: str) -> None:
+    """Called once, right after `development/domain.py::ensure_requested` raises
+    the interrupt -- marks the product so a later redeploy never asks again."""
+    await session.execute(
+        update(Product).where(Product.id == product_id).values(domain_status="pending")
+    )
+
+
+async def set_product_domain(session: AsyncSession, product_id: str, hostname: str) -> None:
+    """The human's reply, captured -- `domain_status` stays 'pending' until the
+    `ATTACH_DOMAIN` task actually calls Vercel."""
+    await session.execute(
+        update(Product).where(Product.id == product_id).values(custom_domain=hostname)
+    )
+
+
+async def set_domain_status(
+    session: AsyncSession, product_id: str, status: str, **fields: Any
+) -> None:
+    await session.execute(
+        update(Product).where(Product.id == product_id).values(domain_status=status, **fields)
+    )
+
+
+async def products_with_attached_domain(session: AsyncSession, limit: int = 20) -> list[Product]:
+    """Domains Vercel has but DNS has not yet confirmed -- what the periodic
+    `VERIFY_DOMAIN` sweep (scheduler.py) reads from."""
+    stmt = select(Product).where(Product.domain_status == "attached").limit(limit)
+    return list((await session.execute(stmt)).scalars().all())
+
+
 # ------------------------------------------------------------------ product locks
 
 

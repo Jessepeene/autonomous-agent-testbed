@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from factory.agents.roles import RoleName
 from factory.agents.spawner import SpawnRequest, spawn
-from factory.engines.development import ab_testing, bug_council, repair, seo
+from factory.engines.development import ab_testing, bug_council, domain, repair, seo
 from factory.engines.development import deploy as deploy_module
 from factory.engines.development.scaffold.generator import (
     LANDING_PAGE_SYSTEM,
@@ -74,16 +74,20 @@ SURGICAL_CATEGORIES = frozenset({"test_failure", "guided", "seo_incomplete", "gr
 async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
     kind = TaskKind(task.kind)
 
-    # EVALUATE_VALIDATION, EVALUATE_AB_TEST and GROWTH_REVIEW are pure DB decisions
-    # (the latter spawns an ephemeral agent that only reads state and enqueues
-    # further work, never generates or runs code itself) -- none must be blocked by
-    # sandbox unavailability the way every other Development task kind correctly is.
+    # EVALUATE_VALIDATION, EVALUATE_AB_TEST, GROWTH_REVIEW, ATTACH_DOMAIN and
+    # VERIFY_DOMAIN are pure DB/API decisions -- no code generation, no sandbox
+    # execution -- so none must be blocked by sandbox unavailability the way every
+    # other Development task kind correctly is.
     if kind is TaskKind.EVALUATE_VALIDATION:
         return await _evaluate_validation(ctx, session, task)
     if kind is TaskKind.EVALUATE_AB_TEST:
         return await _evaluate_ab_test(ctx, session, task)
     if kind is TaskKind.GROWTH_REVIEW:
         return await _growth_review(ctx, session, task)
+    if kind is TaskKind.ATTACH_DOMAIN:
+        return await _attach_domain(ctx, session, task)
+    if kind is TaskKind.VERIFY_DOMAIN:
+        return await _verify_domain(ctx, session, task)
 
     if not ctx.sandbox.available:
         # Fail loudly rather than running model-written code on the host.
@@ -473,6 +477,81 @@ async def _growth_review(ctx: FactoryContext, session: AsyncSession, task: Task)
     await repository.set_growth_reviewed(session, product_id)
     log.info("development.growth_reviewed", product_id=product_id, outcome=result.summary())
     return f"development/growth_review: {result.summary()}"
+
+
+async def _attach_domain(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
+    """Attach a human-supplied hostname to a product's Vercel project and relay
+    the required DNS records back -- see `development/domain.py` and
+    `hitl/interrupts.py::_act_on_domain_reply`, which enqueues this task."""
+    product_id = task.product_id or str(task.payload.get("product_id", ""))
+    hostname = str(task.payload.get("hostname", ""))
+    product = await session.get(Product, product_id) if product_id else None
+    if product is None or not hostname:
+        return f"development: cannot attach domain -- product {product_id!r} or hostname missing"
+    if not product.vercel_project:
+        return (
+            f"development: product {product_id} has no recorded vercel_project, "
+            "cannot attach a domain"
+        )
+
+    result = await domain.attach(ctx.settings, project=product.vercel_project, hostname=hostname)
+    if not result.ok and result.is_infra:
+        # Same reasoning as deploy_module's own infra failures -- never the fault
+        # of the generated product, never worth a heal cycle.
+        raise DevOpsError(f"Domain attachment failed with an infrastructure error: {result.detail}")
+    if not result.ok:
+        log.warning("development.domain_attach_failed", product_id=product_id, detail=result.detail)
+        return f"development: domain attachment for {product_id} failed: {result.detail}"
+
+    status = "verified" if result.verified else "attached"
+    extra = {"deploy_url": f"https://{hostname}"} if result.verified else {}
+    await repository.set_domain_status(session, product_id, status, **extra)
+    if ctx.notifier.available:
+        await ctx.notifier.send(
+            f"Domain {hostname} attached to {product.name}.\n\n"
+            + domain.format_dns_instructions(hostname, result.records)
+        )
+    log.info(
+        "development.domain_attached",
+        product_id=product_id,
+        hostname=hostname,
+        verified=result.verified,
+    )
+    return f"development: domain {hostname} attached to {product_id} (verified={result.verified})"
+
+
+async def _verify_domain(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
+    """Periodic, deterministic check on one attached-but-unverified domain (see
+    `scheduler.py`'s sweep) -- confirms it once Vercel reports the DNS is in
+    place. Never spawns a model call.
+    """
+    product_id = task.product_id or str(task.payload.get("product_id", ""))
+    product = await session.get(Product, product_id) if product_id else None
+    if (
+        product is None
+        or product.domain_status != "attached"
+        or not product.custom_domain
+        or not product.vercel_project
+    ):
+        return f"development: domain for {product_id!r} not awaiting verification"
+
+    verified = await domain.check_verified(
+        ctx.settings, project=product.vercel_project, hostname=product.custom_domain
+    )
+    if verified is None:
+        return f"development: could not check domain verification for {product_id} this pass"
+    if not verified:
+        return f"development: {product.custom_domain} for {product_id} still not verified"
+
+    await repository.set_domain_status(
+        session, product_id, "verified", deploy_url=f"https://{product.custom_domain}"
+    )
+    if ctx.notifier.available:
+        await ctx.notifier.send(
+            f"{product.custom_domain} is now verified and live for {product.name}."
+        )
+    log.info("development.domain_verified", product_id=product_id, hostname=product.custom_domain)
+    return f"development: {product.custom_domain} verified for {product_id}"
 
 
 async def _should_repair_surgically(
@@ -930,6 +1009,8 @@ async def _verify_and_ship(
     await repository.set_product_status(
         session, product_id, ProductStatus.LIVE, deploy_url=result.url, heal_attempts=0
     )
+    if result.project:
+        await repository.set_vercel_project(session, product_id, result.project)
     await repository.enqueue_task(
         session,
         kind=TaskKind.HARVEST_LEADS,
@@ -939,6 +1020,13 @@ async def _verify_and_ship(
         product_id=product_id,
         priority=120,
     )
+    # Asked once, ever, per product -- never blocking (the product is already
+    # reachable on its Vercel subdomain). A redeploy of an already-live product
+    # (a repair pass, a growth_seo edit) must not ask again, hence the guard.
+    live_product = await repository.get_product(session, product_id)
+    if live_product is not None and live_product.domain_status is None:
+        await domain.ensure_requested(session, product_id=product_id, product_name=product_name)
+        await repository.set_domain_requested(session, product_id)
     return f"development: product {product_id} approved and deployed to {result.url}"
 
 

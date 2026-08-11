@@ -198,6 +198,21 @@ class Scheduler:
                     priority=65,
                 )
 
+            # A pure API check (see development/graph.py::_verify_domain) -- no
+            # LLM call, so it costs nothing to recheck hourly, same cadence as
+            # the AB-test sweep above. DNS propagation can take anywhere from
+            # minutes to days, so this just keeps trying until Vercel confirms.
+            for product in await repository.products_with_attached_domain(session, limit=20):
+                await repository.enqueue_task(
+                    session,
+                    kind=TaskKind.VERIFY_DOMAIN,
+                    engine=EngineName.DEVELOPMENT,
+                    idempotency_key=f"verify-domain:{product.id}:{_bucket(now, 3600)}",
+                    payload={"product_id": product.id},
+                    product_id=product.id,
+                    priority=115,
+                )
+
     async def tick(self) -> dict[str, Any]:
         self._tick += 1
         await self.housekeeping()

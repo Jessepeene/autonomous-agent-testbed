@@ -53,6 +53,12 @@ class DeployResult:
     #: 4xx *content* rejection (malformed payload, oversized file) is not infra and
     #: leaves this False, since a different generation attempt might avoid it.
     is_infra: bool = False
+    #: The exact Vercel project name/slug this deploy used, on success -- `graph.py`
+    #: persists this on the product so a later custom-domain attachment
+    #: (`development/domain.py`) targets the same project without re-deriving the
+    #: slug from `product_name`, which can drift across builds. `None` on dry-run
+    #: or failure, when no real Vercel project was touched.
+    project: str | None = None
 
 
 _INFRA_STATUS = {401, 403, 429, 500, 502, 503, 504}
@@ -144,8 +150,9 @@ async def deploy(
     # contract may instead require a prior `POST /v10/projects/{id}/env` call against
     # an existing project. Confirm against a real sandbox project before relying on
     # this in production — see the plan's Phase 1 spike note.
+    project_name = product_name.lower().replace(" ", "-")[:52]
     body = {
-        "name": product_name.lower().replace(" ", "-")[:52],
+        "name": project_name,
         "files": files,
         "target": "production",
         "projectSettings": {"framework": None},
@@ -199,7 +206,7 @@ async def deploy(
         )
 
     log.info("deploy.published", product=product_name, url=full_url)
-    return DeployResult(ok=True, url=full_url, detail="published")
+    return DeployResult(ok=True, url=full_url, detail="published", project=project_name)
 
 
 async def _await_ready(deployment_id: str, token: str) -> str:

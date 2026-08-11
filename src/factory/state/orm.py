@@ -152,6 +152,17 @@ class Product(Base):
     #: Same idea, for CHANNEL_SCOUT's own periodic backstop -- a separate cadence
     #: (channel discovery is a heavier, rarer activity than a growth-data read).
     last_channel_scout_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: The exact Vercel project name/slug `deploy.py` used for this product's most
+    #: recent successful deploy -- domain attachment needs this to target the right
+    #: project, and re-deriving it from `product_name` risks drift if that name
+    #: ever changes between builds (a repair pass can rename it).
+    vercel_project: Mapped[str | None] = mapped_column(String(64))
+    #: A human-supplied hostname, once asked for and given -- see `development/domain.py`.
+    custom_domain: Mapped[str | None] = mapped_column(String(253))
+    #: NULL (never asked) -> 'pending' (asked, no reply yet) -> 'attached' (Vercel
+    #: has the domain, DNS not yet verified) -> 'verified' (live on the custom
+    #: domain). Never regresses once 'verified'.
+    domain_status: Mapped[str | None] = mapped_column(String(16))
 
     __table_args__ = (Index("ix_products_status", "status"),)
 

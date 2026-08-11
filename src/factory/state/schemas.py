@@ -75,6 +75,12 @@ class TaskKind(StrEnum):
     #: Tallies referrer hits for an approved channel_experiment and concludes it.
     #: A pure DB decision, no LLM call -- see EVALUATE_AB_TEST, same shape.
     MEASURE_CHANNEL_EXPERIMENT = "measure_channel_experiment"
+    #: Attaches a human-supplied hostname to a product's Vercel project and relays
+    #: the required DNS records back. See development/domain.py.
+    ATTACH_DOMAIN = "attach_domain"
+    #: Polls Vercel for DNS verification status on an attached domain. A pure API
+    #: check, no LLM call -- see EVALUATE_AB_TEST, same shape.
+    VERIFY_DOMAIN = "verify_domain"
 
 
 class TaskStatus(StrEnum):
@@ -123,6 +129,10 @@ class InterruptReason(StrEnum):
     #: different kind of judgement than GDPR-gated cold email, and this factory
     #: never posts automatically even once approved -- see engines/marketing/channel.py.
     CHANNEL_APPROVAL = "channel_approval"
+    #: A product just went live and has no custom domain yet -- asked once per
+    #: product, never blocking (the Vercel subdomain already works). See
+    #: development/domain.py.
+    DOMAIN_REQUIRED = "domain_required"
 
 
 class ComplianceStatus(StrEnum):

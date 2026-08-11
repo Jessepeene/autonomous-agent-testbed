@@ -45,6 +45,16 @@ _REJECT_WORD = re.compile(r"\breject\b", re.IGNORECASE)
 #: an ASSESS_COMPLIANCE escalation (see _act_on_idea_reply).
 _APPROVE_WORD = re.compile(r"\bapprove\b", re.IGNORECASE)
 
+#: A DOMAIN_REQUIRED reply (development/domain.py's "reply with a domain, or SKIP"
+#: escalation text) -- checked before the generic product-scoped branch below, since
+#: that one means something completely different (heal-exhaustion guidance/REJECT).
+_SKIP_WORD = re.compile(r"\b(skip|none)\b", re.IGNORECASE)
+#: A conservative hostname pattern: labels of 1-63 alphanumerics/hyphens (never
+#: leading/trailing a hyphen), at least one dot. Good enough to reject an obviously
+#: malformed reply before it is ever handed to a real Vercel API call -- this is a
+#: DNS action away from a live attach attempt, worth being strict about.
+_HOSTNAME_RE = re.compile(r"^(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))+$")
+
 
 class Notifier(Protocol):
     @property
@@ -164,6 +174,16 @@ async def collect_replies(session: AsyncSession, notifier: Notifier) -> int:
                 if await repository.reopen_escalated_task(session, target.task_id)
                 else "none"
             )
+        elif (
+            target.reason == InterruptReason.DOMAIN_REQUIRED.value
+            and target.product_id
+            and not target.task_id
+        ):
+            # Checked before the generic product-scoped branch below: that one
+            # means "heal-exhaustion guidance, REJECT retires the product" --
+            # completely wrong for a domain reply, which shares the same
+            # (product_id set, task_id unset) shape for an unrelated reason.
+            action = await _act_on_domain_reply(session, target.product_id, answer)
         elif target.product_id and not target.task_id:
             action = await _act_on_product_reply(session, target.id, target.product_id, answer)
         log.info("hitl.resolved", interrupt_id=target.id, action=action)
@@ -208,6 +228,40 @@ async def _act_on_product_reply(
         session, product_id=product_id, guidance=answer, interrupt_id=interrupt_id
     )
     return "patch_queued" if task_id else "none"
+
+
+async def _act_on_domain_reply(session: AsyncSession, product_id: str, answer: str) -> str:
+    """SKIP (or an empty reply) leaves the product on its Vercel subdomain
+    permanently -- `domain_status` moves to a terminal 'skipped' so a later
+    redeploy never asks again. An unparseable reply (not a recognisable
+    hostname) is logged and otherwise ignored, matching this module's existing
+    convention for every other malformed-reply case above: there is no
+    automatic re-prompt, only a fresh interrupt would ask again, and nothing
+    here raises one."""
+    text = answer.strip()
+    if not text or _SKIP_WORD.search(text):
+        await repository.set_domain_status(session, product_id, "skipped")
+        return "skipped"
+
+    hostname = text.split()[0].lower()
+    for prefix in ("https://", "http://"):
+        if hostname.startswith(prefix):
+            hostname = hostname[len(prefix) :]
+    hostname = hostname.split("/")[0]
+    if len(hostname) > 253 or not _HOSTNAME_RE.match(hostname):
+        return "invalid_hostname"
+
+    await repository.set_product_domain(session, product_id, hostname)
+    task_id = await repository.enqueue_task(
+        session,
+        kind=TaskKind.ATTACH_DOMAIN,
+        engine=EngineName.DEVELOPMENT,
+        idempotency_key=f"attach-domain:{product_id}:{hostname}",
+        payload={"product_id": product_id, "hostname": hostname},
+        product_id=product_id,
+        priority=80,
+    )
+    return "domain_attach_queued" if task_id else "none"
 
 
 async def _find_open_by_tag(session: AsyncSession, tag: str) -> Interrupt | None:
