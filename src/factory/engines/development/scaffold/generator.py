@@ -159,6 +159,35 @@ the prompt, verbatim. Do not invent your own endpoint path or guess at one.\
 """
 
 
+#: Appended to `LANDING_PAGE_SYSTEM`'s prompt only when a live AB test is running
+#: for this product (see `development/ab_testing.py`). Deliberately a client-side
+#: split, not two deployments behind an edge router: it fits the existing "single
+#: static deploy, no build step" constraint with no new hosting mechanism, and it
+#: reuses the interest-capture and analytics endpoints exactly as they already
+#: exist -- only one new field (`variant`) is added to each POST body.
+_AB_TEST_INSTRUCTIONS = """\
+
+This page is running a live AB test. Render BOTH variants below in the SAME page \
+as two separate content blocks, exactly `<div id="variant-a">...</div>` and \
+`<div id="variant-b">...</div>`, each a complete, fully-styled pitch on its own \
+(not a diff against the other) built from its own brief:
+
+Variant A brief: {variant_a_brief}
+
+Variant B brief: {variant_b_brief}
+
+Add a small inline script, run before either block is shown, that:
+1. Reads `localStorage.getItem('ab_variant')`. If empty, picks "a" or "b" with \
+equal probability and stores it with `localStorage.setItem('ab_variant', ...)` -- \
+so a returning visitor always sees the same variant they saw before.
+2. Shows only the chosen variant's block (`hidden = false`) and hides the other \
+(`hidden = true`).
+3. Includes `variant: <the chosen value>` in the JSON body of BOTH the interest-form \
+POST and the analytics beacon POST -- this is the only way results can be told \
+apart per arm afterward.\
+"""
+
+
 class UnsafeGeneratedPath(ValueError):
     """A generated file path tried to escape the product workspace."""
 
@@ -226,6 +255,7 @@ async def generate_landing_page(
     tunable_parameter_id: str | None = None,
     task_id: str | None = None,
     existing_files: dict[str, str] | None = None,
+    ab_variants: tuple[str, str] | None = None,
 ) -> ScaffoldPlan:
     """A cheap, pitch-only page for the idea validation gate -- see
     `development/graph.py::_build_landing_page`. Unlike `generate_scaffold` (whose
@@ -239,6 +269,13 @@ async def generate_landing_page(
     a real backend does (see `deploy.py::_runtime_env`), so `settings.public_domain`
     + `product_id` are composed here into the one exact URL the model must use. The
     analytics beacon URL is composed the same way, for the same reason.
+
+    ``ab_variants``, when given (the two variant briefs, "a" then "b"), switches
+    the prompt into the dual-variant pattern -- see `_AB_TEST_INSTRUCTIONS`. Comes
+    from `repository.get_running_ab_test`, checked by the caller before every
+    landing-page (re)generation, not threaded through the task payload -- so a
+    repair pass mid-test still regenerates both variants correctly without
+    needing to know a test was involved.
     """
     interest_url = f"https://{ctx.settings.public_domain}/interest/{product_id}"
     analytics_url = f"https://{ctx.settings.public_domain}/analytics/{product_id}"
@@ -253,6 +290,11 @@ async def generate_landing_page(
         f'Analytics beacon URL (POST JSON {{"path": ..., "referrer": ...}} here, '
         f"exactly, verbatim): {analytics_url}\n\n"
     )
+    if ab_variants is not None:
+        variant_a_brief, variant_b_brief = ab_variants
+        prompt += _AB_TEST_INSTRUCTIONS.format(
+            variant_a_brief=variant_a_brief, variant_b_brief=variant_b_brief
+        )
     if existing_files:
         prompt += (
             "CURRENT CONTENTS of the workspace (this is a repair pass -- see the "

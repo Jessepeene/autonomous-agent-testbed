@@ -144,6 +144,27 @@ async def test_a_second_complaint_does_not_duplicate_the_freeze(session: AsyncSe
     assert count == 1
 
 
+async def test_a_second_freeze_while_one_is_active_is_a_clean_no_op(
+    session: AsyncSession,
+) -> None:
+    """Regression test: `index_where`'s ORM comparison used to compile to a bound
+    parameter, which Postgres's ON CONFLICT inference never matches against the
+    partial index's own literal predicate -- every second call raised
+    `InvalidColumnReferenceError` instead of returning `None` as the docstring
+    always claimed. Never caught before because no test actually called this
+    function twice."""
+    first = await repository.create_marketing_freeze(
+        session, reason="first freeze", complaint_rate=0.5
+    )
+    assert first is not None
+
+    second = await repository.create_marketing_freeze(
+        session, reason="second freeze", complaint_rate=0.6
+    )
+
+    assert second is None
+
+
 async def test_ensure_not_frozen_raises_while_a_freeze_is_active(session: AsyncSession) -> None:
     await repository.create_marketing_freeze(session, reason="test freeze", complaint_rate=0.5)
     await session.commit()

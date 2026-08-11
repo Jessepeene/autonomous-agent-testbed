@@ -242,6 +242,97 @@ async def test_the_mvp_fixture_meets_seo_requirements() -> None:
     assert missing_seo_requirements(_sources(completion.value)) == []
 
 
+# --- the fixture is AB-test aware -------------------------------------------------
+#
+# End-to-end against the REAL prompt generate_landing_page composes, not a
+# hand-approximated string: a FakeProvider captures what the real generator
+# actually sends, and that captured prompt is fed into StagingCodeProvider --
+# the two systems' contract is exercised directly rather than assumed.
+
+
+async def _real_ab_prompt(variant_a_brief: str, variant_b_brief: str) -> str:
+    from factory.engines.development.scaffold.generator import generate_landing_page
+    from factory.hitl.telegram import NullNotifier
+    from factory.llm.client import LLMClient
+    from factory.llm.providers.fake import FakeProvider
+    from factory.llm.router import ProviderRegistry
+    from factory.sandbox.disabled import DisabledSandbox
+    from factory.settings import EngineName
+    from factory.state.schemas import GeneratedFile, ValidatedIdea
+    from factory.supervisor.context import FactoryContext
+
+    idea = ValidatedIdea(
+        id="idea-1",
+        problem_statement="Bookkeepers reconcile invoices by hand.",
+        target_niche="bookkeeping",
+        source_url="https://example.test/thread",
+        monetization_hypothesis="EUR 49/month per seat.",
+        score=0.8,
+        evidence_count=3,
+    )
+    fake = FakeProvider(name=Provider.ANTHROPIC)
+    fake.register(
+        ScaffoldPlan,
+        ScaffoldPlan(
+            product_name="Placeholder",
+            summary="s" * 25,
+            files=[GeneratedFile(path="app/index.html", contents="<html></html>")],
+            test_command="pytest",
+        ),
+    )
+    settings = Settings(gemini_api_key="k", public_domain="factory.test")
+    ctx = FactoryContext(
+        settings=settings,
+        llm=LLMClient(ProviderRegistry({Provider.ANTHROPIC: fake}), settings=settings),
+        notifier=NullNotifier(),
+        sandbox=DisabledSandbox(),
+        enabled_engines={EngineName.DEVELOPMENT},
+    )
+    await generate_landing_page(
+        ctx, idea, product_id="prod-ab", ab_variants=(variant_a_brief, variant_b_brief)
+    )
+    prompt = fake.calls[-1]["prompt"]
+    assert isinstance(prompt, str)
+    return prompt
+
+
+async def test_the_fixture_renders_both_variants_when_a_test_is_active() -> None:
+    prompt = await _real_ab_prompt("Fast and automatic", "Half the price of a bookkeeper")
+
+    provider = StagingCodeProvider()
+    completion = await provider.parse(
+        ScaffoldPlan,
+        system="validation agent",
+        prompt=prompt,
+        task_type=TaskType.CODE_GENERATION,
+        model="claude-opus-5",
+    )
+
+    html = _sources(completion.value)["app/index.html"]
+    assert "Fast and automatic" in html
+    assert "Half the price of a bookkeeper" in html
+    assert "ab_variant" in html  # the localStorage-based split script
+    assert "window.__abVariant" in html  # tagged onto both POST bodies
+
+
+async def test_the_ab_fixture_still_meets_seo_and_scanner_requirements() -> None:
+    prompt = await _real_ab_prompt("Variant one", "Variant two")
+
+    provider = StagingCodeProvider()
+    completion = await provider.parse(
+        ScaffoldPlan,
+        system="validation agent",
+        prompt=prompt,
+        task_type=TaskType.CODE_GENERATION,
+        model="claude-opus-5",
+    )
+
+    sources = _sources(completion.value)
+    assert missing_seo_requirements(sources) == []
+    assert scan_secrets(sources).approved is True
+    assert scan_privilege(sources).approved is True
+
+
 # --- the MVP fixture's own test suite genuinely passes under a real pytest run ----
 
 

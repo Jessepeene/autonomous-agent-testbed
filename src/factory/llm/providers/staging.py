@@ -49,6 +49,14 @@ SchemaT = TypeVar("SchemaT", bound=BaseModel)
 _INTEREST_URL_RE = re.compile(r"Interest capture URL.*?verbatim\):\s*(\S+)")
 _ANALYTICS_URL_RE = re.compile(r"Analytics beacon URL.*?verbatim\):\s*(\S+)")
 
+#: Present only when `generate_landing_page` was called with `ab_variants` --
+#: extracted the same deterministic way as the URLs above, anchored on the exact,
+#: code-controlled markers `_AB_TEST_INSTRUCTIONS` composes (`generator.py`).
+_AB_VARIANTS_RE = re.compile(
+    r"Variant A brief:\s*(.*?)\s*\n\nVariant B brief:\s*(.*?)\s*\n\nAdd a small inline script",
+    re.DOTALL,
+)
+
 
 def _extract_url(pattern: re.Pattern[str], prompt: str, fallback: str) -> str:
     match = pattern.search(prompt)
@@ -72,14 +80,19 @@ def _seo_files() -> list[GeneratedFile]:
     ]
 
 
-def _analytics_beacon_script(analytics_url: str) -> str:
+def _analytics_beacon_script(analytics_url: str, variant_field: str = "") -> str:
     """The exact fire-and-forget pattern both prompts require: never block
-    rendering on it, never surface a failure to the visitor."""
+    rendering on it, never surface a failure to the visitor. ``variant_field``
+    is a literal `, variant: ...` fragment, appended only when an AB test is
+    active -- see `_variant_split_script`."""
     return f"""<script>
 fetch('{analytics_url}', {{
   method: 'POST',
   headers: {{'Content-Type': 'application/json'}},
-  body: JSON.stringify({{path: window.location.pathname, referrer: document.referrer || null}}),
+  body: JSON.stringify({{
+    path: window.location.pathname,
+    referrer: document.referrer || null{variant_field}
+  }}),
 }}).catch(() => {{}});
 </script>"""
 
@@ -94,11 +107,64 @@ _CATEGORY_BY_PROMPT: dict[str, ReviewCategory] = {v: k for k, v in REVIEWER_PROM
 _ZERO_USAGE = Usage(input_tokens=0, output_tokens=0, latency_ms=1)
 
 
+def _variant_split_script() -> str:
+    """The exact client-side split pattern `_AB_TEST_INSTRUCTIONS` asks for:
+    seeded once via localStorage, then reused so a returning visitor always sees
+    the arm they saw before. Deliberately reads `window.__abVariant` rather than
+    hardcoding "variant-a"/"variant-b" element visibility inline, so the same
+    small script also supplies the variant value the interest-form and analytics
+    handlers below tag their POST bodies with.
+    """
+    return """<script>
+window.__abVariant = localStorage.getItem('ab_variant');
+if (!window.__abVariant) {
+  window.__abVariant = Math.random() < 0.5 ? 'a' : 'b';
+  localStorage.setItem('ab_variant', window.__abVariant);
+}
+document.getElementById('variant-a').hidden = window.__abVariant !== 'a';
+document.getElementById('variant-b').hidden = window.__abVariant !== 'b';
+</script>"""
+
+
 def _landing_page_files(prompt: str) -> list[GeneratedFile]:
     interest_url = _extract_url(_INTEREST_URL_RE, prompt, "https://example.test/interest/unknown")
     analytics_url = _extract_url(
         _ANALYTICS_URL_RE, prompt, "https://example.test/analytics/unknown"
     )
+    ab_match = _AB_VARIANTS_RE.search(prompt)
+
+    if ab_match is None:
+        body_content = """<main>
+<h1>A staging fixture, not a real pitch</h1>
+<p>This page exists to exercise the pipeline under staging_mock_expensive_calls.</p>
+<form id="interest-form">
+  <input type="email" name="email" required>
+  <textarea name="message"></textarea>
+  <button type="submit">Notify me</button>
+</form>
+<p id="thank-you" hidden>Thanks, we will be in touch.</p>
+<p id="error" hidden>Something went wrong. Please try again.</p>
+</main>"""
+        split_script = ""
+        variant_field = ""
+    else:
+        variant_a_brief, variant_b_brief = ab_match.group(1), ab_match.group(2)
+        body_content = f"""<div id="variant-a" hidden>
+<main><h1>{variant_a_brief}</h1></main>
+</div>
+<div id="variant-b" hidden>
+<main><h1>{variant_b_brief}</h1></main>
+</div>
+<form id="interest-form">
+  <input type="email" name="email" required>
+  <textarea name="message"></textarea>
+  <button type="submit">Notify me</button>
+</form>
+<p id="thank-you" hidden>Thanks, we will be in touch.</p>
+<p id="error" hidden>Something went wrong. Please try again.</p>"""
+        split_script = _variant_split_script()
+        variant_field = ", variant: window.__abVariant"
+
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -110,17 +176,8 @@ def _landing_page_files(prompt: str) -> list[GeneratedFile]:
 <link rel="canonical" href="https://example.test/">
 </head>
 <body>
-<main>
-<h1>A staging fixture, not a real pitch</h1>
-<p>This page exists to exercise the pipeline under staging_mock_expensive_calls.</p>
-<form id="interest-form">
-  <input type="email" name="email" required>
-  <textarea name="message"></textarea>
-  <button type="submit">Notify me</button>
-</form>
-<p id="thank-you" hidden>Thanks, we will be in touch.</p>
-<p id="error" hidden>Something went wrong. Please try again.</p>
-</main>
+{split_script}
+{body_content}
 <script>
 document.getElementById('interest-form').addEventListener('submit', async (event) => {{
   event.preventDefault();
@@ -129,7 +186,7 @@ document.getElementById('interest-form').addEventListener('submit', async (event
     const response = await fetch('{interest_url}', {{
       method: 'POST',
       headers: {{'Content-Type': 'application/json'}},
-      body: JSON.stringify({{email: form.email.value, message: form.message.value}}),
+      body: JSON.stringify({{email: form.email.value, message: form.message.value{variant_field}}}),
     }});
     if (!response.ok) {{
       throw new Error('request failed');
@@ -141,7 +198,7 @@ document.getElementById('interest-form').addEventListener('submit', async (event
   }}
 }});
 </script>
-{_analytics_beacon_script(analytics_url)}
+{_analytics_beacon_script(analytics_url, variant_field)}
 </body>
 </html>
 """

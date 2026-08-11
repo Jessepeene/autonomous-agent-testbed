@@ -169,6 +169,11 @@ class InterestSubmission(BaseModel):
     #: decision, never sends anything to the address.
     email: str = Field(min_length=3, max_length=320, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
     message: str | None = Field(default=None, max_length=2000)
+    #: Set only by a page currently running a live AB test -- see the variant-split
+    #: codegen pattern in scaffold/generator.py. Unvalidated against a currently-
+    #: running test here deliberately: the beacon must never 500 just because a
+    #: test concluded between page load and this submission landing.
+    variant: str | None = Field(default=None, max_length=32)
 
 
 @app.post("/interest/{product_id}")
@@ -196,6 +201,7 @@ async def interest(product_id: str, submission: InterestSubmission) -> dict[str,
             product_id=product_id,
             email=submission.email,
             message=submission.message,
+            variant=submission.variant,
         )
     return {"received": True}
 

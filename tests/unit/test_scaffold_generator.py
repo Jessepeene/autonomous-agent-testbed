@@ -17,6 +17,7 @@ import pytest
 
 from factory.engines.development.scaffold.generator import (
     clear_workspace,
+    generate_landing_page,
     generate_scaffold,
     write_plan,
 )
@@ -83,6 +84,54 @@ async def test_a_repair_pass_prompt_includes_the_existing_files(tmp_path: Path) 
     assert "CURRENT CONTENTS" in prompt
     assert "app/main.py" in prompt
     assert "print('the old broken version')" in prompt
+
+
+# --- generate_landing_page: the AB-test variant-split prompt --------------------
+
+_LANDING_PLAN = ScaffoldPlan(
+    product_name="Invoice Bot",
+    summary="A tool that reconciles invoices automatically for small bookkeepers.",
+    files=[GeneratedFile(path="app/index.html", contents="<html></html>")],
+    test_command="pytest",
+)
+
+
+async def test_without_ab_variants_the_prompt_carries_no_variant_instructions(
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider(name=Provider.ANTHROPIC)
+    provider.register(ScaffoldPlan, _LANDING_PLAN)
+    ctx = _ctx(provider=provider, workspace_root=tmp_path)
+
+    await generate_landing_page(ctx, _IDEA, product_id="prod-1")
+
+    prompt = provider.calls[-1]["prompt"]
+    assert "AB test" not in prompt
+    assert "Variant A brief" not in prompt
+
+
+async def test_ab_variants_add_the_dual_variant_instructions_with_both_briefs(
+    tmp_path: Path,
+) -> None:
+    provider = FakeProvider(name=Provider.ANTHROPIC)
+    provider.register(ScaffoldPlan, _LANDING_PLAN)
+    ctx = _ctx(provider=provider, workspace_root=tmp_path)
+
+    await generate_landing_page(
+        ctx,
+        _IDEA,
+        product_id="prod-1",
+        ab_variants=("Emphasize speed", "Emphasize price"),
+    )
+
+    prompt = provider.calls[-1]["prompt"]
+    assert "live AB test" in prompt
+    assert "Emphasize speed" in prompt
+    assert "Emphasize price" in prompt
+    assert 'id="variant-a"' in prompt
+    assert 'id="variant-b"' in prompt
+    # Both the interest form and the analytics beacon must be told to tag `variant`.
+    assert prompt.count("variant") >= 4
 
 
 def test_clear_workspace_removes_files_and_subdirectories(tmp_path: Path) -> None:

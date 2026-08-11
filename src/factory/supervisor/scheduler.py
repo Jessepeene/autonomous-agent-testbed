@@ -125,6 +125,21 @@ class Scheduler:
                     priority=120,
                 )
 
+        if ctx.is_enabled(EngineName.DEVELOPMENT):
+            # A pure DB decision (see development/graph.py::_evaluate_ab_test) --
+            # checked far more often than HARVEST_LEADS above since it costs
+            # nothing but a couple of counts, not an LLM call or a paid lookup.
+            for ab_test in await repository.running_ab_tests(session, limit=20):
+                await repository.enqueue_task(
+                    session,
+                    kind=TaskKind.EVALUATE_AB_TEST,
+                    engine=EngineName.DEVELOPMENT,
+                    idempotency_key=f"ab_test:{ab_test.id}:{_bucket(now, 3600)}",
+                    payload={"ab_test_id": ab_test.id},
+                    product_id=ab_test.product_id,
+                    priority=110,
+                )
+
     async def tick(self) -> dict[str, Any]:
         self._tick += 1
         await self.housekeeping()

@@ -161,6 +161,9 @@ class ValidationSignal(Base):
     product_id: Mapped[str] = mapped_column(ForeignKey("products.id"), nullable=False)
     email: Mapped[str] = mapped_column(String(320), nullable=False)
     message: Mapped[str | None] = mapped_column(Text)
+    #: Which AB-test arm this visitor was assigned, if a test was running when they
+    #: submitted -- NULL outside a test. See `ABTest`.
+    variant: Mapped[str | None] = mapped_column(String(32))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -176,8 +179,8 @@ class PageView(Base):
 
     Not lead-attributed and not deduplicated by visitor -- a page view is
     anonymous by design, unlike `ValidationSignal` (an email) or a `Lead` (a real
-    contact). `variant` is unused until the live AB-testing phase; kept here so
-    that phase needs no second migration on this table.
+    contact). `variant` records which AB-test arm (if any) was showing -- see
+    `ABTest`.
     """
 
     __tablename__ = "page_views"
@@ -194,6 +197,50 @@ class PageView(Base):
     __table_args__ = (
         Index("ix_page_views_product", "product_id"),
         Index("ix_page_views_product_created", "product_id", "created_at"),
+    )
+
+
+class ABTest(Base):
+    """A live, concurrent split test of a product's landing-page copy.
+
+    Genuinely different from the Learning Loop's prompt trials
+    (`learning/trials.py`): those are sequential (one version fully live, then
+    compared to *historical* episodes over weeks); this serves two variants to
+    different visitors of the *same* product over the *same* window, compared to
+    each other directly (`development/ab_testing.py`). At most one `running` row
+    per product, enforced by a partial unique index (migration `0013`) rather than
+    application logic, so a race can never start two concurrent tests.
+    """
+
+    __tablename__ = "ab_tests"
+
+    id: Mapped[str] = _pk()
+    product_id: Mapped[str] = mapped_column(ForeignKey("products.id"), nullable=False)
+    variant_a_brief: Mapped[str] = mapped_column(Text, nullable=False)
+    variant_b_brief: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="running")
+    #: "a" | "b" | "inconclusive", set only once status == "concluded".
+    winner: Mapped[str | None] = mapped_column(String(16))
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    concluded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("ix_ab_tests_product", "product_id"),
+        # At most one running test per product. Declared here, not only in the
+        # raw SQL of migration 0013, because `Base.metadata.create_all()` (every
+        # test's `session` fixture -- see tests/integration/conftest.py) builds
+        # its schema from this ORM metadata, not from Alembic; without a matching
+        # declaration here, that index silently never existed under test, and
+        # `create_ab_test`'s ON CONFLICT clause had nothing to match against --
+        # see `MarketingFreeze` for the pattern this mirrors.
+        Index(
+            "uq_ab_tests_one_running_per_product",
+            "product_id",
+            unique=True,
+            postgresql_where=(status == "running"),
+        ),
     )
 
 

@@ -21,6 +21,7 @@ from factory.engines.compliance.minimize import minimize
 from factory.logging import get_logger
 from factory.settings import EngineName, Settings, get_settings
 from factory.state.orm import (
+    ABTest,
     CampaignApproval,
     EntityVerdictRow,
     HealAttempt,
@@ -738,18 +739,29 @@ async def leads_for_outreach(
 
 
 async def insert_validation_signal(
-    session: AsyncSession, *, product_id: str, email: str, message: str | None = None
+    session: AsyncSession,
+    *,
+    product_id: str,
+    email: str,
+    message: str | None = None,
+    variant: str | None = None,
 ) -> str | None:
     """Record real interest in a product still in its validation stage.
 
     ``ON CONFLICT DO NOTHING`` on ``(product_id, email)`` -- a repeat submission
     from the same address must never inflate the count a build-or-scrap decision is
     gated on. Returns ``None`` on a duplicate, matching this codebase's existing
-    idempotent-insert idiom (`enqueue_task`, `open_interrupt`).
+    idempotent-insert idiom (`enqueue_task`, `open_interrupt`). ``variant`` is
+    whatever AB-test arm the submitting page reported showing -- not verified
+    against a currently-running test here, since a stray or late report from a
+    test that just concluded is still a real signal worth keeping, just not one
+    `tally_ab_test_outcomes` will count once the test's row is no longer `running`.
     """
     stmt = (
         pg_insert(ValidationSignal)
-        .values(product_id=product_id, email=email.strip().lower(), message=message)
+        .values(
+            product_id=product_id, email=email.strip().lower(), message=message, variant=variant
+        )
         .on_conflict_do_nothing(
             index_elements=[ValidationSignal.product_id, ValidationSignal.email]
         )
@@ -759,12 +771,16 @@ async def insert_validation_signal(
     return str(row) if row is not None else None
 
 
-async def tally_validation_signals(session: AsyncSession, product_id: str) -> int:
+async def tally_validation_signals(
+    session: AsyncSession, product_id: str, *, variant: str | None = None
+) -> int:
     stmt = (
         select(func.count())
         .select_from(ValidationSignal)
         .where(ValidationSignal.product_id == product_id)
     )
+    if variant is not None:
+        stmt = stmt.where(ValidationSignal.variant == variant)
     return int((await session.execute(stmt)).scalar_one())
 
 
@@ -805,6 +821,84 @@ async def tally_page_views(
     if variant is not None:
         stmt = stmt.where(PageView.variant == variant)
     return int((await session.execute(stmt)).scalar_one())
+
+
+async def create_ab_test(
+    session: AsyncSession, *, product_id: str, variant_a_brief: str, variant_b_brief: str
+) -> str | None:
+    """Start a live split test. Returns ``None`` if this product already has one
+    running -- the partial unique index on ``(product_id) WHERE status='running'``
+    (migration `0013`) is what actually enforces this; a caller racing another
+    worker to start a test gets a clean no-op here, not a constraint violation.
+
+    ``index_where`` must be a literal ``text()`` clause, not an ORM comparison
+    (``ABTest.status == "running"``) -- the latter compiles to a bound parameter
+    (``status = $1``), and Postgres only matches an ``ON CONFLICT ... WHERE``
+    predicate against a partial index by comparing parsed expression trees: a
+    ``Param`` node never structurally matches the index's own ``Const`` node,
+    regardless of the runtime value, so every insert raised
+    ``InvalidColumnReferenceError`` instead of ever hitting the no-op path. Caught
+    by this phase's own integration tests exercising the conflict for the first
+    time; the identical pre-existing pattern in `create_marketing_freeze` had the
+    same bug, unexercised by any test until fixed alongside this one.
+    """
+    stmt = (
+        pg_insert(ABTest)
+        .values(
+            product_id=product_id,
+            variant_a_brief=variant_a_brief,
+            variant_b_brief=variant_b_brief,
+        )
+        .on_conflict_do_nothing(
+            index_elements=[ABTest.product_id],
+            index_where=text("status = 'running'"),
+        )
+        .returning(ABTest.id)
+    )
+    row = (await session.execute(stmt)).scalar_one_or_none()
+    return str(row) if row is not None else None
+
+
+async def get_running_ab_test(session: AsyncSession, product_id: str) -> ABTest | None:
+    stmt = select(ABTest).where(ABTest.product_id == product_id, ABTest.status == "running")
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def running_ab_tests(session: AsyncSession, *, limit: int = 20) -> list[ABTest]:
+    """Every test still open, oldest first -- what a periodic sweep evaluates."""
+    stmt = (
+        select(ABTest)
+        .where(ABTest.status == "running")
+        .order_by(ABTest.started_at.asc())
+        .limit(limit)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def conclude_ab_test(session: AsyncSession, ab_test_id: str, *, winner: str) -> None:
+    await session.execute(
+        update(ABTest)
+        .where(ABTest.id == ab_test_id)
+        .values(status="concluded", winner=winner, concluded_at=_now())
+    )
+
+
+async def tally_ab_test_outcomes(
+    session: AsyncSession, product_id: str, *, since: datetime
+) -> dict[str, tuple[int, int]]:
+    """Per-variant ``(views, signals)`` since the test started, for both arms.
+
+    Two tables, not one: `page_views` is every visit (the denominator),
+    `validation_signals` is the subset that actually converted (the numerator) --
+    the same relationship `_evaluate_validation` already uses for the sequential
+    validation gate, just split by arm here instead of summed across the product.
+    """
+    result: dict[str, tuple[int, int]] = {}
+    for variant in ("a", "b"):
+        views = await tally_page_views(session, product_id, since=since, variant=variant)
+        signals = await tally_validation_signals(session, product_id, variant=variant)
+        result[variant] = (views, signals)
+    return result
 
 
 async def count_outreach_sent(session: AsyncSession, product_id: str) -> int:
@@ -1230,13 +1324,20 @@ async def create_marketing_freeze(
     table has no plain unique constraint on ``status``, only the partial one) and
     Postgres raises ``InvalidColumnReferenceError`` instead of silently ignoring
     the conflict.
+
+    ``index_where`` must be a literal ``text()`` clause, not an ORM comparison --
+    the latter compiles to a bound parameter, which Postgres's ON CONFLICT
+    inference never matches against the index's own literal predicate (a ``Param``
+    node cannot structurally equal a ``Const`` node), so every call raised
+    instead of no-opping. See `create_ab_test` for the same bug, caught there
+    first by a test that actually exercised the conflict path.
     """
     stmt = (
         pg_insert(MarketingFreeze)
         .values(reason=reason[:4000], complaint_rate=complaint_rate, status="active")
         .on_conflict_do_nothing(
             index_elements=[MarketingFreeze.status],
-            index_where=(MarketingFreeze.status == "active"),
+            index_where=text("status = 'active'"),
         )
         .returning(MarketingFreeze.id)
     )

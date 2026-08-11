@@ -12,9 +12,11 @@ spend for that product until it is healthy again.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from factory.engines.development import bug_council, repair, seo
+from factory.engines.development import ab_testing, bug_council, repair, seo
 from factory.engines.development import deploy as deploy_module
 from factory.engines.development.scaffold.generator import (
     LANDING_PAGE_SYSTEM,
@@ -32,7 +34,7 @@ from factory.observability import costs
 from factory.sandbox.runner import DevOpsError, SandboxUnavailable, is_devops_error
 from factory.settings import EngineName
 from factory.state import repository
-from factory.state.orm import Idea, Product, Task
+from factory.state.orm import ABTest, Idea, Product, Task
 from factory.state.schemas import (
     InterruptReason,
     ProductStatus,
@@ -66,11 +68,13 @@ SURGICAL_CATEGORIES = frozenset({"test_failure", "guided", "seo_incomplete"})
 async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
     kind = TaskKind(task.kind)
 
-    # EVALUATE_VALIDATION is a pure DB decision -- no code generation, no sandbox
-    # execution -- so it must not be blocked by sandbox unavailability the way every
-    # other Development task kind correctly is.
+    # EVALUATE_VALIDATION and EVALUATE_AB_TEST are pure DB decisions -- no code
+    # generation, no sandbox execution -- so neither must be blocked by sandbox
+    # unavailability the way every other Development task kind correctly is.
     if kind is TaskKind.EVALUATE_VALIDATION:
         return await _evaluate_validation(ctx, session, task)
+    if kind is TaskKind.EVALUATE_AB_TEST:
+        return await _evaluate_ab_test(ctx, session, task)
 
     if not ctx.sandbox.available:
         # Fail loudly rather than running model-written code on the host.
@@ -204,6 +208,15 @@ async def _build_landing_page(ctx: FactoryContext, session: AsyncSession, task: 
                 workspace_path=workspace,
                 landing_page_prompt_version=prompt_version,
             )
+            # Checked fresh on every (re)generation, not threaded through the task
+            # payload -- a repair pass mid-test must still regenerate both variants
+            # correctly without needing to already know a test was running.
+            running_test = await repository.get_running_ab_test(session, product_id)
+            ab_variants = (
+                (running_test.variant_a_brief, running_test.variant_b_brief)
+                if running_test is not None
+                else None
+            )
             plan = await generate_landing_page(
                 ctx,
                 idea,
@@ -211,6 +224,7 @@ async def _build_landing_page(ctx: FactoryContext, session: AsyncSession, task: 
                 system=prompt_text,
                 tunable_parameter_id=prompt_version,
                 task_id=task.id,
+                ab_variants=ab_variants,
             )
             clear_workspace(workspace, ctx.settings)
             written = write_plan(plan, workspace, ctx.settings)
@@ -316,6 +330,106 @@ async def _evaluate_validation(ctx: FactoryContext, session: AsyncSession, task:
         response_rate=response_rate,
     )
     return f"development: validation for {product_id} failed ({signals}/{sent}), retired"
+
+
+async def start_ab_test(
+    session: AsyncSession,
+    *,
+    product_id: str,
+    idea_id: str,
+    variant_a_brief: str,
+    variant_b_brief: str,
+) -> str | None:
+    """Start a live split test and queue the regeneration that renders it.
+
+    Returns the new `ABTest` id, or `None` if this product already has one
+    running (`create_ab_test`'s partial-unique-index no-op) -- the caller decides
+    what to do with that, this function does not raise on it.
+
+    The public entry point growth roles (Phase 5) use to act on their own
+    judgment: this is the one function that actually mutates anything, so a
+    read-only role can safely be handed it as its only "write" capability.
+    """
+    ab_test_id = await repository.create_ab_test(
+        session,
+        product_id=product_id,
+        variant_a_brief=variant_a_brief,
+        variant_b_brief=variant_b_brief,
+    )
+    if ab_test_id is None:
+        return None
+    # A fresh idempotency key, not the original "validate:{idea_id}" -- that one
+    # is already consumed by the first landing-page build, and ON CONFLICT DO
+    # NOTHING would silently no-op this regeneration otherwise.
+    await repository.enqueue_task(
+        session,
+        kind=TaskKind.BUILD_LANDING_PAGE,
+        engine=EngineName.DEVELOPMENT,
+        idempotency_key=f"validate:{idea_id}:ab:{ab_test_id}",
+        payload={"idea_id": idea_id, "product_id": product_id},
+        idea_id=idea_id,
+        product_id=product_id,
+        priority=90,
+    )
+    log.info("development.ab_test_started", product_id=product_id, ab_test_id=ab_test_id)
+    return ab_test_id
+
+
+async def _evaluate_ab_test(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
+    """Periodic, deterministic check on one running AB test (see `scheduler.py`'s
+    every-tick sweep) -- concludes it once either arm is significantly ahead or its
+    time budget runs out. Never spawns a model call; see `ab_testing.py`.
+    """
+    ab_test_id = str(task.payload.get("ab_test_id", ""))
+    ab_test = await session.get(ABTest, ab_test_id) if ab_test_id else None
+    if ab_test is None or ab_test.status != "running":
+        return f"development: AB test {ab_test_id!r} not running, nothing to evaluate"
+
+    outcomes = await repository.tally_ab_test_outcomes(
+        session, ab_test.product_id, since=ab_test.started_at
+    )
+    a_views, a_signals = outcomes["a"]
+    b_views, b_signals = outcomes["b"]
+    verdict = ab_testing.evaluate_ab_test(
+        a_views=a_views,
+        a_signals=a_signals,
+        b_views=b_views,
+        b_signals=b_signals,
+        min_views_per_arm=ctx.settings.ab_test_min_views_per_arm,
+        alpha=ctx.settings.ab_test_alpha,
+    )
+
+    age_days = (datetime.now(UTC) - ab_test.started_at).days
+    expired = age_days >= ctx.settings.ab_test_max_days
+    if verdict == "inconclusive" and not expired:
+        return (
+            f"development: AB test {ab_test_id} still running "
+            f"(a={a_signals}/{a_views}, b={b_signals}/{b_views})"
+        )
+
+    await repository.conclude_ab_test(session, ab_test_id, winner=verdict)
+    inconclusive_and_expired = expired and verdict == "inconclusive"
+    await memory_store.remember(
+        session,
+        content=(
+            f"AB test on product {ab_test.product_id}: variant a got "
+            f"{a_signals}/{a_views} signals, variant b got {b_signals}/{b_views}. "
+            f"Winner: {verdict}"
+            + (" (time budget expired before significance)" if inconclusive_and_expired else "")
+        ),
+        kind=memory_store.MemoryKind.LESSON,
+        scope=memory_store.scope_for(product_id=ab_test.product_id),
+        origin="development:evaluate_ab_test",
+    )
+    log.info(
+        "development.ab_test_concluded",
+        product_id=ab_test.product_id,
+        ab_test_id=ab_test_id,
+        winner=verdict,
+        a=f"{a_signals}/{a_views}",
+        b=f"{b_signals}/{b_views}",
+    )
+    return f"development: AB test {ab_test_id} concluded, winner={verdict}"
 
 
 async def _should_repair_surgically(

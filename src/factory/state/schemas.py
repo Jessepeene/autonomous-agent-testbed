@@ -61,6 +61,10 @@ class TaskKind(StrEnum):
     #: Tallies a validation run's interest signals against a threshold and either
     #: enqueues BUILD_MVP or retires the product.
     EVALUATE_VALIDATION = "evaluate_validation"
+    #: Tallies a running AB test's per-variant outcomes and concludes it once
+    #: either a winner is statistically significant or its time budget expires.
+    #: A pure DB decision, no code generation -- see EVALUATE_VALIDATION, same shape.
+    EVALUATE_AB_TEST = "evaluate_ab_test"
 
 
 class TaskStatus(StrEnum):

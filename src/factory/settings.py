@@ -140,6 +140,17 @@ class Settings(BaseSettings):
     # a validation run needs a batch sized for one real decision, not the ongoing
     # per-tick cap a live product's outreach uses.
     validation_outreach_batch_size: int = Field(default=30, ge=1)
+    # Below this many page views on either arm, a signal rate is statistically
+    # meaningless -- same reasoning as validation_min_sample_size, just per-arm.
+    ab_test_min_views_per_arm: int = Field(default=30, ge=1)
+    # One-sided significance threshold for declaring a winner -- matches
+    # learning/trials.py's ROLLBACK_ALPHA (0.05), the same statistical bar this
+    # factory already uses everywhere else it judges a Fisher's-exact result.
+    ab_test_alpha: float = Field(default=0.05, gt=0.0, lt=1.0)
+    # Safety cap: a test that never reaches min_views_per_arm on both sides would
+    # otherwise run forever, permanently splitting traffic instead of ever
+    # converging on a single, presumably-better page.
+    ab_test_max_days: int = Field(default=14, ge=1)
     compliance_min_confidence: float = Field(default=0.85, ge=0.0, le=1.0)
     # Hard ceiling on aggregate LLM spend in any trailing 24h window. `None` (the
     # default) leaves the breaker disabled — an operator opts in deliberately, since
