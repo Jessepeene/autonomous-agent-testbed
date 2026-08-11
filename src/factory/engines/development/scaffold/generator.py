@@ -31,6 +31,10 @@ The MVP must include, as actual files with real contents:
   Checkout Session you create must set client_reference_id to the exact value of the
   PRODUCT_ID environment variable, read at request time. Never hard-code it, never
   omit it — it is the only way a payment can be attributed back to this product.
+- An analytics beacon: a small inline script on the frontend's page load that POSTs
+  JSON {"path": ..., "referrer": ...} to the exact analytics URL given below.
+  Fire-and-forget — never block page rendering on it, and never surface a failure
+  to the visitor.
 - A pytest suite covering the core feature and the auth boundary.
 - requirements.txt with a minimum-version lower bound per package (e.g. \
 "pydantic>=2.9,<3"), and a README with run instructions.
@@ -43,6 +47,8 @@ even a fake one.
 leading slash and no "..".
 - No unbounded loops, no unbounded recursion, no retry loop without a maximum, and \
 no sleep longer than 5 seconds. This code runs unattended in a metered container.
+- The analytics beacon's fetch/XHR target must be the EXACT analytics URL given in \
+the prompt, verbatim. Do not invent your own endpoint path or guess at one.
 - test_command must be a single shell command that runs the suite.
 - requirements.txt runs on Python 3.13 in a container with no compiler toolchain and \
 no writable-and-executable temp directory (/tmp is mounted noexec). Never pin an \
@@ -108,6 +114,10 @@ credible styling, and a mobile-responsive layout.
 to the exact interest URL given below. On success, replace the form with a short \
 thank-you message. On failure, show an error and leave the form intact so the visitor \
 can retry.
+- An analytics beacon: a small inline script that runs on page load and POSTs JSON \
+{"path": ..., "referrer": ...} to the exact analytics URL given below. \
+Fire-and-forget — never block page rendering on it, and never surface a failure to \
+the visitor.
 - A pytest suite that serves the page (e.g. via FastAPI's StaticFiles, or an \
 equivalent minimal static server) and asserts the page loads and contains the pitch \
 and the form.
@@ -131,7 +141,9 @@ exact old version of a package with a compiled extension — use a minimum-versi
 lower bound instead (e.g. "fastapi>=0.115,<1"), so pip resolves a release recent \
 enough to ship a Python 3.13 wheel.
 - The interest form's fetch/XHR target must be the EXACT interest URL given in the \
-prompt, verbatim. Do not invent your own endpoint path or guess at one.\
+prompt, verbatim. Do not invent your own endpoint path or guess at one.
+- The analytics beacon's fetch/XHR target must be the EXACT analytics URL given in \
+the prompt, verbatim. Do not invent your own endpoint path or guess at one.\
 """
 
 
@@ -143,6 +155,7 @@ async def generate_scaffold(
     ctx: FactoryContext,
     idea: ValidatedIdea,
     *,
+    product_id: str,
     task_id: str | None = None,
     existing_files: dict[str, str] | None = None,
 ) -> ScaffoldPlan:
@@ -154,13 +167,23 @@ async def generate_scaffold(
     versions -- and both sets of bugs -- pile up in the workspace side by side.
     Observed live: Bug Council rejected a build for exactly this, having found the
     same N+1 query bug duplicated across `app/main.py` and `backend/main.py`.
+
+    ``product_id`` is required (unlike a real backend, which reads PRODUCT_ID from
+    its own environment at request time for Stripe attribution) because the
+    frontend's analytics beacon is static JS with no server-side templating and no
+    env var to read -- the exact URL has to be composed here and handed to the
+    model, the same reason `generate_landing_page` already does this for its
+    interest-capture URL.
     """
+    analytics_url = f"https://{ctx.settings.public_domain}/analytics/{product_id}"
     prompt = (
         f"Validated idea:\n"
         f"- problem: {idea.problem_statement}\n"
         f"- target niche: {idea.target_niche}\n"
         f"- monetization: {idea.monetization_hypothesis}\n"
         f"- evidence: {idea.source_url}\n\n"
+        f'Analytics beacon URL (POST JSON {{"path": ..., "referrer": ...}} here, '
+        f"exactly, verbatim): {analytics_url}\n\n"
     )
     if existing_files:
         prompt += (
@@ -202,9 +225,11 @@ async def generate_landing_page(
     The interest-capture URL is baked into the prompt, not left for the model to
     guess: a static page has no server-side env var to read PRODUCT_ID from the way
     a real backend does (see `deploy.py::_runtime_env`), so `settings.public_domain`
-    + `product_id` are composed here into the one exact URL the model must use.
+    + `product_id` are composed here into the one exact URL the model must use. The
+    analytics beacon URL is composed the same way, for the same reason.
     """
     interest_url = f"https://{ctx.settings.public_domain}/interest/{product_id}"
+    analytics_url = f"https://{ctx.settings.public_domain}/analytics/{product_id}"
     prompt = (
         f"Validated idea:\n"
         f"- problem: {idea.problem_statement}\n"
@@ -213,6 +238,8 @@ async def generate_landing_page(
         f"- evidence: {idea.source_url}\n\n"
         f'Interest capture URL (POST JSON {{"email": ..., "message": ...}} here, '
         f"exactly, verbatim): {interest_url}\n\n"
+        f'Analytics beacon URL (POST JSON {{"path": ..., "referrer": ...}} here, '
+        f"exactly, verbatim): {analytics_url}\n\n"
     )
     if existing_files:
         prompt += (

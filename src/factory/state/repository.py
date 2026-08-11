@@ -31,6 +31,7 @@ from factory.state.orm import (
     LLMCall,
     MarketingFreeze,
     OutreachLog,
+    PageView,
     Product,
     ProductLock,
     Task,
@@ -764,6 +765,45 @@ async def tally_validation_signals(session: AsyncSession, product_id: str) -> in
         .select_from(ValidationSignal)
         .where(ValidationSignal.product_id == product_id)
     )
+    return int((await session.execute(stmt)).scalar_one())
+
+
+async def record_page_view(
+    session: AsyncSession,
+    *,
+    product_id: str,
+    path: str,
+    referrer: str | None = None,
+    variant: str | None = None,
+) -> None:
+    """A page view is anonymous by design -- no dedup, no identity, unlike
+    `insert_validation_signal`'s per-email upsert. The caller (the public
+    `/analytics/{product_id}` endpoint) checks the product exists first and 404s
+    before this is ever reached, matching `/interest/{product_id}`'s pattern --
+    this function assumes that check already happened and lets the FK raise if it
+    somehow didn't.
+    """
+    stmt = pg_insert(PageView).values(
+        product_id=product_id,
+        path=path,
+        referrer=referrer,
+        variant=variant,
+    )
+    await session.execute(stmt)
+
+
+async def tally_page_views(
+    session: AsyncSession,
+    product_id: str,
+    *,
+    since: datetime | None = None,
+    variant: str | None = None,
+) -> int:
+    stmt = select(func.count()).select_from(PageView).where(PageView.product_id == product_id)
+    if since is not None:
+        stmt = stmt.where(PageView.created_at >= since)
+    if variant is not None:
+        stmt = stmt.where(PageView.variant == variant)
     return int((await session.execute(stmt)).scalar_one())
 
 

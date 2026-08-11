@@ -17,10 +17,9 @@ not a placeholder that would make every later stage meaningless.
 
 Every quantity in the returned files is real and self-consistent: the MVP fixture's
 auth, billing wiring, and test suite genuinely function against the sandbox's actual
-Python 3.13 environment. The one thing that has to be filled in per call is the
-landing page's interest-capture URL, since it is product-specific — extracted from
-the prompt text the same deterministic way `generate_landing_page` composed it in,
-never guessed.
+Python 3.13 environment. The interest-capture and analytics-beacon URLs are
+product-specific — extracted from the prompt text the same deterministic way
+`generate_scaffold`/`generate_landing_page` composed them in, never guessed.
 """
 
 from __future__ import annotations
@@ -37,10 +36,36 @@ from factory.state.schemas import GeneratedFile, ReviewCategory, ReviewVerdict, 
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
-#: `generate_landing_page` composes this verbatim into its prompt and instructs the
-#: model to use it exactly -- deterministic code on the write side, so it is safe to
-#: extract deterministically on this side too, rather than guessing at a URL shape.
-_INTEREST_URL_RE = re.compile(r"exactly, verbatim\):\s*(\S+)")
+#: `generate_scaffold`/`generate_landing_page` compose these verbatim into their
+#: prompts and instruct the model to use them exactly -- deterministic code on the
+#: write side, so extracting deterministically here is safe and never guesses at a
+#: URL shape. Each label's own worked example (e.g. `{"email": ...}`) contains
+#: colons of its own, so anchoring on the first `:` after the label would stop
+#: inside the example rather than at the real "verbatim):" marker -- non-greedy
+#: `.*?` up to that literal marker (never crossing a newline, since each
+#: label+URL is composed as one line) is what correctly skips over it, and what
+#: lets the analytics pattern find its own URL rather than the interest one when
+#: both are present in the same landing-page prompt.
+_INTEREST_URL_RE = re.compile(r"Interest capture URL.*?verbatim\):\s*(\S+)")
+_ANALYTICS_URL_RE = re.compile(r"Analytics beacon URL.*?verbatim\):\s*(\S+)")
+
+
+def _extract_url(pattern: re.Pattern[str], prompt: str, fallback: str) -> str:
+    match = pattern.search(prompt)
+    return match.group(1) if match else fallback
+
+
+def _analytics_beacon_script(analytics_url: str) -> str:
+    """The exact fire-and-forget pattern both prompts require: never block
+    rendering on it, never surface a failure to the visitor."""
+    return f"""<script>
+fetch('{analytics_url}', {{
+  method: 'POST',
+  headers: {{'Content-Type': 'application/json'}},
+  body: JSON.stringify({{path: window.location.pathname, referrer: document.referrer || null}}),
+}}).catch(() => {{}});
+</script>"""
+
 
 #: `REVIEWER_PROMPTS` values are fixed, code-controlled text (Bug Council prompts are
 #: permanently excluded from the Learning Loop -- `learning/allowlist.py`), so a
@@ -53,8 +78,10 @@ _ZERO_USAGE = Usage(input_tokens=0, output_tokens=0, latency_ms=1)
 
 
 def _landing_page_files(prompt: str) -> list[GeneratedFile]:
-    match = _INTEREST_URL_RE.search(prompt)
-    interest_url = match.group(1) if match else "https://example.test/interest/unknown"
+    interest_url = _extract_url(_INTEREST_URL_RE, prompt, "https://example.test/interest/unknown")
+    analytics_url = _extract_url(
+        _ANALYTICS_URL_RE, prompt, "https://example.test/analytics/unknown"
+    )
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -93,6 +120,7 @@ document.getElementById('interest-form').addEventListener('submit', async (event
   }}
 }});
 </script>
+{_analytics_beacon_script(analytics_url)}
 </body>
 </html>
 """
@@ -150,7 +178,10 @@ def test_page_loads_and_contains_pitch_and_form() -> None:
     ]
 
 
-def _mvp_files() -> list[GeneratedFile]:
+def _mvp_files(prompt: str) -> list[GeneratedFile]:
+    analytics_url = _extract_url(
+        _ANALYTICS_URL_RE, prompt, "https://example.test/analytics/unknown"
+    )
     server = '''"""Staging fixture: a minimal but genuinely functional auth + billing MVP."""
 
 import hashlib
@@ -271,10 +302,13 @@ def create_checkout(user: str = Depends(_current_user)) -> CheckoutResponse:
     )
     return CheckoutResponse(checkout_url=session.url)
 '''
-    index_html = """<!DOCTYPE html>
+    index_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><title>Staging fixture MVP</title></head>
-<body><main><h1>Staging fixture</h1><p>Exercises the real build/deploy pipeline.</p></main></body>
+<body>
+<main><h1>Staging fixture</h1><p>Exercises the real build/deploy pipeline.</p></main>
+{_analytics_beacon_script(analytics_url)}
+</body>
 </html>
 """
     test = '''"""Staging fixture tests: core feature + auth boundary."""
@@ -382,7 +416,7 @@ class StagingCodeProvider:
             # A code-controlled marker, not a guess -- robust even if the Learning
             # Loop has mutated LANDING_PAGE_SYSTEM's wording elsewhere.
             is_landing_page = "Interest capture URL" in prompt
-            files = _landing_page_files(prompt) if is_landing_page else _mvp_files()
+            files = _landing_page_files(prompt) if is_landing_page else _mvp_files(prompt)
             plan = ScaffoldPlan(
                 product_name="Staging Fixture",
                 summary=(

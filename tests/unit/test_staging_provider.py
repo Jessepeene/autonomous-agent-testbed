@@ -35,18 +35,32 @@ def _sources(plan: ScaffoldPlan) -> dict[str, str]:
 # --- ScaffoldPlan: landing page vs. MVP -------------------------------------------
 
 
+#: Matches the exact shape `generate_landing_page`/`generate_scaffold` compose --
+#: including the embedded JSON example between the label and the real URL, which is
+#: exactly what the regex has to skip over correctly (each example itself contains
+#: colons: {"email": ...} / {"path": ...}).
+_LANDING_PROMPT = (
+    "Validated idea:\n- problem: p\n\n"
+    'Interest capture URL (POST JSON {"email": ..., "message": ...} here, '
+    "exactly, verbatim): https://factory.test/interest/prod-123\n\n"
+    'Analytics beacon URL (POST JSON {"path": ..., "referrer": ...} here, '
+    "exactly, verbatim): https://factory.test/analytics/prod-123\n\n"
+)
+_MVP_PROMPT = (
+    "Validated idea:\n- problem: p\n\n"
+    'Analytics beacon URL (POST JSON {"path": ..., "referrer": ...} here, '
+    "exactly, verbatim): https://factory.test/analytics/prod-456\n\n"
+    "Produce the complete MVP."
+)
+
+
 async def test_a_landing_page_prompt_yields_the_landing_page_fixture() -> None:
     provider = StagingCodeProvider()
-    prompt = (
-        "Validated idea:\n- problem: p\n\n"
-        'Interest capture URL (POST JSON {"email": ..., "message": ...} here, '
-        "exactly, verbatim): https://factory.test/interest/prod-123\n\n"
-    )
 
     completion = await provider.parse(
         ScaffoldPlan,
         system="you are the validation agent",
-        prompt=prompt,
+        prompt=_LANDING_PROMPT,
         task_type=TaskType.CODE_GENERATION,
         model="claude-opus-5",
     )
@@ -54,6 +68,7 @@ async def test_a_landing_page_prompt_yields_the_landing_page_fixture() -> None:
     sources = _sources(completion.value)
     assert "app/index.html" in sources
     assert "https://factory.test/interest/prod-123" in sources["app/index.html"]
+    assert "https://factory.test/analytics/prod-123" in sources["app/index.html"]
     # The MVP-only surface must not leak into a landing page.
     assert "stripe" not in sources["app/server.py"].lower()
     assert "app/billing" not in sources
@@ -65,7 +80,7 @@ async def test_an_mvp_prompt_yields_the_auth_and_billing_fixture() -> None:
     completion = await provider.parse(
         ScaffoldPlan,
         system="you are the engineering agent",
-        prompt="Validated idea:\n- problem: p\n\nProduce the complete MVP.",
+        prompt=_MVP_PROMPT,
         task_type=TaskType.CODE_GENERATION,
         model="claude-opus-5",
     )
@@ -74,6 +89,11 @@ async def test_an_mvp_prompt_yields_the_auth_and_billing_fixture() -> None:
     assert "stripe" in sources["app/server.py"].lower()
     assert "client_reference_id" in sources["app/server.py"]
     assert "PRODUCT_ID" in sources["app/server.py"]
+    assert "https://factory.test/analytics/prod-456" in sources["app/index.html"]
+    # The analytics extraction must not accidentally pick up an interest URL --
+    # there isn't one in a real MVP prompt, but a regex bug could still match the
+    # wrong thing inside the analytics label's own worked example.
+    assert "prod-123" not in sources["app/index.html"]
 
 
 async def test_the_interest_url_falls_back_safely_when_the_prompt_has_no_match() -> None:
@@ -85,12 +105,15 @@ async def test_the_interest_url_falls_back_safely_when_the_prompt_has_no_match()
     completion = await provider.parse(
         ScaffoldPlan,
         system="you are the validation agent",
-        prompt="Interest capture URL (exactly, verbatim): but no colon-space match here",
+        prompt="Interest capture URL mentioned, but the real marker text is missing entirely",
         task_type=TaskType.CODE_GENERATION,
         model="claude-opus-5",
     )
 
-    assert "app/index.html" in _sources(completion.value)
+    sources = _sources(completion.value)
+    assert "app/index.html" in sources
+    assert "https://example.test/interest/unknown" in sources["app/index.html"]
+    assert "https://example.test/analytics/unknown" in sources["app/index.html"]
 
 
 async def test_usage_is_zero_since_no_real_call_happened() -> None:

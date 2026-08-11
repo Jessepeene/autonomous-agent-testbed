@@ -160,7 +160,10 @@ async def process_event(
         # when the payment method was synchronous to begin with. "no_payment_required"
         # covers a $0 Checkout session (never reaches here; amount<=0 below).
         payment_status = obj.get("payment_status")
-        if isinstance(payment_status, str) and payment_status not in ("paid", "no_payment_required"):
+        if isinstance(payment_status, str) and payment_status not in (
+            "paid",
+            "no_payment_required",
+        ):
             return WebhookOutcome(
                 False, event_type, detail=f"payment not yet settled ({payment_status})"
             )
@@ -201,7 +204,9 @@ async def process_event(
         return WebhookOutcome(True, event_type, amount, "revenue recorded")
 
     if event_type in REFUND_EVENTS:
-        refund_amount = _refund_increment_cents(event) if event_type == "charge.refunded" else amount
+        refund_amount = (
+            _refund_increment_cents(event) if event_type == "charge.refunded" else amount
+        )
         if refund_amount <= 0:
             return WebhookOutcome(False, event_type, detail="zero-value refund event")
         _, pool = await repository.current_balance(session)

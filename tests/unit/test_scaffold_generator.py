@@ -66,7 +66,7 @@ async def test_a_fresh_build_prompt_has_no_existing_contents_section(tmp_path: P
     provider.register(ScaffoldPlan, _PLAN)
     ctx = _ctx(provider=provider, workspace_root=tmp_path)
 
-    await generate_scaffold(ctx, _IDEA)
+    await generate_scaffold(ctx, _IDEA, product_id="prod-1")
 
     assert "CURRENT CONTENTS" not in provider.calls[-1]["prompt"]
 
@@ -77,7 +77,7 @@ async def test_a_repair_pass_prompt_includes_the_existing_files(tmp_path: Path) 
     ctx = _ctx(provider=provider, workspace_root=tmp_path)
     existing = {"app/main.py": "print('the old broken version')"}
 
-    await generate_scaffold(ctx, _IDEA, existing_files=existing)
+    await generate_scaffold(ctx, _IDEA, product_id="prod-1", existing_files=existing)
 
     prompt = provider.calls[-1]["prompt"]
     assert "CURRENT CONTENTS" in prompt

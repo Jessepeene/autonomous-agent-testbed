@@ -171,6 +171,32 @@ class ValidationSignal(Base):
     )
 
 
+class PageView(Base):
+    """A self-hosted analytics beacon, for every LIVE or VALIDATING product.
+
+    Not lead-attributed and not deduplicated by visitor -- a page view is
+    anonymous by design, unlike `ValidationSignal` (an email) or a `Lead` (a real
+    contact). `variant` is unused until the live AB-testing phase; kept here so
+    that phase needs no second migration on this table.
+    """
+
+    __tablename__ = "page_views"
+
+    id: Mapped[str] = _pk()
+    product_id: Mapped[str] = mapped_column(ForeignKey("products.id"), nullable=False)
+    path: Mapped[str] = mapped_column(String(400), nullable=False)
+    referrer: Mapped[str | None] = mapped_column(String(400))
+    variant: Mapped[str | None] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_page_views_product", "product_id"),
+        Index("ix_page_views_product_created", "product_id", "created_at"),
+    )
+
+
 class ProductLock(Base):
     """Held by Development while building or patching.
 

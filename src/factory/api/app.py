@@ -198,3 +198,48 @@ async def interest(product_id: str, submission: InterestSubmission) -> dict[str,
             message=submission.message,
         )
     return {"received": True}
+
+
+class PageViewSubmission(BaseModel):
+    #: Free text from the visitor's browser, not validated as a real URL/referrer --
+    #: this is best-effort growth signal, never treated as authoritative for
+    #: anything security-sensitive. Bounded the same way InterestSubmission's
+    #: fields are, so an oversized payload cannot be used to bloat the table.
+    path: str = Field(min_length=1, max_length=400)
+    referrer: str | None = Field(default=None, max_length=400)
+    #: Set only by a product currently running a live AB test -- see the
+    #: variant-split codegen pattern. Unvalidated against any known-running test
+    #: here deliberately: the beacon must never 500 just because a test concluded
+    #: between page load and this request landing.
+    variant: str | None = Field(default=None, max_length=32)
+
+
+@app.post("/analytics/{product_id}")
+async def analytics(product_id: str, submission: PageViewSubmission) -> dict[str, Any]:
+    """Page-view beacon for a product's own generated frontend.
+
+    The same shape and posture as `/interest/{product_id}` above -- an
+    unauthenticated public write endpoint a generated page's own inline script
+    calls -- extended to traffic volume rather than expressed interest. No
+    third-party analytics dependency: this factory fully controls the schema and
+    the query surface that reads it back (see `repository.tally_page_views`,
+    used by the growth-analyst role).
+
+    Anonymous by design, unlike `/interest`: no email, no dedup, no identity. A
+    flood of fake views is a data-quality problem for growth decisions, not a
+    privacy or spend-gating one the way a fake interest signal would be — so
+    unlike `/interest`, nothing here needs to be load-bearing against abuse
+    beyond the field-length bounds already enforced by the schema.
+    """
+    async with session_scope() as session:
+        product = await repository.get_product(session, product_id)
+        if product is None:
+            raise HTTPException(status_code=404, detail="unknown product")
+        await repository.record_page_view(
+            session,
+            product_id=product_id,
+            path=submission.path,
+            referrer=submission.referrer,
+            variant=submission.variant,
+        )
+    return {"received": True}

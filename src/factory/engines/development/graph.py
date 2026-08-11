@@ -125,7 +125,7 @@ async def _build(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
                 ProductStatus.BUILDING,
                 workspace_path=workspace,
             )
-            plan = await generate_scaffold(ctx, idea, task_id=task.id)
+            plan = await generate_scaffold(ctx, idea, product_id=product_id, task_id=task.id)
             # A retried build_mvp task (after a crash mid-attempt) reuses this same
             # product-scoped workspace -- clear it so a stale partial write from the
             # earlier attempt can't survive alongside this one.
@@ -422,6 +422,7 @@ async def _patch(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
                 idea.model_copy(
                     update={"problem_statement": f"{idea.problem_statement}\n\n{repairs}"}
                 ),
+                product_id=product_id,
                 task_id=task.id,
                 existing_files=existing,
             )
