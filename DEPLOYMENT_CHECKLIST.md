@@ -1087,6 +1087,88 @@ section for exactly which and why.
 `git archive HEAD`, image rebuilt, service restarted. `/health` reports `ok`, all
 six engines enabled, boot log clean.
 
+## Fix pass on the 5 deliberately-deferred items — 2026-08-11
+
+The MEDIUM/LOW pass above deferred 5 items rather than guessing at policy calls
+that were the user's to make. Direction given: items 1 (lead quota by rows, not
+calls) and 2 (~100s Stripe reconciliation bucket) — leave as-is, already
+bounded/safe-direction. Item 5 (maintenance cadence catch-up) — accepted as-is
+("as long as maintenance doesn't get a backlog it's not a problem"). Items 3 and
+4 got real direction and are fixed below. 552 unit tests + 135 integration tests,
+0 regressions, no schema migration.
+
+1. **Idea-level confidence-threshold asymmetry (item 4, first half)** — the real
+   bug, found by reading `compliance/assessor.py::assess_idea` against the
+   already-correct sibling `finalise_lead_assessment`: the confidence-vs-threshold
+   check ran *unconditionally*, so a REJECTED verdict issued with low stated
+   confidence got silently upgraded to FLAG_FOR_REVIEW — a needless human
+   escalation for an idea that was already safely, conservatively decided, and one
+   more "uncertain" idea left sitting in the pipeline pending a reply that was
+   never actually needed. Only APPROVED needs a confidence bar now (approving
+   requires being sure; rejecting cautiously is already the safe default the
+   system prompt asks for) — matches the ordering `finalise_lead_assessment`
+   already used.
+2. **Flagged-idea HITL replies never resolved anything (item 4, second half)** —
+   found while confirming "uncertain ideas shouldn't stay in the pipeline":
+   `compliance/graph.py`'s FLAG_FOR_REVIEW escalation asks a human to "Reply
+   APPROVE to allow the build, or REJECT to discard the idea," but
+   `hitl/interrupts.py::collect_replies` had no code path for either word — it
+   only recognized "retry" (task-level) and product-level guidance/REJECT replies.
+   The idea just stayed `flagged` forever, invisible to every pipeline count but
+   never actually resolved either way, regardless of what a human said. Now
+   detected by task kind (`ASSESS_COMPLIANCE`): REJECT sets the idea terminal
+   (`rejected`); APPROVE sets it `approved` and re-enqueues `ASSESS_COMPLIANCE`
+   under a fresh idempotency key, which rides `compliance/graph.py::run()`'s
+   existing "already approved on a previous pass" short-circuit straight to
+   `_create_validation` — zero further LLM spend, and the real
+   `max_concurrent_validations` capacity check runs instead of this module
+   duplicating that business rule.
+3. **PII retention tied to product lifecycle (item 3, first half)** — direction:
+   "should be tied to the product itself." `repository.retire_product` (the single
+   terminal transition for a product, however reached) now also calls the new
+   `purge_product_pii`, which redacts `CampaignApproval.brief` and
+   `Interrupt.detail` (both directly product-linked interrupts and ones linked via
+   `task_id → Task.product_id`, e.g. a campaign-approval escalation) for that
+   product. Subject/status/timestamps survive — only the free text a human or
+   model wrote role/company detail into does not. `development/graph.py`'s
+   validation-gate failure path (the other RETIRED entry point) now goes through
+   `retire_product` too, instead of a bare `set_product_status`, so both terminal
+   paths get retention enforced through the one choke point.
+4. **Escalation-pattern learning for recurring heal cycles (item 3, second half)**
+   — direction: "if the same type of escalation happens time after time (for
+   instance heal cycle) the system should learn so the same mistake doesn't
+   happen again and again." `_heal()` now writes a FAILURE memory on *every*
+   cycle (product-scoped, category-keyed content so a recurring category
+   reinforces one memory rather than piling up near-duplicates — see
+   `memory/store.py::remember`'s existing near-duplicate merge), plus a second,
+   engine-scoped memory when the whole heal budget is exhausted (visible to
+   future spawned diagnostic agents via `agents/spawner.py`'s own recall, so a
+   category that keeps burning the whole budget across *different* products is
+   visible there too). The other half of closing the loop: `_patch()` now calls
+   `memory_store.recall_block` (scoped to the product) before generating its next
+   attempt and folds the result into the prompt — so a product's own heal history
+   is actually visible to the model trying to fix it, not just sitting in the
+   table for an audit to find later. Cross-product leakage is structurally
+   impossible (`recall_block` only ever reads the scopes it's handed, and a
+   different product's scope string is never in that list) — covered directly by
+   `test_a_different_products_heal_history_is_never_recalled`.
+
+**Two test bugs found and fixed during server-side verification** (not production
+bugs): `test_recurring_same_category_reinforces_rather_than_piling_up` expected
+`hits==2` for one reinforcement (the `Memory.hits` column defaults to 0, so one
+reinforcement lands on `1`), and needed `session.expire_all()` before re-reading a
+row updated via a raw `UPDATE` in the same session (the fixture sets
+`expire_on_commit=False`). `test_a_different_products_heal_history_is_never_recalled`
+was claiming the wrong task via `claim_next_task`'s priority ordering — `_heal()`'s
+own auto-enqueued patch task (priority 40) always outranks a default-priority
+(100) manually-enqueued test task — fixed by fetching the intended task by id
+instead.
+
+**Deployed live** (2026-08-11): committed (`25f072c`, test fixes in `42ae15d`),
+transferred via `git archive HEAD`, image rebuilt, service restarted. `/health`
+reports `ok`, all six engines enabled, boot log clean. No new alembic migration
+(live DB already at `0010_gdpr_erasure_fixes`, unchanged by this pass).
+
 ## Comprehensive codebase audit — 2026-08-10 (research only, NOTHING below is fixed yet)
 
 Requested directly: "can you do a comprehensive scan of the entire codebase, to
