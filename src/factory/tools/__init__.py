@@ -8,4 +8,7 @@ that a spawned agent always sees the full catalogue instead of an empty registry
 
 from __future__ import annotations
 
-from factory.tools import builtin  # noqa: F401 - import populates REGISTRY
+from factory.tools import (
+    builtin,  # noqa: F401 - import populates REGISTRY
+    growth,  # noqa: F401 - import populates REGISTRY
+)

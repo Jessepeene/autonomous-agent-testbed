@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from urllib.parse import urlparse
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from factory.agents.roles import RoleName
+from factory.agents.spawner import SpawnRequest, spawn
 from factory.engines.compliance.rules import MAX_CONTACTS_PER_DOMAIN_PER_MONTH
 from factory.engines.marketing import campaign, deliverability, outreach
 from factory.engines.marketing import leads as leads_module
 from factory.logging import get_logger
+from factory.memory import store as memory_store
 from factory.settings import EngineName
 from factory.state import repository
-from factory.state.orm import Idea, Product, Task
+from factory.state.orm import ChannelExperiment, Idea, Product, Task
 from factory.state.schemas import ProductStatus, TaskKind
 from factory.supervisor.context import FactoryContext
 
@@ -27,6 +31,10 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
         return await _harvest(ctx, session, task)
     if kind is TaskKind.SEND_OUTREACH:
         return await _outreach(ctx, session, task)
+    if kind is TaskKind.CHANNEL_SCOUT_REVIEW:
+        return await _channel_scout_review(ctx, session, task)
+    if kind is TaskKind.MEASURE_CHANNEL_EXPERIMENT:
+        return await _measure_channel_experiment(ctx, session, task)
     return f"marketing: unsupported task kind {task.kind}"
 
 
@@ -198,3 +206,81 @@ async def _outreach(ctx: FactoryContext, session: AsyncSession, task: Task) -> s
         )
 
     return f"marketing/outreach: {outcome.summary()}"
+
+
+async def _channel_scout_review(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
+    """Spawn CHANNEL_SCOUT for one product -- see `scheduler.py`'s periodic backstop
+    sweep (`products_needing_channel_scout`) and `agents/roles.py`.
+
+    Same reasoning as `development/graph.py::_growth_review`: the Orchestrator can
+    also reach CHANNEL_SCOUT directly via SPAWN_AGENT (it is in the catalogue);
+    this is the reliability net so a product's distribution never goes unexamined
+    purely because the Orchestrator's own judgement never picked it.
+    """
+    product_id = task.product_id or str(task.payload.get("product_id", ""))
+    product = await session.get(Product, product_id) if product_id else None
+    if product is None:
+        return f"marketing: product {product_id!r} not found for channel scout review"
+
+    objective = (
+        f"Research a new organic growth channel for product {product_id} "
+        f"({product.name}) and propose one if you find a genuinely good fit."
+    )
+    result = await spawn(
+        ctx,
+        session,
+        SpawnRequest(
+            role=RoleName.CHANNEL_SCOUT,
+            objective=objective,
+            engine=EngineName.MARKETING,
+            product_id=product_id,
+            task_id=task.id,
+        ),
+    )
+    await repository.set_channel_scouted(session, product_id)
+    log.info("marketing.channel_scouted", product_id=product_id, outcome=result.summary())
+    return f"marketing/channel_scout: {result.summary()}"
+
+
+async def _measure_channel_experiment(
+    ctx: FactoryContext, session: AsyncSession, task: Task
+) -> str:
+    """Periodic, deterministic check on one approved channel experiment (see
+    `scheduler.py`'s sweep) -- tallies referrer hits against the channel's own
+    domain since it was approved, and concludes it. Never spawns a model call.
+
+    Best-effort by construction: `page_views.referrer` is whatever the visitor's
+    browser sent (often nothing at all), so a zero count means "no attributable
+    traffic," not "definitely no effect." Still a real, automated measurement --
+    the point is to close the loop CHANNEL_SCOUT's next proposal can learn from,
+    not to produce an attribution-grade number.
+    """
+    experiment_id = str(task.payload.get("experiment_id", ""))
+    experiment = await session.get(ChannelExperiment, experiment_id) if experiment_id else None
+    if experiment is None or experiment.status != "approved":
+        return f"marketing: channel experiment {experiment_id!r} not awaiting measurement"
+
+    since = experiment.decided_at or experiment.created_at
+    host = urlparse(experiment.url).netloc or experiment.channel
+    views = await repository.count_page_views_from_referrer(
+        session, experiment.product_id, since=since, referrer_contains=host
+    )
+    outcome = f"{views} visit(s) referred from {host} since approval on {since.date().isoformat()}."
+    await repository.conclude_channel_experiment(session, experiment_id, outcome=outcome)
+    await memory_store.remember(
+        session,
+        content=(
+            f"Channel experiment on {experiment.channel} ({experiment.url}) for "
+            f"product {experiment.product_id}: {outcome}"
+        ),
+        kind=memory_store.MemoryKind.LESSON,
+        scope=memory_store.scope_for(product_id=experiment.product_id),
+        origin="marketing:channel_experiment",
+    )
+    log.info(
+        "marketing.channel_experiment_concluded",
+        product_id=experiment.product_id,
+        experiment_id=experiment_id,
+        views=views,
+    )
+    return f"marketing: channel experiment {experiment_id} concluded -- {outcome}"

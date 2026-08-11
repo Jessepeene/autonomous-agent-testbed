@@ -326,20 +326,37 @@ async def attempt_repair(
     healing: str,
     recalled: str,
     task_id: str | None = None,
+    category: str = "",
 ) -> RepairOutcome:
     """Run one bounded repair agent against the workspace.
+
+    ``category == "growth_seo"`` switches both the role and the objective framing:
+    GROWTH_ANALYST's own judgement that a LIVE product would benefit from an
+    organic-discoverability pass is not a test failure, and telling SEO_OPTIMIZER
+    "the test suite is failing" when it is not would be actively misleading about
+    why it is here. Every other category keeps WORKSPACE_SURGEON's original framing.
 
     Raises:
         RepairBlocked: the agent never got a fair attempt (outage, budget exhausted).
     """
-    role = get_role(RoleName.WORKSPACE_SURGEON)
     before = _read_tree(resolve_workspace(workspace, ctx.settings))
 
-    objective = (
-        f"The test suite for this product is failing. Fix it.\n\n"
-        f"Run the suite with exactly this command:\n    {test_command}\n\n"
-        f"What the last verification run reported:\n{healing}"
-    )
+    if category == "growth_seo":
+        role = get_role(RoleName.SEO_OPTIMIZER)
+        objective = (
+            "A growth analysis flagged this product for an SEO/organic-"
+            "discoverability improvement pass -- there is no failing test.\n\n"
+            f"What the analysis found:\n{healing}\n\n"
+            f"Verify your change with exactly this command when you are done:\n"
+            f"    {test_command}"
+        )
+    else:
+        role = get_role(RoleName.WORKSPACE_SURGEON)
+        objective = (
+            f"The test suite for this product is failing. Fix it.\n\n"
+            f"Run the suite with exactly this command:\n    {test_command}\n\n"
+            f"What the last verification run reported:\n{healing}"
+        )
     # The knowledge file goes first: it is what lets this run start from "here is how
     # this product is built" instead of spending steps rediscovering it, and it is
     # the whole reason a repair on a months-old product should be no more expensive

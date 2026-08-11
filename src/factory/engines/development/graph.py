@@ -16,6 +16,8 @@ from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from factory.agents.roles import RoleName
+from factory.agents.spawner import SpawnRequest, spawn
 from factory.engines.development import ab_testing, bug_council, repair, seo
 from factory.engines.development import deploy as deploy_module
 from factory.engines.development.scaffold.generator import (
@@ -57,24 +59,31 @@ MAX_HEAL_CYCLES = 3
 #: `seo_incomplete`: a missing <title>/meta-description/sitemap.xml/robots.txt (see
 #: seo.py) is a small, well-defined addition -- exactly what surgical repair is for,
 #: and unlike a Council rejection the check is free to re-run after the edit.
+#: `growth_seo`: GROWTH_ANALYST's own judgement that a LIVE product would benefit
+#: from an organic-discoverability pass -- not a failure at all, but the same
+#: "small, targeted, in-place edit" shape. Routed to SEO_OPTIMIZER instead of
+#: WORKSPACE_SURGEON -- see `_patch_surgically`.
 #:
 #: Everything else is deliberately absent. `dependency_*` cannot be fixed by an agent
 #: whose sandbox has no network; `deploy_failure` is not a workspace bug at all;
 #: `council_rejection:*` is plausible future work but the agent cannot re-run the
 #: Council, so it would be editing blind to the only opinion that decides the outcome.
-SURGICAL_CATEGORIES = frozenset({"test_failure", "guided", "seo_incomplete"})
+SURGICAL_CATEGORIES = frozenset({"test_failure", "guided", "seo_incomplete", "growth_seo"})
 
 
 async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
     kind = TaskKind(task.kind)
 
-    # EVALUATE_VALIDATION and EVALUATE_AB_TEST are pure DB decisions -- no code
-    # generation, no sandbox execution -- so neither must be blocked by sandbox
-    # unavailability the way every other Development task kind correctly is.
+    # EVALUATE_VALIDATION, EVALUATE_AB_TEST and GROWTH_REVIEW are pure DB decisions
+    # (the latter spawns an ephemeral agent that only reads state and enqueues
+    # further work, never generates or runs code itself) -- none must be blocked by
+    # sandbox unavailability the way every other Development task kind correctly is.
     if kind is TaskKind.EVALUATE_VALIDATION:
         return await _evaluate_validation(ctx, session, task)
     if kind is TaskKind.EVALUATE_AB_TEST:
         return await _evaluate_ab_test(ctx, session, task)
+    if kind is TaskKind.GROWTH_REVIEW:
+        return await _growth_review(ctx, session, task)
 
     if not ctx.sandbox.available:
         # Fail loudly rather than running model-written code on the host.
@@ -432,6 +441,40 @@ async def _evaluate_ab_test(ctx: FactoryContext, session: AsyncSession, task: Ta
     return f"development: AB test {ab_test_id} concluded, winner={verdict}"
 
 
+async def _growth_review(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
+    """Spawn GROWTH_ANALYST for one product -- see `scheduler.py`'s periodic
+    backstop sweep (`products_needing_growth_review`) and `agents/roles.py`.
+
+    The Orchestrator can also reach GROWTH_ANALYST directly via SPAWN_AGENT
+    (it is in the catalogue); this is the reliability net so a quiet product
+    still gets looked at even if the Orchestrator's own judgement never picks
+    it. Marked reviewed regardless of what the agent decided to do -- "this
+    product looks fine, no action taken" is a complete, legitimate outcome, and
+    the point of the timestamp is only to stop the same product being reviewed
+    again tomorrow, not to track whether anything changed.
+    """
+    product_id = task.product_id or str(task.payload.get("product_id", ""))
+    product = await session.get(Product, product_id) if product_id else None
+    if product is None:
+        return f"development: product {product_id!r} not found for growth review"
+
+    objective = f"Review product {product_id} ({product.name}) and act if the data justifies it."
+    result = await spawn(
+        ctx,
+        session,
+        SpawnRequest(
+            role=RoleName.GROWTH_ANALYST,
+            objective=objective,
+            engine=EngineName.DEVELOPMENT,
+            product_id=product_id,
+            task_id=task.id,
+        ),
+    )
+    await repository.set_growth_reviewed(session, product_id)
+    log.info("development.growth_reviewed", product_id=product_id, outcome=result.summary())
+    return f"development/growth_review: {result.summary()}"
+
+
 async def _should_repair_surgically(
     ctx: FactoryContext, session: AsyncSession, product: Product, category: str
 ) -> bool:
@@ -497,6 +540,20 @@ async def _patch(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
             holder=EngineName.DEVELOPMENT,
             reason="patching product",
         ):
+            # A discretionary growth-motivated pass (GROWTH_ANALYST's own judgement,
+            # not a real failure) must never fall through to a full regeneration --
+            # unlike every other category here, "not safe for a surgical repair right
+            # now" means "skip it, try again another time," not "rebuild the product
+            # from scratch over an optional optimisation." Checked before the status
+            # flip below, so a skip leaves the live product completely untouched.
+            surgical_ok = await _should_repair_surgically(ctx, session, product, category)
+            if category == "growth_seo" and not surgical_ok:
+                log.info("development.growth_seo_skipped", product_id=product_id)
+                return (
+                    f"development: growth SEO pass for {product_id} skipped "
+                    "(not safe for a discretionary edit right now)"
+                )
+
             await repository.set_product_status(session, product_id, ProductStatus.PATCHING)
             # Before anything else: a snapshot left behind by an earlier attempt means
             # that attempt died mid-edit. Its session rolled back, so heal_attempts
@@ -519,7 +576,7 @@ async def _patch(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
                 scopes=memory_store.scopes_for(product_id=product_id),
             )
 
-            if await _should_repair_surgically(ctx, session, product, category):
+            if surgical_ok:
                 return await _patch_surgically(
                     ctx,
                     session,
@@ -528,6 +585,7 @@ async def _patch(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
                     workspace=workspace,
                     healing=healing,
                     recalled=recalled,
+                    category=category,
                 )
 
             existing = read_workspace(workspace, ctx.settings)
@@ -586,6 +644,7 @@ async def _patch_surgically(
     workspace: str,
     healing: str,
     recalled: str,
+    category: str,
 ) -> str:
     """Repair by editing the workspace in place, then verify exactly as usual.
 
@@ -610,6 +669,7 @@ async def _patch_surgically(
             healing=healing,
             recalled=recalled,
             task_id=task.id,
+            category=category,
         )
     except repair.RepairBlocked:
         # Never leave a half-edited workspace behind, and never charge this to the
@@ -622,6 +682,18 @@ async def _patch_surgically(
     if not outcome.usable:
         repair.restore_snapshot(workspace, ctx.settings)
         reason = outcome.rejected_because or "no usable repair"
+        if category == "growth_seo":
+            # A declined discretionary optimisation is not a product failure --
+            # unlike every other rejection here, it must never enter the _heal()
+            # escalation ladder: that increments heal_attempts (shrinking the
+            # budget a REAL future bug fix gets to work with) and, on repeat,
+            # would eventually page a human about what was only ever an SEO
+            # experiment that did not pan out. Restore the product's own status
+            # (whatever _patch found it in -- always LIVE in practice, since
+            # request_seo_pass_action only ever fires on a LIVE product) and stop.
+            await repository.set_product_status(session, product_id, ProductStatus.LIVE)
+            log.info("development.growth_seo_declined", product_id=product_id, reason=reason)
+            return f"development: growth SEO pass for {product_id} declined ({reason})"
         # Straight to a heal cycle without running _verify_and_ship: that is the
         # expensive half (dependency install, full suite, three reviewers) and against
         # a workspace that is now byte-identical to the one that already failed, it

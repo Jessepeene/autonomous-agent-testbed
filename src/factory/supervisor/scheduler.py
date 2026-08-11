@@ -12,6 +12,7 @@ Housekeeping runs before every tick, in this order and for these reasons:
 5. **Sync campaign decisions** — turn a resolved campaign-approval interrupt into
    the cohort's real approved/rejected status, so a pending `SEND_OUTREACH` task
    sees the decision the next time it is attempted.
+5b. **Sync channel decisions** — same idea, for a CHANNEL_SCOUT proposal.
 6. **Sync deliverability freeze clearance** — same idea, for the spam-complaint
    circuit breaker: only an explicit RESUME reply lifts it.
 7. **Schedule Discovery** — on its cadence, and only when Development has headroom.
@@ -23,7 +24,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from factory.engines.marketing import campaign, deliverability
+from factory.engines.marketing import campaign, channel, deliverability
 from factory.hitl import interrupts
 from factory.logging import get_logger
 from factory.settings import EngineName
@@ -57,6 +58,7 @@ class Scheduler:
             await interrupts.deliver_pending(session, ctx.notifier)
             await interrupts.collect_replies(session, ctx.notifier)
             await campaign.sync_decisions(session)
+            await channel.sync_decisions(session)
             await deliverability.sync_freeze_clearance(session)
             await self._schedule_discovery(session)
             await self._schedule_periodic(session)
@@ -125,6 +127,43 @@ class Scheduler:
                     priority=120,
                 )
 
+            # CHANNEL_SCOUT's reliability net -- the Orchestrator can spawn it
+            # directly (it is in role_catalogue()); this is what still finds a
+            # quiet product even if that judgement call never happens. A longer
+            # cadence than HARVEST_LEADS since channel discovery is a heavier,
+            # rarer activity than a routine lead sweep.
+            scout_bucket = _bucket(now, ctx.settings.channel_scout_interval_days * 86400)
+            for product in await repository.products_needing_channel_scout(
+                session,
+                older_than=timedelta(days=ctx.settings.channel_scout_interval_days),
+                limit=3,
+            ):
+                await repository.enqueue_task(
+                    session,
+                    kind=TaskKind.CHANNEL_SCOUT_REVIEW,
+                    engine=EngineName.MARKETING,
+                    idempotency_key=f"channel-scout:{product.id}:{scout_bucket}",
+                    payload={"product_id": product.id},
+                    product_id=product.id,
+                    priority=70,
+                )
+
+            # A pure DB decision (see marketing/graph.py::_measure_channel_experiment)
+            # -- checked hourly, matching the AB-test sweep below, since it costs
+            # nothing but a count, not an LLM call.
+            for experiment in await repository.approved_channel_experiments_awaiting_conclusion(
+                session, older_than=timedelta(days=ctx.settings.channel_experiment_measure_days)
+            ):
+                await repository.enqueue_task(
+                    session,
+                    kind=TaskKind.MEASURE_CHANNEL_EXPERIMENT,
+                    engine=EngineName.MARKETING,
+                    idempotency_key=f"measure-channel:{experiment.id}:{_bucket(now, 3600)}",
+                    payload={"experiment_id": experiment.id},
+                    product_id=experiment.product_id,
+                    priority=130,
+                )
+
         if ctx.is_enabled(EngineName.DEVELOPMENT):
             # A pure DB decision (see development/graph.py::_evaluate_ab_test) --
             # checked far more often than HARVEST_LEADS above since it costs
@@ -138,6 +177,25 @@ class Scheduler:
                     payload={"ab_test_id": ab_test.id},
                     product_id=ab_test.product_id,
                     priority=110,
+                )
+
+            # GROWTH_ANALYST's reliability net -- same reasoning as the
+            # CHANNEL_SCOUT sweep above: the Orchestrator can spawn it directly,
+            # this is the backstop so a quiet product still gets looked at.
+            review_bucket = _bucket(now, ctx.settings.growth_review_interval_days * 86400)
+            for product in await repository.products_needing_growth_review(
+                session,
+                older_than=timedelta(days=ctx.settings.growth_review_interval_days),
+                limit=3,
+            ):
+                await repository.enqueue_task(
+                    session,
+                    kind=TaskKind.GROWTH_REVIEW,
+                    engine=EngineName.DEVELOPMENT,
+                    idempotency_key=f"growth-review:{product.id}:{review_bucket}",
+                    payload={"product_id": product.id},
+                    product_id=product.id,
+                    priority=65,
                 )
 
     async def tick(self) -> dict[str, Any]:

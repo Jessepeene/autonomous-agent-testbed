@@ -23,6 +23,7 @@ from factory.settings import EngineName, Settings, get_settings
 from factory.state.orm import (
     ABTest,
     CampaignApproval,
+    ChannelExperiment,
     EntityVerdictRow,
     HealAttempt,
     Idea,
@@ -584,6 +585,59 @@ async def live_products(session: AsyncSession, limit: int = 20) -> list[Product]
     return list((await session.execute(stmt)).scalars().all())
 
 
+async def set_growth_reviewed(session: AsyncSession, product_id: str) -> None:
+    await _set_product_timestamp(session, product_id, "last_growth_review_at")
+
+
+async def set_channel_scouted(session: AsyncSession, product_id: str) -> None:
+    await _set_product_timestamp(session, product_id, "last_channel_scout_at")
+
+
+async def _set_product_timestamp(session: AsyncSession, product_id: str, column: str) -> None:
+    await session.execute(
+        update(Product).where(Product.id == product_id).values(**{column: _now()})
+    )
+
+
+async def products_needing_growth_review(
+    session: AsyncSession, *, older_than: timedelta, limit: int = 10
+) -> list[Product]:
+    """LIVE products GROWTH_ANALYST has never reviewed, or not recently -- what the
+    periodic backstop sweep and the `list_products_needing_growth_review` tool both
+    read from.
+
+    A never-reviewed product's staleness is measured from ``created_at``, not
+    treated as infinitely overdue -- a product that went live five minutes ago has
+    no traffic data yet, and reviewing it immediately would compete with
+    `HARVEST_LEADS` for the same tick's capacity for zero value. Once eligible,
+    ordered oldest-effective-review-first, same idea either way.
+    """
+    cutoff = _now() - older_than
+    effective = func.coalesce(Product.last_growth_review_at, Product.created_at)
+    stmt = (
+        select(Product)
+        .where(Product.status == ProductStatus.LIVE.value, effective < cutoff)
+        .order_by(effective.asc())
+        .limit(limit)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def products_needing_channel_scout(
+    session: AsyncSession, *, older_than: timedelta, limit: int = 10
+) -> list[Product]:
+    """Same reasoning as `products_needing_growth_review`, for CHANNEL_SCOUT."""
+    cutoff = _now() - older_than
+    effective = func.coalesce(Product.last_channel_scout_at, Product.created_at)
+    stmt = (
+        select(Product)
+        .where(Product.status == ProductStatus.LIVE.value, effective < cutoff)
+        .order_by(effective.asc())
+        .limit(limit)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
 # ------------------------------------------------------------------ product locks
 
 
@@ -820,6 +874,25 @@ async def tally_page_views(
         stmt = stmt.where(PageView.created_at >= since)
     if variant is not None:
         stmt = stmt.where(PageView.variant == variant)
+    return int((await session.execute(stmt)).scalar_one())
+
+
+async def count_page_views_from_referrer(
+    session: AsyncSession, product_id: str, *, since: datetime, referrer_contains: str
+) -> int:
+    """Best-effort measurement for a `ChannelExperiment` -- how many visits since it
+    was approved carried a referrer naming the channel's own domain. Best-effort
+    because `referrer` is whatever the visitor's browser sent (or omitted); this is
+    a growth signal, never something a spend or compliance decision is gated on."""
+    stmt = (
+        select(func.count())
+        .select_from(PageView)
+        .where(
+            PageView.product_id == product_id,
+            PageView.created_at >= since,
+            PageView.referrer.ilike(f"%{referrer_contains}%"),
+        )
+    )
     return int((await session.execute(stmt)).scalar_one())
 
 
@@ -1221,6 +1294,96 @@ async def decide_campaign_approval(
         .where(CampaignApproval.id == campaign_approval_id)
         .values(status=decision, decided_at=_now())
     )
+
+
+# --------------------------------------------------------------- channel experiments
+
+
+async def create_channel_experiment(
+    session: AsyncSession,
+    *,
+    product_id: str,
+    channel: str,
+    url: str,
+    rationale: str,
+    draft_content: str,
+) -> str:
+    row = ChannelExperiment(
+        product_id=product_id,
+        channel=channel[:40],
+        url=url[:500],
+        rationale=rationale[:2000],
+        draft_content=draft_content[:6000],
+    )
+    session.add(row)
+    await session.flush()
+    return row.id
+
+
+async def set_channel_experiment_interrupt(
+    session: AsyncSession, experiment_id: str, interrupt_id: str
+) -> None:
+    await session.execute(
+        update(ChannelExperiment)
+        .where(ChannelExperiment.id == experiment_id)
+        .values(interrupt_id=interrupt_id)
+    )
+
+
+async def pending_channel_experiments(session: AsyncSession) -> list[ChannelExperiment]:
+    stmt = select(ChannelExperiment).where(
+        ChannelExperiment.status == "proposed", ChannelExperiment.interrupt_id.is_not(None)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def decide_channel_experiment(
+    session: AsyncSession, experiment_id: str, decision: str
+) -> None:
+    """``decision`` is always ``'approved'`` or ``'rejected'`` -- same fail-closed
+    contract as `decide_campaign_approval`, enforced by the caller
+    (`marketing.channel.sync_decisions`)."""
+    await session.execute(
+        update(ChannelExperiment)
+        .where(ChannelExperiment.id == experiment_id)
+        .values(status=decision, decided_at=_now())
+    )
+
+
+async def approved_channel_experiments_awaiting_conclusion(
+    session: AsyncSession, *, older_than: timedelta
+) -> list[ChannelExperiment]:
+    """Approved experiments whose measurement window has elapsed -- what the
+    periodic sweep in scheduler.py turns into a `MEASURE_CHANNEL_EXPERIMENT` task."""
+    cutoff = _now() - older_than
+    stmt = select(ChannelExperiment).where(
+        ChannelExperiment.status == "approved", ChannelExperiment.decided_at < cutoff
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def conclude_channel_experiment(
+    session: AsyncSession, experiment_id: str, *, outcome: str
+) -> None:
+    await session.execute(
+        update(ChannelExperiment)
+        .where(ChannelExperiment.id == experiment_id)
+        .values(status="concluded", outcome=outcome[:2000], concluded_at=_now())
+    )
+
+
+async def recent_channel_experiments(
+    session: AsyncSession, product_id: str, limit: int = 10
+) -> list[ChannelExperiment]:
+    """What CHANNEL_SCOUT reads before proposing anything new, so it does not
+    re-propose a channel already tried (or already awaiting a human decision)."""
+    stmt = (
+        select(ChannelExperiment)
+        .where(ChannelExperiment.product_id == product_id)
+        .order_by(ChannelExperiment.created_at.desc())
+        .limit(limit)
+    )
+    return list((await session.execute(stmt)).scalars().all())
 
 
 # --------------------------------------------------------------- entity verdicts

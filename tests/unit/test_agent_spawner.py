@@ -121,9 +121,11 @@ def test_non_mutating_role_ignores_dry_run(ctx: FactoryContext) -> None:
 
 
 def test_read_only_roles_are_all_declared_non_mutating() -> None:
-    """A sanity check on the catalogue itself: only the repair engineer mutates."""
+    """A sanity check on the catalogue itself: exactly the roles that can act on
+    the world (edit live code, start a real AB test, enqueue a real patch, raise
+    a real human-approval request) are flagged mutating."""
     mutating = {name for name, role in ROLES.items() if role.mutating}
-    assert mutating == {RoleName.REPAIR_ENGINEER}
+    assert mutating == {RoleName.REPAIR_ENGINEER, RoleName.GROWTH_ANALYST, RoleName.CHANNEL_SCOUT}
 
 
 # --- spawn(): refusal never touches the provider ------------------------------
@@ -250,3 +252,49 @@ async def test_spawned_agent_only_receives_its_roles_tools(
     assert tool_names == {"http_get"}
     assert "run_in_sandbox" not in tool_names
     assert "github_search_issues" not in tool_names
+
+
+async def test_growth_analyst_cannot_reach_channel_scouts_proposal_tool(
+    ctx: FactoryContext, gemini_fake: FakeProvider
+) -> None:
+    """growth_read/growth_actions and channel_scout are deliberately separate
+    categories -- GROWTH_ANALYST must never be able to raise a channel-approval
+    interrupt, and CHANNEL_SCOUT (tested below) must never be able to start an AB
+    test or request a patch."""
+    from factory.tools import growth  # noqa: F401 - import populates REGISTRY
+
+    ctx.settings.factory_dry_run = False
+    gemini_fake.register_turns(_completion("No action needed this week."))
+    await spawn(ctx, None, SpawnRequest(role=RoleName.GROWTH_ANALYST, objective="review product X"))
+
+    tool_names = {t["name"] for t in gemini_fake.conversations[0]["tools"]}
+    assert tool_names == {
+        "read_product_growth",
+        "list_products_needing_growth_review",
+        "start_ab_test_action",
+        "request_seo_pass_action",
+    }
+    assert "propose_channel" not in tool_names
+
+
+async def test_channel_scout_cannot_reach_growth_analysts_action_tools(
+    ctx: FactoryContext, gemini_fake: FakeProvider
+) -> None:
+    from factory.tools import growth  # noqa: F401 - import populates REGISTRY
+
+    ctx.settings.factory_dry_run = False
+    gemini_fake.register_turns(_completion("Nothing worth proposing yet."))
+    await spawn(
+        ctx, None, SpawnRequest(role=RoleName.CHANNEL_SCOUT, objective="find a channel for X")
+    )
+
+    tool_names = {t["name"] for t in gemini_fake.conversations[0]["tools"]}
+    assert tool_names == {
+        "http_get",
+        "read_product_growth",
+        "list_products_needing_growth_review",
+        "recent_channel_experiments",
+        "propose_channel",
+    }
+    assert "start_ab_test_action" not in tool_names
+    assert "request_seo_pass_action" not in tool_names

@@ -26,6 +26,16 @@ class RoleName(StrEnum):
     LEAD_SCOUT = "lead_scout"
     #: Excluded from `role_catalogue()` -- see WORKSPACE_SCOPED_ROLES.
     WORKSPACE_SURGEON = "workspace_surgeon"
+    #: Reads one product's analytics/AB-test state and decides whether to start an
+    #: AB test or request an SEO pass -- see development/graph.py::_growth_review.
+    GROWTH_ANALYST = "growth_analyst"
+    #: Excluded from `role_catalogue()` -- see WORKSPACE_SCOPED_ROLES.
+    SEO_OPTIMIZER = "seo_optimizer"
+    #: Researches candidate organic growth channels (Reddit, forums, communities)
+    #: a product does not yet use, and drafts content for one -- gated behind a
+    #: mandatory human approval before anything happens with it. See
+    #: engines/marketing/channel.py.
+    CHANNEL_SCOUT = "channel_scout"
 
 
 #: Roles the Orchestrator must not be able to pick. A workspace surgeon is only
@@ -35,7 +45,13 @@ class RoleName(StrEnum):
 #: it would have none of that: no lock, no snapshot, no heal accounting, and a
 #: model-chosen objective. `role_catalogue()` filters these out so the Orchestrator's
 #: own prompt never lists them as an option.
-WORKSPACE_SCOPED_ROLES = frozenset({RoleName.WORKSPACE_SURGEON})
+#:
+#: SEO_OPTIMIZER follows the identical precedent: it is only ever spawned from
+#: `_patch_surgically`, on a `growth_seo` category task GROWTH_ANALYST itself
+#: enqueued via `request_seo_pass_action` -- the same locked, snapshot-protected
+#: context WORKSPACE_SURGEON runs in, chosen by category rather than a second
+#: hardcoded role.
+WORKSPACE_SCOPED_ROLES = frozenset({RoleName.WORKSPACE_SURGEON, RoleName.SEO_OPTIMIZER})
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +227,96 @@ ROLES: dict[RoleName, AgentRole] = {
         tool_categories=("leads",),
         task_type=TaskType.ANALYSIS,
         max_steps=6,
+    ),
+    RoleName.GROWTH_ANALYST: AgentRole(
+        name=RoleName.GROWTH_ANALYST,
+        purpose=(
+            "Review one live product's traffic, interest rate and AB-test history, "
+            "then start an AB test or request an SEO pass if the data justifies one."
+        ),
+        system_prompt=(
+            "You are the growth analyst of an autonomous B2B software company. You "
+            "are faster and more consistent at this than a human growth team, but "
+            "only if you act on evidence, not on a hunch.\n"
+            "If you were not given a specific product to review, call "
+            "list_products_needing_growth_review first and pick one.\n"
+            "Call read_product_growth and actually read the numbers before deciding "
+            "anything: views over the last 7 and 30 days, the interest/conversion "
+            "rate, and whether an AB test is already running. A product with very "
+            "little traffic needs distribution or SEO before a copy test could ever "
+            "reach significance — do not start an AB test on a trickle of visitors. "
+            "A product with real traffic but a low conversion rate is a good AB-test "
+            "candidate; write two genuinely different, concrete pitch briefs, not "
+            "two trivial rewordings of the same sentence. Only request an SEO pass "
+            "when you can name the specific gap (thin content, no clear keyword "
+            "focus, missing internal structure) — 'improve SEO' is not an "
+            "instruction the engineer who receives it can act on.\n"
+            "Do not act at all if the data does not clearly justify it. Reporting "
+            "'this product looks fine, no action taken' is a legitimate, complete "
+            "outcome — most products most weeks need nothing.\n" + _SHARED_RULES
+        ),
+        tool_categories=("growth_read", "growth_actions"),
+        task_type=TaskType.ANALYSIS,
+        max_steps=8,
+        mutating=True,
+    ),
+    RoleName.SEO_OPTIMIZER: AgentRole(
+        name=RoleName.SEO_OPTIMIZER,
+        purpose="Improve a live product's organic discoverability, based on a specific finding.",
+        system_prompt=(
+            "You are improving one live product's organic discoverability. There is "
+            "no failing test — a growth analysis found a specific, concrete gap and "
+            "you are here to close it.\n"
+            "Read the current pages before changing anything. Make the change "
+            "earn its keep: expand genuinely thin content with real, specific "
+            "detail (not filler), improve heading structure and internal links, "
+            "tighten the meta description, add FAQ or structured data where it "
+            "fits — but never invent a claim, a statistic, or a testimonial that "
+            "is not true of this product. Then run the test command to confirm "
+            "you have not broken anything.\n" + _REPAIR_RULES
+        ),
+        tool_categories=("workspace",),
+        task_type=TaskType.CODE_GENERATION,
+        max_steps=8,
+        deadline_seconds=600,
+        # Same reasoning as WORKSPACE_SURGEON: edits confined to a product workspace,
+        # only ever run from inside `_patch_surgically`'s already-locked, snapshot-
+        # protected context.
+        mutating=False,
+    ),
+    RoleName.CHANNEL_SCOUT: AgentRole(
+        name=RoleName.CHANNEL_SCOUT,
+        purpose=(
+            "Research organic growth channels (Reddit, forums, communities) a "
+            "product does not yet use, and draft content for the most promising one."
+        ),
+        system_prompt=(
+            "You are a growth channel scout for an autonomous B2B software company. "
+            "Your job is to find where the people who need this product already "
+            "gather online, and draft something genuinely useful to post there — "
+            "you never post it yourself, a human decides and does that.\n"
+            "If you were not given a specific product to research, call "
+            "list_products_needing_growth_review and pick one, then read_product_growth "
+            "to understand what it does. Call recent_channel_experiments before you "
+            "propose anything — do not re-propose a channel already tried or already "
+            "awaiting a decision.\n"
+            "Use http_get against public search endpoints (e.g. Reddit's own "
+            "public search JSON, a forum's search page) to find a specific "
+            "community with real, recent, on-topic discussion — a specific "
+            "subreddit or thread beats a generic guess at where an audience "
+            "might be. Quote what you actually found and its URL.\n"
+            "Draft content that reads like a genuine community member sharing "
+            "something useful, not an advert — communities like this ban "
+            "obvious self-promotion, so honest, specific, low-key framing is "
+            "what actually works. When you have a real candidate, call "
+            "propose_channel with the channel, the exact URL, your rationale, "
+            "and the draft. If you found nothing worth proposing, say so plainly "
+            "rather than forcing a weak candidate through.\n" + _SHARED_RULES
+        ),
+        tool_categories=("http", "growth_read", "channel_scout"),
+        task_type=TaskType.ANALYSIS,
+        max_steps=12,
+        mutating=True,
     ),
 }
 

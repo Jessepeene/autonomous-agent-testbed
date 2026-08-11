@@ -144,6 +144,14 @@ class Product(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+    #: Set by `development/graph.py::_growth_review` after GROWTH_ANALYST finishes
+    #: looking at this product, whatever it decided to do -- what the periodic
+    #: backstop sweep (scheduler.py) and the `list_products_needing_growth_review`
+    #: tool both order by, so a product nobody has looked at recently surfaces first.
+    last_growth_review_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: Same idea, for CHANNEL_SCOUT's own periodic backstop -- a separate cadence
+    #: (channel discovery is a heavier, rarer activity than a growth-data read).
+    last_channel_scout_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (Index("ix_products_status", "status"),)
 
@@ -510,6 +518,51 @@ class CampaignApproval(Base):
         ),
         UniqueConstraint("task_id", name="uq_campaign_approvals_task_id"),
         Index("ix_campaign_approvals_status", "status"),
+    )
+
+
+class ChannelExperiment(Base):
+    """A candidate organic growth channel (Reddit, a forum, a community)
+    CHANNEL_SCOUT researched and drafted content for -- see `agents/roles.py`.
+
+    Gated by the same poll-based human-approval pattern as `CampaignApproval`,
+    but deliberately NOT scoped by ``task_id``/``product_id`` on the raised
+    `Interrupt` the way a heal-exhaustion escalation is -- see
+    `engines/marketing/channel.py`'s module docstring for why: those fields
+    route a reply through `hitl/interrupts.py::_act_on_product_reply`, which
+    means "retire this product"/"queue a guided patch", not "approve this
+    channel." ``interrupt_id`` on this row is the only link back.
+
+    Real posting is explicitly out of scope: an APPROVE reply means a human
+    posts ``draft_content`` themselves. Outcome is measured later, best-effort,
+    via `page_views.referrer` matching the channel's own domain.
+    """
+
+    __tablename__ = "channel_experiments"
+
+    id: Mapped[str] = _pk()
+    product_id: Mapped[str] = mapped_column(ForeignKey("products.id"), nullable=False)
+    channel: Mapped[str] = mapped_column(String(40), nullable=False)
+    url: Mapped[str] = mapped_column(String(500), nullable=False)
+    rationale: Mapped[str] = mapped_column(Text, nullable=False)
+    draft_content: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="proposed")
+    #: Free-text summary of what the measurement sweep found, set once concluded.
+    outcome: Mapped[str | None] = mapped_column(Text)
+    interrupt_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("interrupts.id"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    concluded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('proposed','approved','rejected','concluded')",
+            name="channel_experiment_status_valid",
+        ),
+        Index("ix_channel_experiments_product", "product_id"),
+        Index("ix_channel_experiments_status", "status"),
     )
 
 

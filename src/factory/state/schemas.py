@@ -65,6 +65,16 @@ class TaskKind(StrEnum):
     #: either a winner is statistically significant or its time budget expires.
     #: A pure DB decision, no code generation -- see EVALUATE_VALIDATION, same shape.
     EVALUATE_AB_TEST = "evaluate_ab_test"
+    #: Spawns GROWTH_ANALYST for one product -- reads its analytics/AB-test state
+    #: and decides whether to start an AB test or request an SEO pass. See
+    #: agents/roles.py and development/graph.py::_growth_review.
+    GROWTH_REVIEW = "growth_review"
+    #: Spawns CHANNEL_SCOUT for one product -- researches candidate organic growth
+    #: channels (Reddit, forums) it does not yet use. See marketing/graph.py.
+    CHANNEL_SCOUT_REVIEW = "channel_scout_review"
+    #: Tallies referrer hits for an approved channel_experiment and concludes it.
+    #: A pure DB decision, no LLM call -- see EVALUATE_AB_TEST, same shape.
+    MEASURE_CHANNEL_EXPERIMENT = "measure_channel_experiment"
 
 
 class TaskStatus(StrEnum):
@@ -107,6 +117,12 @@ class InterruptReason(StrEnum):
     BUDGET_EXCEEDED = "budget_exceeded"
     CAMPAIGN_APPROVAL = "campaign_approval"
     DELIVERABILITY_FROZEN = "deliverability_frozen"
+    #: Sign-off on a CHANNEL_SCOUT-proposed organic channel (a specific subreddit,
+    #: forum, community) before any real action is taken there. Distinct from
+    #: CAMPAIGN_APPROVAL: platform-posting risk (bans, reputational damage) is a
+    #: different kind of judgement than GDPR-gated cold email, and this factory
+    #: never posts automatically even once approved -- see engines/marketing/channel.py.
+    CHANNEL_APPROVAL = "channel_approval"
 
 
 class ComplianceStatus(StrEnum):

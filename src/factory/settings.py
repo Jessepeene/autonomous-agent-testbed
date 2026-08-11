@@ -151,6 +151,17 @@ class Settings(BaseSettings):
     # otherwise run forever, permanently splitting traffic instead of ever
     # converging on a single, presumably-better page.
     ab_test_max_days: int = Field(default=14, ge=1)
+    # Cadence of the GROWTH_ANALYST periodic backstop -- a live product not
+    # reviewed within this many days gets one queued regardless of whether the
+    # Orchestrator ever chose to spawn one itself. See scheduler.py.
+    growth_review_interval_days: int = Field(default=7, ge=1)
+    # Same idea for CHANNEL_SCOUT -- a longer cadence since channel discovery is a
+    # heavier, rarer activity than a growth-data read.
+    channel_scout_interval_days: int = Field(default=14, ge=1)
+    # How long an approved channel_experiment waits before the measurement sweep
+    # tallies referrer hits and concludes it. Long enough that a human has had time
+    # to actually post the draft and for any resulting traffic to show up.
+    channel_experiment_measure_days: int = Field(default=14, ge=1)
     compliance_min_confidence: float = Field(default=0.85, ge=0.0, le=1.0)
     # Hard ceiling on aggregate LLM spend in any trailing 24h window. `None` (the
     # default) leaves the breaker disabled — an operator opts in deliberately, since
