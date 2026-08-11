@@ -10,14 +10,19 @@ guess which vendor produced a given row.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
-from pydantic import BaseModel, Field
+import pytest
+from pydantic import BaseModel, Field, ValidationError
 
+from factory.llm.providers.base import ProviderRequestRejected
 from factory.llm.providers.gemini_provider import (
+    GeminiProvider,
     _billable_input_tokens,
     _sanitize_tools_for_gemini,
     _strip_additional_properties,
 )
+from factory.settings import Settings, TaskType
 
 
 def test_cached_tokens_are_subtracted_from_the_inclusive_prompt_count() -> None:
@@ -135,3 +140,40 @@ def test_sanitize_tools_for_gemini_passes_through_a_tool_with_no_parameters() ->
     assert _sanitize_tools_for_gemini(tools) == [
         {"name": "noop", "description": "does nothing", "parameters": {}}
     ]
+
+
+# --- latent crash guard: a contract google's own schema model can't represent ----
+
+
+class _Echo(BaseModel):
+    text: str
+
+
+async def test_parse_raises_provider_request_rejected_on_a_schema_validation_error() -> None:
+    """Regression coverage for a latent bug found in the 2026-08-10 audit:
+    google-genai's own request-config models (e.g. `types.Schema`) are
+    `extra="forbid"` and lack several JSON Schema keywords Claude's side accepts
+    (exclusiveMinimum, multipleOf, uniqueItems, const, oneOf/allOf, discriminator).
+    A contract using one of those previously raised the SDK's own internal
+    pydantic ValidationError uncaught -- neither `except genai_errors.APIError`
+    nor `except (OSError, TimeoutError)` catches it -- surfacing a confusing error
+    about google's schema model instead of a clean, provider-neutral, failover-
+    eligible one. No current contract in `factory.*` triggers this (verified
+    during the audit), so this is exercised here by making the SDK's config
+    constructor raise directly, standing in for a future contract that would."""
+    provider = GeminiProvider(Settings(gemini_api_key="test-key"))
+    provider._client = AsyncMock()  # bypass _get_client()'s real client construction
+
+    validation_error = ValidationError.from_exception_data("Schema", [])
+    with patch(
+        "factory.llm.providers.gemini_provider.genai_types.GenerateContentConfig",
+        side_effect=validation_error,
+    ):
+        with pytest.raises(ProviderRequestRejected):
+            await provider.parse(
+                _Echo,
+                system="s",
+                prompt="p",
+                task_type=TaskType.ANALYSIS,
+                model="gemini-2.5-flash",
+            )

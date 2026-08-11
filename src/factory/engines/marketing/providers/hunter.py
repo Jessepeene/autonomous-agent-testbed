@@ -43,7 +43,11 @@ class HunterProvider:
 
     async def search(self, plan: LeadSearchPlan, *, limit: int = 25) -> list[LeadCandidate]:
         """Hunter searches by domain, so a plan with no domains yields nothing."""
-        if not self.available or not plan.company_domains:
+        if not self.available:
+            log.info("leads.hunter_skipped", reason="HUNTER_API_KEY is not configured")
+            return []
+        if not plan.company_domains:
+            log.info("leads.hunter_skipped", reason="plan carried no company_domains")
             return []
 
         key = self._settings.secret("HUNTER_API_KEY")
@@ -75,7 +79,13 @@ class HunterProvider:
                     log.warning("leads.hunter_rejected", status=response.status_code)
                     continue
 
-                payload = response.json().get("data", {})
+                try:
+                    payload = response.json().get("data", {})
+                except ValueError as exc:
+                    # A malformed body for one domain must not abort every domain
+                    # after it in this loop and discard whatever was already found.
+                    log.warning("leads.hunter_bad_json", domain=domain, detail=str(exc)[:200])
+                    continue
                 organisation = str(payload.get("organization") or domain)
                 for entry in payload.get("emails", []):
                     candidate = self._to_candidate(entry, organisation)

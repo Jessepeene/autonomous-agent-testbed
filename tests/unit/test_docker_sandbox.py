@@ -138,6 +138,48 @@ class TestArgvHardening:
         assert argv[-3:] == [settings.sandbox_image, "sh", "-c", "pytest -q"][-3:]
         assert argv[-1] == "pytest -q"
 
+    def test_container_is_given_an_explicit_name(self, sandbox: DockerSandbox) -> None:
+        """A `process.kill()` on timeout only kills the local CLI process, not the
+        daemon-side container -- a name is what makes `docker kill <name>` (and
+        finding an orphan later) possible at all."""
+        argv = sandbox._argv(
+            "echo hi", workspace_path="/tmp/ws", network=False, env=None, name="factory-abc123"
+        )
+        assert _flag_value(argv, "--name") == "factory-abc123"
+
+
+class _FakeStream:
+    """Stands in for `asyncio.StreamReader`: `.read(n)` returns queued chunks, then
+    empty bytes at EOF -- exactly the shape `_read_capped` drains. ``hang=True``
+    raises `TimeoutError` instead, standing in for what the real
+    `asyncio.wait_for` around the read would eventually do on a real hang --
+    without a test actually waiting out a real timeout."""
+
+    def __init__(self, data: bytes = b"", *, hang: bool = False) -> None:
+        self._data = data
+        self._sent = False
+        self._hang = hang
+
+    async def read(self, n: int = -1) -> bytes:
+        if self._hang:
+            raise TimeoutError
+        if self._sent:
+            return b""
+        self._sent = True
+        return self._data
+
+
+def _process(
+    *, stdout: bytes = b"", stderr: bytes = b"", returncode: int = 0, hang: bool = False
+) -> MagicMock:
+    process = MagicMock()
+    process.stdout = _FakeStream(stdout, hang=hang)
+    process.stderr = _FakeStream(stderr, hang=hang)
+    process.returncode = returncode
+    process.kill = MagicMock()
+    process.wait = AsyncMock(return_value=returncode)
+    return process
+
 
 class TestExecute:
     """`execute()` without a real daemon: the subprocess call is mocked."""
@@ -154,9 +196,7 @@ class TestExecute:
     async def test_successful_run_reports_stdout_and_exit_code(
         self, sandbox: DockerSandbox
     ) -> None:
-        process = AsyncMock()
-        process.communicate = AsyncMock(return_value=(b"hello\n", b""))
-        process.returncode = 0
+        process = _process(stdout=b"hello\n", returncode=0)
 
         with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=process)):
             result = await sandbox.execute("echo hello", workspace="product-1")
@@ -167,9 +207,7 @@ class TestExecute:
         assert result.timed_out is False
 
     async def test_nonzero_exit_is_reported_but_not_raised(self, sandbox: DockerSandbox) -> None:
-        process = AsyncMock()
-        process.communicate = AsyncMock(return_value=(b"", b"boom\n"))
-        process.returncode = 1
+        process = _process(stderr=b"boom\n", returncode=1)
 
         with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=process)):
             result = await sandbox.execute("false", workspace="product-1")
@@ -178,24 +216,38 @@ class TestExecute:
         assert result.exit_code == 1
         assert result.stderr == "boom\n"
 
+    async def test_output_beyond_the_cap_is_dropped_not_buffered_in_full(
+        self, sandbox: DockerSandbox
+    ) -> None:
+        """A pathologically chatty generated app must not be able to buffer
+        arbitrarily large output in the factory's own process memory."""
+        from factory.sandbox.docker_runner import _MAX_OUTPUT_BYTES
+
+        oversized = b"x" * (_MAX_OUTPUT_BYTES + 500)
+        process = _process(stdout=oversized, returncode=0)
+
+        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=process)):
+            result = await sandbox.execute("yes x", workspace="product-1")
+
+        assert len(result.stdout) == _MAX_OUTPUT_BYTES
+
     async def test_timeout_kills_the_process_and_reports_124(self, sandbox: DockerSandbox) -> None:
         """A runaway container must be killed, not left to burn its resource limits
         until something else notices. Exercises the real `asyncio.wait_for` — only
-        the process object and subprocess creation are mocked — so `communicate()`
-        raising TimeoutError when awaited is what actually trips the sandbox's
-        except clause, the same as a real hang would."""
-        process = MagicMock()
+        the process object and subprocess creation are mocked — so the stream read
+        itself raising TimeoutError is what actually trips the sandbox's except
+        clause, the same as a real hang would."""
+        process = _process(hang=True)
+        kill_process = AsyncMock()
+        kill_process.wait = AsyncMock(return_value=0)
 
-        async def hangs_forever(*args: Any, **kwargs: Any) -> tuple[bytes, bytes]:
-            raise TimeoutError
-
-        process.communicate = hangs_forever
-        # Process.kill() is synchronous in asyncio's API (it sends a signal and
-        # returns immediately); only wait() is a coroutine.
-        process.kill = MagicMock()
-        process.wait = AsyncMock(return_value=0)
-
-        with patch("asyncio.create_subprocess_exec", AsyncMock(return_value=process)):
+        # First create_subprocess_exec call launches the sandbox container itself;
+        # the second is _kill_container's own `docker kill <name>` cleanup call
+        # once the timeout branch fires.
+        with patch(
+            "asyncio.create_subprocess_exec",
+            AsyncMock(side_effect=[process, kill_process]),
+        ):
             result = await sandbox.execute("sleep 999", workspace="product-1")
 
         process.kill.assert_called_once()

@@ -213,6 +213,19 @@ class GeminiProvider:
                 contents=prompt,
                 config=genai_types.GenerateContentConfig(**config_kwargs),
             )
+        except ValidationError as exc:
+            # google-genai's own request-config models (e.g. `types.Schema`) are
+            # `extra="forbid"` and lack several JSON Schema keywords Claude's side
+            # accepts (exclusiveMinimum/exclusiveMaximum, multipleOf, uniqueItems,
+            # const, oneOf/allOf, discriminator) -- a contract using any of those
+            # (e.g. `Field(gt=0)`) raises the SDK's *own* internal pydantic
+            # ValidationError here, about google's schema model rather than ours,
+            # which none of the other except clauses below would catch. Permanent
+            # for this schema against this provider (retrying changes nothing),
+            # but a different provider's dialect may still accept it.
+            raise ProviderRequestRejected(
+                self.name, f"gemini rejected the request schema: {exc}"
+            ) from exc
         except genai_errors.APIError as exc:
             raise _classify_api_error(self.name, exc) from exc
         except (OSError, TimeoutError) as exc:
@@ -324,6 +337,14 @@ class GeminiProvider:
                 contents=[_to_gemini_content(turn) for turn in turns],
                 config=genai_types.GenerateContentConfig(**config_kwargs),
             )
+        except ValidationError as exc:
+            # See the identical handler in parse() -- here it would be a tool
+            # schema (from ToolDescriptor.input_schema) using a JSON Schema
+            # keyword google-genai's own request-config model doesn't support,
+            # rather than a response_schema.
+            raise ProviderRequestRejected(
+                self.name, f"gemini rejected the request schema: {exc}"
+            ) from exc
         except genai_errors.APIError as exc:
             raise _classify_api_error(self.name, exc) from exc
         except (OSError, TimeoutError) as exc:

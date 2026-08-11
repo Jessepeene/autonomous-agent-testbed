@@ -257,9 +257,23 @@ def clear_workspace(workspace: str, settings: Settings | None = None) -> None:
     complementary attempt to avoid needing it in the first place.
     """
     root = resolve_workspace(workspace, settings)
+
+    def _log_delete_failure(func: object, path: str, exc: BaseException) -> None:
+        # ignore_errors=True previously swallowed every deletion failure (a
+        # permission error, a file locked by another process, a symlink) with no
+        # trace at all -- exactly the "stale files silently persist" failure this
+        # function exists to prevent, just one layer deeper: the delete itself
+        # silently failing instead of the write silently not clearing first.
+        log.warning(
+            "scaffold.clear_workspace_failed",
+            workspace=workspace,
+            path=path,
+            detail=str(exc)[:200],
+        )
+
     for child in root.iterdir():
         if child.is_dir():
-            shutil.rmtree(child, ignore_errors=True)
+            shutil.rmtree(child, onexc=_log_delete_failure)
         else:
             child.unlink(missing_ok=True)
 

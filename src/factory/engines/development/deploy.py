@@ -98,6 +98,11 @@ def _runtime_env(product_id: str, settings: Settings) -> dict[str, str]:
     stripe_key = settings.secret("STRIPE_API_KEY")
     if stripe_key:
         env["STRIPE_API_KEY"] = stripe_key
+    else:
+        # Every generated product's Stripe Checkout wiring reads this key from its
+        # own environment (see the scaffold system prompt) -- omitting it silently
+        # ships a product that goes LIVE with checkout that can never work.
+        log.warning("deploy.stripe_key_missing", product_id=product_id)
     return env
 
 

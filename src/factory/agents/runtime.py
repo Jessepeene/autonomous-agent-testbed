@@ -162,10 +162,23 @@ class AgentRuntime:
 
             turns.append(Turn(role="assistant", text=turn.text, tool_calls=turn.tool_calls))
             tool_results = []
+            deadline_hit_mid_step = False
             for call in turn.tool_calls:
+                # Previously only checked once per step, before the LLM call above --
+                # a single turn can request several tool calls, each executed
+                # serially and each individually allowed up to _TOOL_TIMEOUT_SECONDS
+                # (120s). A turn with e.g. 5 slow calls could run ~600s past the
+                # point the deadline should have fired, undetected until the *next*
+                # step began.
+                if time.monotonic() - started > deadline_seconds:
+                    deadline_hit_mid_step = True
+                    break
                 invocation, tool_result = await self._execute(call, by_name)
                 result.invocations.append(invocation)
                 tool_results.append(tool_result)
+            if deadline_hit_mid_step:
+                result.stopped_because = "deadline"
+                break
             turns.append(Turn(role="user", tool_results=tool_results))
         else:
             result.stopped_because = "step_limit"

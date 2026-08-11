@@ -336,6 +336,56 @@ async def test_deadline_stops_an_agent_before_the_step_limit(
     assert result.steps == 0
 
 
+async def test_deadline_is_also_checked_between_tool_calls_within_one_step(
+    gemini_fake: FakeProvider, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test: the deadline used to be checked only once per step, before
+    the LLM call -- a single turn requesting several tool calls (each individually
+    allowed up to 120s) could run far past the deadline before the *next* step's
+    check ever fired. Registers one turn asking for 3 tool calls; the deadline
+    trips after the first one actually runs."""
+    calls = [
+        ToolCall(id="c1", name="echo", arguments={"text": "one"}),
+        ToolCall(id="c2", name="echo", arguments={"text": "two"}),
+        ToolCall(id="c3", name="echo", arguments={"text": "three"}),
+    ]
+    gemini_fake.register_turns(_turn(calls=calls))
+
+    original_monotonic = time.monotonic
+    check_count = {"n": 0}
+
+    def fake_monotonic() -> float:
+        check_count["n"] += 1
+        # 1st call: `started`. 2nd: the outer per-step check (must pass). 3rd: the
+        # first inner per-tool-call check (must pass, so call 1 actually runs).
+        # 4th onward: far future, so the check before call 2 trips.
+        return original_monotonic() + (0 if check_count["n"] <= 3 else 10_000)
+
+    monkeypatch.setattr("factory.agents.runtime.time.monotonic", fake_monotonic)
+    executed: list[dict[str, Any]] = []
+    runtime = AgentRuntime(
+        _client(settings, gemini=gemini_fake),
+        settings=settings,
+        tools=_registry_with(_echo_tool(executed)),
+    )
+
+    result = await runtime.run(
+        objective="Run three tools",
+        system="s",
+        tool_categories=["test"],
+        max_steps=5,
+        deadline_seconds=5,
+    )
+
+    assert result.stopped_because == "deadline"
+    # The step counter had already advanced (the outer check passed), but only the
+    # first of the three requested tool calls actually ran before the mid-step
+    # deadline check stopped the loop.
+    assert result.steps == 1
+    assert len(executed) == 1
+    assert executed[0]["text"] == "one"
+
+
 async def test_provider_refusal_propagates_rather_than_being_swallowed(
     gemini_fake: FakeProvider, settings: Settings
 ) -> None:

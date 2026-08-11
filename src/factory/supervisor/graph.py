@@ -242,7 +242,9 @@ async def _run_engine(
                     subject=f"{engine.value} task {task_id} exhausted its retries",
                     detail=(
                         f"Task {task_id} ({task_kind}) failed "
-                        f"{ctx.settings.max_task_attempts} times. Last error: {exc!r}"
+                        f"{ctx.settings.max_task_attempts} times. Last error: {exc!r}\n\n"
+                        "If the underlying cause has been fixed, reply retry to give "
+                        "this task one more attempt."
                     ),
                     task_id=task_id,
                 )

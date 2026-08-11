@@ -453,6 +453,15 @@ async def get_product(session: AsyncSession, product_id: str) -> Product | None:
     return await session.get(Product, product_id)
 
 
+async def get_product_by_workspace(session: AsyncSession, workspace: str) -> Product | None:
+    """The reverse lookup of `Product.workspace_path` -- workspace directory names
+    are a truncated, one-way derivation of the product id (`f"product-{id[:12]}"`),
+    so a caller holding only the workspace name (e.g. a sandbox tool invocation)
+    cannot recover the owning product any other way."""
+    stmt = select(Product).where(Product.workspace_path == workspace)
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
 async def record_heal_attempt(
     session: AsyncSession,
     *,

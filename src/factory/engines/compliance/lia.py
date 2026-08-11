@@ -44,14 +44,26 @@ class LeadDecision:
 
 
 async def _decision_for(
-    session: AsyncSession, lead: LeadRecord, assessment: ComplianceAssessment
+    session: AsyncSession,
+    lead: LeadRecord,
+    assessment: ComplianceAssessment,
+    *,
+    task_id: str | None = None,
+    product_id: str | None = None,
 ) -> LeadDecision:
     if assessment.status is ComplianceStatus.FLAG_FOR_REVIEW:
         # Uncertainty is one of the only two things a human may be asked about.
+        #
+        # open_interrupt() dedups on (reason, subject, status) -- a subject keyed
+        # only on email_domain means two different uncertain leads at the same
+        # company (different name/title, or even different products) collide, and
+        # the second escalation silently collapses into the first: it is never
+        # delivered, and that second uncertain case is never actually reviewed.
+        # work_email is unique per lead by construction, so it disambiguates.
         await interrupts.request(
             session,
             reason=InterruptReason.LEGAL_UNCERTAINTY,
-            subject=f"LIA uncertain for {lead.email_domain}",
+            subject=f"LIA uncertain for {lead.work_email}",
             detail=(
                 f"Role: {lead.job_title} at {lead.company}\n"
                 f"Source: {lead.source_url}\n"
@@ -59,6 +71,8 @@ async def _decision_for(
                 f"{assessment.justification}\n\n"
                 "Reply APPROVE to permit outreach to this segment, or REJECT to block it."
             ),
+            task_id=task_id,
+            product_id=product_id,
         )
         return LeadDecision(allowed=False, reason="flagged for human review", assessment=assessment)
 
@@ -75,6 +89,7 @@ async def evaluate_leads(
     *,
     product_summary: str,
     task_id: str | None = None,
+    product_id: str | None = None,
 ) -> list[LeadDecision]:
     """Evaluate every lead's lawful basis to contact, in input order.
 
@@ -127,7 +142,11 @@ async def evaluate_leads(
             )
             continue
         _, assessment = next(survivor_assessments)
-        decisions.append(await _decision_for(session, lead, assessment))
+        decisions.append(
+            await _decision_for(
+                session, lead, assessment, task_id=task_id, product_id=product_id
+            )
+        )
     return decisions
 
 
@@ -138,8 +157,14 @@ async def evaluate_lead(
     *,
     product_summary: str,
     task_id: str | None = None,
+    product_id: str | None = None,
 ) -> LeadDecision:
     decisions = await evaluate_leads(
-        ctx, session, [lead], product_summary=product_summary, task_id=task_id
+        ctx,
+        session,
+        [lead],
+        product_summary=product_summary,
+        task_id=task_id,
+        product_id=product_id,
     )
     return decisions[0]

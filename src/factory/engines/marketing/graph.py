@@ -106,7 +106,15 @@ async def _outreach(ctx: FactoryContext, session: AsyncSession, task: Task) -> s
             session, limit=ctx.settings.validation_outreach_batch_size, product_id=resolved_id
         )
     else:
-        candidates = await repository.leads_for_outreach(session, limit=_OUTREACH_BATCH)
+        # Also scoped to resolved_id, matching the validating branch: every
+        # SEND_OUTREACH task is enqueued by _harvest() for one specific product
+        # (`payload={"product_id": resolved_id}`), and `summary` above is that
+        # same product's pitch -- pulling from the unscoped global pool here
+        # would apply this product's outreach copy to leads actually sourced for
+        # a completely different one.
+        candidates = await repository.leads_for_outreach(
+            session, limit=_OUTREACH_BATCH, product_id=resolved_id
+        )
     if not candidates:
         return "marketing/outreach: no LIA-approved leads are waiting"
 

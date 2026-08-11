@@ -56,10 +56,12 @@ class SandboxResult:
 #: is at fault. Matched case-insensitively. Deliberately conservative: a false
 #: negative here just means a devops failure is treated as before (burns a heal
 #: cycle); a false positive would hide a real logic bug from the codegen model that
-#: could otherwise fix it, so nothing ambiguous is on this list.
+#: could otherwise fix it, so nothing ambiguous is on this list -- these specific
+#: phrases are the exception (see `_SHELL_DIAGNOSTIC_PHRASES` below), because they
+#: routinely appear in a generated test's *own* assertion text (e.g. a permissions
+#: feature under test literally asserting `== "Permission denied"`), not just in a
+#: real shell/OS diagnostic.
 _DEVOPS_ERROR_SIGNATURES: tuple[str, ...] = (
-    "permission denied",
-    "operation not permitted",
     ": not found",  # POSIX shell's own "sh: 1: foo: not found"
     "command not found",
     "cannot connect to the docker daemon",
@@ -73,10 +75,29 @@ _DEVOPS_ERROR_SIGNATURES: tuple[str, ...] = (
     "no space left on device",
 )
 
+#: "permission denied" / "operation not permitted" are only trustworthy as a devops
+#: signal when they follow a real shell/OS diagnostic prefix -- `<command>: ...:
+#: <message>`, e.g. `chmod: changing permissions of 'x': Operation not permitted` or
+#: `sh: 1: foo: Permission denied`. A bare substring match (the previous behaviour)
+#: also matches those same words appearing anywhere in a generated test's own
+#: assertion output (`assert detail == "Permission denied"`), misrouting a real
+#: application bug into the devops-escalation path instead of a heal cycle.
+_SHELL_DIAGNOSTIC_PATTERN = re.compile(
+    r"^\s*\S+(?::\s*\S+)?:\s.*\b(?:permission denied|operation not permitted)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 #: POSIX exit codes that are conventionally infra-level, never an application
-#: assertion failure: 126 (found but not executable), 127 (command not found), 137
-#: (SIGKILL — almost always the OOM killer, or our own timeout kill), 139 (SIGSEGV).
-_DEVOPS_EXIT_CODES: frozenset[int] = frozenset({126, 127, 137, 139})
+#: assertion failure: 126 (found but not executable), 127 (command not found), 139
+#: (SIGSEGV). 137 (SIGKILL) is deliberately *not* here: both call sites
+#: (`development/graph.py::_verify_and_ship`) already check `result.timed_out` and
+#: return via a dedicated heal category *before* `is_devops_error` is ever
+#: consulted, so a 137 that reaches this function was never our own timeout kill --
+#: it is almost always the sandbox's own `--memory` cgroup OOM-killing a process
+#: *inside* the container, i.e. the generated app's own unbounded memory growth.
+#: That is exactly the compute-burn defect the security reviewer hunts for, an
+#: application bug, not infrastructure.
+_DEVOPS_EXIT_CODES: frozenset[int] = frozenset({126, 127, 139})
 
 
 def is_devops_error(result: SandboxResult) -> bool:
@@ -84,8 +105,11 @@ def is_devops_error(result: SandboxResult) -> bool:
     a bug in the generated application code."""
     if result.exit_code in _DEVOPS_EXIT_CODES:
         return True
-    haystack = f"{result.stderr}\n{result.stdout}".lower()
-    return any(signature in haystack for signature in _DEVOPS_ERROR_SIGNATURES)
+    haystack = f"{result.stderr}\n{result.stdout}"
+    if _SHELL_DIAGNOSTIC_PATTERN.search(haystack):
+        return True
+    lowered = haystack.lower()
+    return any(signature in lowered for signature in _DEVOPS_ERROR_SIGNATURES)
 
 
 class SandboxRunner(Protocol):

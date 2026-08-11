@@ -69,10 +69,51 @@ async def http_get(url: str) -> dict[str, Any]:
 )
 async def run_in_sandbox(command: str, workspace: str) -> dict[str, Any]:
     from factory.sandbox.runner import get_sandbox
+    from factory.settings import EngineName
+    from factory.state import repository
+    from factory.state.db import session_scope
+    from factory.supervisor.concurrency import LockUnavailable, product_lock
 
     settings = get_settings()
     sandbox = get_sandbox(settings)
-    result = await sandbox.execute(command, workspace=workspace)
+
+    # This tool handler receives only the arguments the model supplied (matching
+    # its input_schema) -- no session/ctx is threaded through the agent runtime's
+    # tool-calling convention, so unlike development/graph.py's own writers
+    # (_build/_patch, which hold product_lock for their whole clear+write+verify
+    # cycle), an ephemeral agent given sandbox access (only RoleName.REPAIR_ENGINEER,
+    # spawned e.g. by the "improve-test-coverage" maintenance item) had no
+    # contention protection at all: it could run shell commands against a
+    # product's workspace at the exact moment Development was mid-clear_workspace/
+    # write_plan for that same product. Opens its own short-lived session (the
+    # same process-wide cached engine every other session-less call site uses)
+    # purely to resolve and hold the lock for the duration of this one command.
+    async with session_scope(settings) as session:
+        product = await repository.get_product_by_workspace(session, workspace)
+        if product is None:
+            # Not every workspace belongs to a tracked product (ad hoc/test
+            # workspaces) -- nothing to protect against contention over.
+            result = await sandbox.execute(command, workspace=workspace)
+        else:
+            try:
+                async with product_lock(
+                    session,
+                    product_id=product.id,
+                    holder=EngineName.SUPERVISOR,
+                    reason="ephemeral agent running a sandbox command",
+                ):
+                    result = await sandbox.execute(command, workspace=workspace)
+            except LockUnavailable:
+                return {
+                    "exit_code": -1,
+                    "stdout": "",
+                    "stderr": (
+                        f"workspace {workspace!r} is currently locked by another "
+                        "in-progress build/patch -- try again once it finishes."
+                    ),
+                    "timed_out": False,
+                }
+
     return {
         "exit_code": result.exit_code,
         "stdout": result.stdout[:20_000],

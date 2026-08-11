@@ -94,12 +94,26 @@ class ApolloProvider:
             log.warning("leads.apollo_rejected", status=response.status_code)
             return []
 
-        people = response.json().get("people", [])
+        body_json = response.json()
+        people = body_json.get("people", [])
         candidates: list[LeadCandidate] = []
         for person in people:
             candidate = self._to_candidate(person)
             if candidate is not None:
                 candidates.append(candidate)
+
+        # Only ever requests page 1 -- there is no pagination loop, so a search
+        # matching more people than fit in one _PAGE_SIZE/limit-capped page
+        # silently leaves the rest unfetched. Not fixed here (a real pagination
+        # loop is a larger change), but no longer silent: logged whenever Apollo
+        # itself reports more results existed than this call actually retrieved.
+        total_entries = (body_json.get("pagination") or {}).get("total_entries")
+        if isinstance(total_entries, int) and total_entries > len(people):
+            log.info(
+                "leads.apollo_truncated",
+                total_entries=total_entries,
+                fetched=len(people),
+            )
 
         log.info("leads.apollo_results", returned=len(people), usable=len(candidates))
         return candidates[:limit]

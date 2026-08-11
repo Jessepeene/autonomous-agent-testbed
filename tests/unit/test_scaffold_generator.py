@@ -13,6 +13,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from factory.engines.development.scaffold.generator import (
     clear_workspace,
     generate_scaffold,
@@ -104,6 +106,41 @@ def test_clear_workspace_on_an_already_empty_workspace_does_not_crash(tmp_path: 
     clear_workspace("product-1", settings)
 
     assert (tmp_path / "product-1").exists()
+
+
+def test_clear_workspace_logs_a_deletion_failure_instead_of_swallowing_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test: `ignore_errors=True` previously swallowed every deletion
+    failure (a permission error, a locked file, a symlink edge case) with no trace
+    at all -- exactly the "stale files silently persist" failure this function
+    exists to prevent, one layer deeper. Must not crash the caller either way."""
+    import os
+
+    from factory.engines.development.scaffold import generator as generator_module
+
+    settings = Settings(gemini_api_key="test-key", workspace_root=tmp_path)
+    write_plan(_PLAN, "product-1", settings)
+
+    logged: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        generator_module.log,
+        "warning",
+        lambda event, **kwargs: logged.append({"event": event, **kwargs}),
+    )
+
+    real_unlink = os.unlink
+
+    def failing_unlink(path: object, *args: object, **kwargs: object) -> None:
+        if "main.py" in str(path):
+            raise PermissionError("simulated: file is locked")
+        real_unlink(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "unlink", failing_unlink)
+
+    clear_workspace("product-1", settings)  # must not raise
+
+    assert any(entry["event"] == "scaffold.clear_workspace_failed" for entry in logged)
 
 
 def test_a_second_write_plan_after_clear_leaves_no_trace_of_the_old_layout(

@@ -337,6 +337,7 @@ async def ingest(
         [record for _, record in verified],
         product_summary=product_summary,
         task_id=task_id,
+        product_id=product_id,
     )
 
     for (candidate, record), decision in zip(verified, decisions, strict=True):

@@ -45,10 +45,22 @@ def test_known_infra_stderr_signatures_are_classified_as_devops(stderr: str) -> 
     assert is_devops_error(result) is True
 
 
-@pytest.mark.parametrize("exit_code", [126, 127, 137, 139])
+@pytest.mark.parametrize("exit_code", [126, 127, 139])
 def test_conventional_infra_exit_codes_are_classified_as_devops(exit_code: int) -> None:
     result = SandboxResult(exit_code=exit_code, stdout="", stderr="")
     assert is_devops_error(result) is True
+
+
+def test_exit_137_alone_is_not_classified_as_devops() -> None:
+    """Regression test: both call sites check `result.timed_out` and return via a
+    dedicated heal category *before* is_devops_error is ever consulted, so a 137
+    that reaches this function was never our own timeout kill -- it is almost
+    always the sandbox's own --memory cgroup OOM-killing a process inside the
+    container, i.e. the generated app's own unbounded memory growth. That is an
+    application bug (exactly what the security reviewer's compute-burn mandate
+    hunts for), not infrastructure, and must be allowed to heal."""
+    result = SandboxResult(exit_code=137, stdout="", stderr="")
+    assert is_devops_error(result) is False
 
 
 def test_a_normal_assertion_failure_is_not_classified_as_devops() -> None:
@@ -58,6 +70,31 @@ def test_a_normal_assertion_failure_is_not_classified_as_devops() -> None:
         stderr="",
     )
     assert is_devops_error(result) is False
+
+
+def test_an_assertion_about_permission_denied_text_is_not_classified_as_devops() -> None:
+    """Regression test: a bare substring match on "permission denied" previously
+    misrouted a real application bug -- a generated test's own assertion output
+    quoting that exact phrase -- into the devops-escalation path instead of a
+    heal cycle."""
+    result = SandboxResult(
+        exit_code=1,
+        stdout=(
+            "FAILED tests/test_auth.py::test_admin_only - AssertionError: "
+            "assert detail == 'Permission denied'"
+        ),
+        stderr="",
+    )
+    assert is_devops_error(result) is False
+
+
+def test_a_real_shell_permission_error_is_still_classified_as_devops() -> None:
+    result = SandboxResult(
+        exit_code=1,
+        stdout="",
+        stderr="mkdir: cannot create directory '/workspace/out': Permission denied",
+    )
+    assert is_devops_error(result) is True
 
 
 def test_a_successful_result_is_never_classified_as_devops() -> None:
