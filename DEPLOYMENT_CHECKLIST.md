@@ -965,8 +965,127 @@ migration needed for this batch).
 `git archive HEAD`, image rebuilt, service restarted. `/health` reports `ok`,
 all six engines enabled, boot log clean. No schema migration in this batch.
 
-**Not yet started**: the MEDIUM/LOW findings below this line remain unfixed as of
-this checkpoint.
+## Fix pass, MEDIUM/LOW tier — 2026-08-11
+
+Continuation of the same directive. **15 of the MEDIUM/LOW findings fixed and
+deployed live** (548 unit tests + 122 integration tests, 0 regressions, no schema
+migration). The remaining 4-5 are deliberately deferred — see the end of this
+section for exactly which and why.
+
+1. **LIA escalation subject collision** — keyed only on `lead.email_domain`;
+   `open_interrupt`'s dedup is on `(reason, subject, status)`, so two different
+   uncertain leads at the same company silently collapsed into one escalation,
+   and the second was never actually delivered for review. Keyed on the lead's
+   own (unique) `work_email` instead.
+2. **Generic task-exhaustion escalation's own comment claimed it said "retry"** —
+   it didn't (unlike the DevOpsError escalation right next to it, which does).
+   Added the missing "reply retry" instruction to the detail text.
+3. **LIA uncertain-lead escalation carried no `task_id`/`product_id`** — made it
+   impossible to correlate the interrupt row back to a specific task or product.
+   Threaded through `_decision_for`/`evaluate_leads`/`evaluate_lead` from
+   `leads.py::ingest()`'s already-available `task_id`/`product_id`.
+4. **Outreach copy could reference the wrong product** — the non-validating branch
+   of `_outreach()` pulled candidates from the *global* lead pool
+   (`leads_for_outreach` with no `product_id` filter) while composing copy for one
+   specific product (`summary`/`resolved_id`, resolved from the task). A lead
+   actually sourced for a different product could receive a mismatched pitch.
+   Scoped to `resolved_id`, matching the validating branch (falls back to the
+   unscoped pool when there's genuinely no product to scope to).
+5. **Hunter/Apollo silent gaps** — Hunter's "no domains"/"key not configured"
+   early return, and a malformed-JSON response for one domain mid-loop (which
+   previously aborted the whole search and discarded every candidate already
+   found for prior domains), both had zero log trace. Apollo only ever fetches
+   page 1 with no indication more results existed beyond it. All three now
+   logged (`leads.hunter_skipped`, `leads.hunter_bad_json`, `leads.apollo_truncated`).
+6. **Missing `STRIPE_API_KEY` silently omitted from a deployed product's
+   environment** — ships LIVE with checkout that can never work, with no log
+   saying why. Now logs `deploy.stripe_key_missing`.
+7. **`is_devops_error`'s keyword list misrouted real application bugs** — a bare
+   substring match on "permission denied"/"operation not permitted" also matches
+   a generated test's own assertion text quoting that exact phrase; exit 137 was
+   treated as automatically infra, but both call sites already check
+   `result.timed_out` and return via a dedicated heal category *before*
+   `is_devops_error` is ever consulted — so a 137 reaching this function was
+   never our own timeout kill, it is almost always the sandbox's own `--memory`
+   cgroup OOM-killing a process *inside* the container, i.e. the generated app's
+   own unbounded memory growth (exactly the compute-burn defect the security
+   reviewer hunts for). The two ambiguous phrases now require an actual
+   shell-diagnostic prefix (`<command>: ...: <message>`); 137 removed from the
+   automatic exit-code set.
+8. **A sandbox timeout only killed the local `docker run` CLI process** — the
+   daemon-side container it started kept running indefinitely (`--rm` only fires
+   on exit, which a runaway loop never reaches), still consuming its
+   `--memory`/`--cpus` slice, with no `--name`/`--label` to find the orphan by
+   afterward. Every container now gets a unique `factory-<uuid>` name; the
+   timeout path explicitly runs `docker kill <name>` in addition to killing the
+   CLI process.
+9. **Unbounded stdout/stderr buffering** — a single `communicate()` call read the
+   entire output into the factory's own process memory with no cap. Replaced
+   with a capped reader (`_read_capped`, 1MB) that keeps draining the pipe past
+   the cap (so the child process never blocks on a full pipe buffer) but stops
+   retaining bytes past it.
+10. **`clear_workspace()`'s `ignore_errors=True` swallowed every deletion failure
+    with no trace** — exactly the "stale files silently persist" bug this
+    function exists to prevent, one layer deeper (the delete itself silently
+    failing instead of the write silently not clearing first). Now logs
+    `scaffold.clear_workspace_failed` per failure via `shutil.rmtree`'s `onexc`,
+    with the same non-crashing resilience as before.
+11. **`run_in_sandbox` (the tool an ephemeral agent uses to run shell commands)
+    never acquired `product_lock`** — unlike Development's own writers
+    (`_build`/`_patch`, which hold the lock for their whole clear+write+verify
+    cycle), the only role with sandbox access (`REPAIR_ENGINEER`, spawned e.g. by
+    the "improve-test-coverage" maintenance item) could run commands against a
+    product's workspace at the exact moment Development was mid
+    `clear_workspace()`/`write_plan()` for that same product. New
+    `repository.get_product_by_workspace` resolves the owning product; the tool
+    now holds `product_lock` for the command's duration and returns a clean
+    "workspace is locked, try again" result (not a crash) if another engine
+    already holds it. Workspaces with no tracked product (ad hoc/test) still run
+    unguarded — nothing to protect against contention over.
+12. **Agent-loop deadline only checked once per step, before the model call** — a
+    single turn requesting several slow tool calls (each individually allowed up
+    to 120s) could run minutes past the deadline before the *next* step's check
+    ever fired. Now also checked before each individual tool call within a step.
+13. **Latent crash, no current trigger** — google-genai's own request-config
+    schema model (`types.Schema`) is `extra="forbid"` and lacks several JSON
+    Schema keywords Claude's side accepts (`exclusiveMinimum`, `multipleOf`,
+    `uniqueItems`, `const`, `oneOf`/`allOf`, `discriminator`). A future contract
+    using one of those (e.g. `Field(gt=0)`) would have hit the SDK's own internal
+    `pydantic.ValidationError`, uncaught by any existing except clause, surfacing
+    a confusing error about google's schema model instead of ours. Now caught and
+    converted to `ProviderRequestRejected` (permanent for this schema against
+    this provider, but still failover-eligible to Anthropic) in both `parse()`
+    and `converse()`.
+
+**Deliberately deferred, not silently dropped:**
+
+- **Lead-provider quota tracked by rows stored, not API calls consumed** —
+  `leads_created_this_month()` counts rows that survived provenance/entity/LIA
+  filtering, which undercounts real provider-side usage (many API results never
+  reach storage). Safe-direction (risks an eventual provider 429, not overspend),
+  but a correct fix needs a new persistent usage counter incremented at each
+  provider `.search()` call, not a quick patch — a real design decision on what
+  "quota" should mean, deferred rather than rushed.
+- **Stripe-event reconciliation buckets on a ~100s window** — occasionally delays
+  a card-limit sync by up to that long; already bounded by an existing hourly
+  sweep, so left as documented, low-priority behavior rather than churned.
+- **PII persists indefinitely in `interrupts.detail`/`campaign_approvals.brief`**
+  — a real data-minimization gap, but fixing it means designing a retention
+  policy (how long is defensible?) and a new purge maintenance task — a feature
+  decision for the user, not a bug fix.
+- **Idea-level confidence-threshold asymmetry** (uncertain-but-possibly-unlawful
+  ideas stay live longer than confidently-rejected ones) — a policy judgment
+  call about acceptable risk, not a code defect; needs the user's direction on
+  the intended behavior before touching it.
+- **Maintenance cadence buckets have no catch-up** after a sustained
+  capacity-starved period (pending work can burst all at once later) — real, but
+  bounded in practice (the backlog only ever holds the fixed 11-item catalogue)
+  and a correct fix is a meaningfully larger scheduling change relative to its
+  impact.
+
+**Deployed live** (2026-08-11): committed (`fef1f9c`), transferred via
+`git archive HEAD`, image rebuilt, service restarted. `/health` reports `ok`, all
+six engines enabled, boot log clean.
 
 ## Comprehensive codebase audit — 2026-08-10 (research only, NOTHING below is fixed yet)
 
