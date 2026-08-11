@@ -1672,3 +1672,71 @@ Postgres). No schema change this phase.
 **Deployed live** (2026-08-11): committed (`d7d6e63`), transferred via
 `git archive HEAD`, image rebuilt, service restarted. `/health` reports `ok`,
 all six engines enabled, boot log clean.
+
+## Pre-launch validation plan, Phase 4 — live AB testing for landing pages — 2026-08-11
+
+Fourth phase of the 7-phase pre-launch plan. Before this, the only version
+comparison mechanism was the Learning Loop's sequential prompt trials
+(`learning/trials.py`) — one landing-page copy fully live for up to 30 days,
+then compared to *historical* episodes. That answers "did this get better over
+time," not "which of these two pitches converts better right now" — a
+genuinely different, concurrent-arm question your direction asked for
+explicitly, real and not just a verification of the existing loop.
+
+**A running `ab_tests` row (migration `0013`) switches `generate_landing_page`
+into a dual-variant prompt.** Both variant briefs render into the same static
+page as two content blocks (`id="variant-a"`/`id="variant-b"`), split by a
+small inline script that assigns and persists the arm via `localStorage` (a
+returning visitor always sees the same one) and tags both the interest-form
+POST and the Phase 2 analytics beacon with the assigned `variant`. Deliberately
+client-side, not a second deployment behind an edge router — fits the existing
+"single static deploy, no build step" constraint exactly, and reuses the
+interest/analytics endpoints as-is (`variant` is the only new field on either).
+`_build_landing_page` checks `get_running_ab_test` fresh on every
+(re)generation rather than threading an `ab_test_id` through the task payload,
+so a repair pass mid-test still regenerates both variants correctly with no
+prior knowledge a test was running.
+
+**The decision reuses `learning/stats.py::fisher_exact_less`** — the same
+hypergeometric test the sequential Learning Loop already uses, applied
+bidirectionally to two live arms instead of trial-vs-history: the underlying
+statistic doesn't care whether its two groups are temporally sequential or
+concurrent, only about their (successes, failures) counts. New
+`development/ab_testing.py::evaluate_ab_test()` wraps it with the actual
+decision logic (minimum sample per arm, which direction is significant). A new
+`EVALUATE_AB_TEST` task, swept hourly by the scheduler for every row from
+`running_ab_tests()`, tallies `page_views`/`validation_signals` since the test
+started, concludes on significance or once `ab_test_max_days` elapses
+(inconclusive either way past the deadline), and writes the outcome to memory
+as a `LESSON` so a future growth decision can recall it.
+
+**`start_ab_test()` in `graph.py` is the one mutation entry point** — creates
+the `ABTest` row and enqueues the regeneration that renders it. Deliberately
+built as the public seam Phase 5's `GROWTH_ANALYST` role will call on its own
+judgment (a product needs a real reason — underperforming interest rate — to
+justify a test), not something this phase wires up a trigger for itself.
+
+**A real bug, caught by this phase's own integration tests and fixed, not
+shipped**: `create_ab_test`'s `ON CONFLICT ... WHERE status = 'running' DO
+NOTHING` raised `InvalidColumnReferenceError` on every call, conflict or not.
+Two independent causes, both fixed: (1) `ABTest`'s partial unique index was
+declared only in migration `0013`'s raw SQL, never in the ORM
+`__table_args__` — `Base.metadata.create_all()` (what every test's `session`
+fixture actually builds its schema from, not Alembic) silently never created
+it at all; (2) `index_where` was passed as an ORM comparison
+(`ABTest.status == "running"`), which compiles to a bound parameter that
+Postgres's `ON CONFLICT` inference can never structurally match against the
+index's own literal predicate. The identical pattern already existed in
+`create_marketing_freeze` (the deliverability circuit breaker's "at most one
+active freeze" guarantee) with the same parameter-vs-literal bug — unexercised
+by any test until a regression test was added here alongside the fix. Its ORM
+index declaration was already correct, so only the `index_where` half applied
+there.
+
+**Verified**: 638 unit + 161 integration tests green on Linux (scratch
+Postgres), migration `0013` applies cleanly.
+
+**Deployed live** (2026-08-11): committed (`ef695a6`), transferred via
+`git archive HEAD`, migration `0013` applied to the live database *before* the
+restart, image rebuilt, service restarted. `/health` reports `ok`, all six
+engines enabled, `alembic current` is `0013_ab_tests (head)`, boot log clean.
