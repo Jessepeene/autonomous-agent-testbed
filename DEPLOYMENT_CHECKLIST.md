@@ -1590,3 +1590,45 @@ No schema change this phase. `ruff check`, `ruff format --check`, `mypy src/` cl
 `git archive HEAD`, image rebuilt, service restarted. `/health` reports `ok`, all
 six engines enabled, boot log clean. The flag defaults off, so this deploy changes
 no live behavior until a staging run explicitly sets it.
+
+## Pre-launch validation plan, Phase 2 — self-hosted analytics beacon — 2026-08-11
+
+Second phase of the 7-phase pre-launch plan. Nothing collected traffic data for a
+live or validating product before this — `ValidationSignal` records interest (an
+email), not visits — and a growth decision (is this landing page converting, does
+this product's traffic justify an SEO or AB-testing pass) needs a volume
+denominator that didn't exist.
+
+**Reused the existing `/interest/{product_id}` pattern rather than a third-party
+analytics API.** A third-party provider's current query-API contract can't be
+verified from inside this codebase and is an unknown integration risk; a new
+unauthenticated `POST /analytics/{product_id}` endpoint, mirroring `/interest`
+exactly, lands in a new `page_views` table (migration `0012`) this factory fully
+controls the schema and the read side for. Anonymous by design, unlike
+`/interest` — no email, no dedup, no identity; every real visit is a real signal.
+`variant` is nullable and unused until Phase 4 (live AB testing), added now so
+that phase needs no second migration on this table.
+
+**Both codegen prompts (`SYSTEM_PROMPT`, `LANDING_PAGE_SYSTEM`) now require a
+fire-and-forget beacon script on page load.** `generate_scaffold` gained a
+required `product_id` parameter to compose the exact per-product analytics URL
+into its prompt — the same reason `generate_landing_page` already does this for
+its interest-capture URL: a static frontend has no server-side env var to read
+`PRODUCT_ID` from the way a real backend does. Both real call sites in
+`graph.py` already had `product_id` in scope.
+
+**The Phase 1 staging fixtures were updated to match** — both now embed a real,
+working beacon, extracting the per-run analytics URL from the prompt the same
+deterministic way they already extract the interest URL. Caught and fixed a real
+bug in that extraction while doing it: the original regex anchored on the first
+`:` after a label, which broke the moment a prompt could contain *two* labels
+each with their own worked JSON example (each with colons of its own) — a
+non-greedy match up to the literal `"verbatim):"` marker fixes it for both.
+
+**Verified**: 610 unit + 148 integration tests green on Linux (scratch
+Postgres), migration `0012` applies cleanly.
+
+**Deployed live** (2026-08-11): committed (`ae39f57`), transferred via
+`git archive HEAD`, migration `0012` applied to the live database *before* the
+restart, image rebuilt, service restarted. `/health` reports `ok`, all six
+engines enabled, `alembic current` is `0012_page_views (head)`, boot log clean.
