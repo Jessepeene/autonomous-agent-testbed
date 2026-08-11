@@ -36,7 +36,7 @@ from factory.memory.store import scopes_for
 from factory.sandbox.disabled import DisabledSandbox
 from factory.settings import EngineName, Settings
 from factory.state import repository
-from factory.state.orm import Base, Memory, Product
+from factory.state.orm import Base, Memory, Product, Task
 from factory.state.schemas import ScoredIdea
 from factory.supervisor.context import FactoryContext
 
@@ -155,13 +155,18 @@ async def test_recurring_same_category_reinforces_rather_than_piling_up(
         category="dependency_timeout",
     )
 
+    # expire_all: remember()'s reinforcement path updates the row via a raw UPDATE,
+    # which does not refresh this session's identity map on its own (the fixture
+    # sets expire_on_commit=False) -- without this the re-SELECT below would just
+    # hand back the first, now-stale in-memory copy instead of the reinforced row.
+    session.expire_all()
     rows = (
         (await session.execute(select(Memory).where(Memory.scope == f"product:{product_id}")))
         .scalars()
         .all()
     )
     assert len(rows) == 1
-    assert rows[0].hits == 2
+    assert rows[0].hits == 1  # default 0 at creation, +1 for the one reinforcement
 
 
 async def test_exhausting_the_heal_budget_also_writes_an_engine_scoped_memory(
@@ -229,9 +234,10 @@ async def test_patch_recalls_the_products_own_heal_history_into_its_prompt(
         product_id=product_id,
     )
     assert task_id is not None
-    task = await repository.claim_next_task(
-        session, worker_id="test", engines=[EngineName.DEVELOPMENT]
-    )
+    # Fetched by id, not claim_next_task: _heal()'s own priority-40 patch task
+    # (auto-enqueued above) would otherwise outrank this priority-100 one and get
+    # claimed instead.
+    task = await session.get(Task, task_id)
     assert task is not None
 
     seen_problem_statement: dict[str, str] = {}
@@ -275,9 +281,12 @@ async def test_a_different_products_heal_history_is_never_recalled(
         product_id=product_b,
     )
     assert task_id is not None
-    task = await repository.claim_next_task(
-        session, worker_id="test", engines=[EngineName.DEVELOPMENT]
-    )
+    # Fetched by id, not claim_next_task: product A's own priority-40 patch task
+    # (auto-enqueued by _heal() above) would otherwise outrank this priority-100
+    # one and get claimed instead -- which would make this test pass for the wrong
+    # reason (recalling product A's memory while "patching" product A, not because
+    # of any real cross-product leak).
+    task = await session.get(Task, task_id)
     assert task is not None
 
     seen: dict[str, str] = {}
