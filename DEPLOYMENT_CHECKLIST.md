@@ -847,8 +847,126 @@ blacklist volume confirmed seeded, `factory` service restarted. `/health` report
 errors. Spend cap still correctly paused (trailing 24h spend from before this pass
 hasn't aged out yet) — this pass made no new LLM calls against the live service.
 
-**Not yet started**: the HIGH and MEDIUM/LOW findings below this line remain
-unfixed as of this checkpoint.
+**Not yet started** (superseded below): the HIGH and MEDIUM/LOW findings below
+this line remain unfixed as of this checkpoint.
+
+## Fix pass, HIGH-severity tier — 2026-08-11
+
+Continuation of the same directive. **All 12 HIGH findings fixed, tested, and
+deployed live** (541 unit tests + 119 integration tests, 0 regressions, no schema
+migration needed for this batch).
+
+1. **Deploy reported success before Vercel finished building** — `deploy()` never
+   checked `readyState` on the create-deployment response, so a product could go
+   LIVE (and marketing start harvesting leads) before its build had even started,
+   let alone succeeded. Now polls `GET /v13/deployments/{id}` (bounded: 6 attempts,
+   10s apart) until a terminal `readyState`; `DeployResult` gained `is_infra: bool`.
+2. **Infra failures routed into the code-repair loop** — a Vercel 5xx/429/401/403,
+   a missing `VERCEL_TOKEN`, or a Bug Council reviewer that could not complete
+   (provider outage) all used to spend a heal cycle regenerating code that was
+   never the problem. Both now raise `DevOpsError` (`bug_council.CouncilUnavailable`
+   for the review case), matching the sandbox's own existing devops-error pattern —
+   confirmed via `supervisor/graph.py::_run_engine`'s existing handler, unchanged.
+   Fixed the underlying `asyncio.gather` orphan-task risk in the same pass:
+   `_model_review` no longer swallows a reviewer's exception into a synthetic
+   rejection verdict; `return_exceptions=True` ensures every sibling reviewer is
+   awaited to completion instead of left running unretrieved.
+3. **Bug Council silently truncated its review corpus at 60,000 characters** (~15-
+   20K tokens — the model's real context window is 1M) **with no marker**, while
+   `review_corpus` told the reviewer "the complete codebase under review follows"
+   regardless. Limit raised 5x to 300,000 chars; when still truncated, an explicit
+   marker names every cut-off/omitted file and the framing text is honest about it.
+   `dist`/`build`/`.pytest_cache` output shipped via deploy but was excluded from
+   review — `deploy._collect_files` and `generator.read_workspace` now share one
+   `WORKSPACE_SKIP_DIRS` constant so nothing can ship unreviewed by drifting apart.
+4. **The validation-gate trial metric could never resolve on real evidence** —
+   `landing_page_interest_rate`'s `MIN_TRIAL_N=20` was structurally unreachable
+   within the realistic per-product episode volume; lowered to 10. Separately,
+   ANY trial with near-zero episodes auto-*confirmed* once `MAX_TRIAL_DAYS` elapsed
+   (`fisher_exact_less(0, 0, ...)` returns 1.0 for every baseline) — added an
+   absolute floor (`_MIN_ABSOLUTE_N=5`, both sides of the comparison) below which a
+   timed-out trial rolls back as "insufficient data" instead. Also retired the
+   dead `TRIAL_DAYS=14` constant (written to `trial_until`, never read; the real
+   cutoff was always the unrelated `MAX_TRIAL_DAYS=30`) — `trial_until` is now the
+   actual single source of truth.
+5. **`EngineName.SUPERVISOR` was missing from the deterministic routing priority
+   table** — maintenance-only pending work (a common steady state) returned
+   "ambiguous," forcing a real orchestration LLM call every 15s tick until the
+   model happened to route there — the exact cost regression `routing.py`'s own
+   docstring claims doesn't happen. Added last (lowest priority, matching
+   maintenance's own `priority=500`). **Build-capacity deadlock, generalized**: the
+   at-capacity gate only ever recognized a pending `PATCH_PRODUCT` as a safe
+   retry for a product already counted; a `BUILD_MVP` that threw partway through
+   (status set to `BUILDING` before the attempt, never reset on failure) left its
+   retry just as invisible — two such products could permanently fill both
+   `max_concurrent_builds` slots. New `count_pending_dev_retries` covers both task
+   kinds by joining on the product's own status, not the task kind.
+6. **The agent loop never checked `stop_reason`** — any turn with no tool calls was
+   `"completed"`, including an empty answer (adaptive thinking consuming the whole
+   output budget — the identical failure mode already fixed for `parse()`'s
+   `SchemaViolation`) or text truncated by hitting the token budget mid-thought. A
+   maintenance cycle that produced nothing logged "done"; a truncated half-sentence
+   got written into permanent memory as a "lesson" (`spawner.py` already correctly
+   gates that write on `result.succeeded`, so fixing the signal here was sufficient
+   — no change needed there). New `AgentResult.stopped_because` values
+   `"empty_response"`/`"truncated"`, neither counted as success.
+7. **Memory dedup's tokenizer never produced a purely-numeric token** — two facts
+   differing only in a number ("cap raised to 40 percent" vs "60 percent") hashed
+   to identical token sets and were merged as near-duplicates, with the stale
+   number sometimes ending up at *higher* confidence than a real correction would
+   have. `discovery/cluster.tokenize()` gained an `include_numeric` parameter
+   (discovery clustering itself deliberately keeps the letter-only default — a
+   bare number in an unrelated public complaint is usually noise, and that
+   tokenizer has never been re-tuned against including one); `memory/store.py`'s
+   dedup now uses it.
+8. **Memory pruning's value score was dominated by content length** — dividing by
+   raw character count (20-2000 chars, an 80x spread) against a value term that
+   only spans ~0.0-1.0 (a 4x spread) meant the single most valuable memory in a
+   scope was frequently the first one evicted. Now divides by `log2(length)`
+   (~2.5x spread), preserving the original "prefer concise" intent as a tie-
+   breaker without letting it swamp confidence/hits/recency. Separately: `overflow`
+   was computed against every row including exempt `PREFERENCE` ones, so a scope
+   dominated by preferences (e.g. 205 preferences + 30 lessons, budget 200) evicted
+   every learned memory trying to reach a budget only the preferences were pushing
+   it past, and was left permanently over budget with nothing left to prune.
+   `overflow` now excludes `PREFERENCE` rows from both sides of the comparison.
+9. **Marketing's per-domain contact cap was only enforced at LIA (lead-ingestion)
+   time** — several leads at the same company could all clear the cap check before
+   any of them were actually sent to, then all get contacted in one batch, blowing
+   through `MAX_CONTACTS_PER_DOMAIN_PER_MONTH` by however many shared a domain.
+   Re-checked live immediately before each send in `_outreach`'s loop (the DB
+   session already sees earlier sends in the same batch via `record_outreach`'s
+   flush, no extra bookkeeping needed).
+10. **`SEND_OUTREACH`'s idempotency key could collide on a coincidental lead
+    count** — keyed on `report.stored` (how many new leads a harvest stored), so
+    two different harvest runs storing the same count produced identical keys and
+    the second run's send task silently no-op'd via `ON CONFLICT DO NOTHING`,
+    permanently dropping that batch. Now suffixed with the harvest task's own id
+    instead (unique per attempt, stable across retries of the same task).
+11. **The campaign-approval interrupt subject could collide** — `Interrupt.subject`
+    is a bounded `String(200)`, and the disambiguating `"(N leads)"` suffix was
+    appended *after* a potentially-long, multi-line product summary; if the
+    summary alone consumed the column budget, two different cohorts for the same
+    product (different task, different lead count) could truncate to an identical
+    subject, and `open_interrupt`'s subject-based dedup would silently collapse
+    the second approval request into the first — whose own `interrupt_id` then
+    never gets set, so `sync_decisions()` can never resolve it.
+    `task_id[:8]` (unique per task, same convention as `interrupts.tag_for`) now
+    goes first, before any truncation risk, with the summary explicitly bounded.
+12. **`bounced_at` was recorded on every bounce webhook but never read anywhere**
+    — no circuit breaker existed for a sustained high bounce rate, unlike the
+    complaint-rate one right next to it in the same module. New
+    `bounce_rate_threshold` setting (5%, the industry-standard hard-bounce bar);
+    `_check_and_trip` now evaluates both rates independently on every bounce *or*
+    complaint event and trips the same freeze/interrupt mechanism either one
+    crosses its threshold.
+
+**Deployed live** (2026-08-11): committed (`6a7a33e`), transferred via
+`git archive HEAD`, image rebuilt, service restarted. `/health` reports `ok`,
+all six engines enabled, boot log clean. No schema migration in this batch.
+
+**Not yet started**: the MEDIUM/LOW findings below this line remain unfixed as of
+this checkpoint.
 
 ## Comprehensive codebase audit — 2026-08-10 (research only, NOTHING below is fixed yet)
 
