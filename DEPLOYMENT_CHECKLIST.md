@@ -837,8 +837,15 @@ checkpoint — see the end of this section.
 **Verification**: built a `superagent-factory:verify` image from the full change
 set, ran `alembic upgrade head` against a fresh scratch Postgres container, then
 505 unit tests (Linux, matching the deploy target) and 108 integration tests, all
-green. Live `.env` untouched by this pass except the spend-cap change made
-earlier; nothing here has been deployed to `/opt/superagent` yet.
+green.
+
+**Deployed live** (2026-08-11): committed (`920af82`), transferred to
+`/opt/superagent` via `git archive HEAD`, image rebuilt, migration `0010` applied
+against the live database (`outreach_log` had 0 rows — zero-risk), persistent
+blacklist volume confirmed seeded, `factory` service restarted. `/health` reports
+`ok` with all six engines enabled and no disabled reasons; boot log clean, no
+errors. Spend cap still correctly paused (trailing 24h spend from before this pass
+hasn't aged out yet) — this pass made no new LLM calls against the live service.
 
 **Not yet started**: the HIGH and MEDIUM/LOW findings below this line remain
 unfixed as of this checkpoint.
