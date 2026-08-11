@@ -1529,3 +1529,64 @@ code to be surgical about); git-backed workspaces instead of copytree snapshots;
 mid-run task-lease renewal (hence `deadline_seconds` sits well under
 `task_lease_seconds`); and a feature-request pathway, which unlike a heal cycle
 has no failing test to anchor on.
+
+## Pre-launch validation plan, Phase 1 — staging harness — 2026-08-11
+
+First phase of a 7-phase pre-launch plan (rigorous end-to-end validation before
+going live, plus the growth capabilities — SEO, live AB testing, analytics-driven
+autonomy — that research turned up as missing entirely). Full plan and remaining
+phases: `C:\Users\Jesse\.claude\plans\master-system-prompt-synchronous-blum.md`.
+
+**Finding that reshaped the whole plan**: `FACTORY_DRY_RUN` does not align with cost
+or safety at all. It stubs exactly three things (Vercel deploy, outbound email send,
+Stripe card-limit sync) and never stubs an LLM call, in either mode — while
+`CODE_GENERATION`/`CODE_REVIEW` (MVP scaffolds, landing pages, Bug Council) are 100%
+Anthropic-served with no failover and the large majority of real spend. "Test the
+cheap calls, mock the expensive ones" needed a new mechanism.
+
+**`settings.staging_mock_expensive_calls`** (default `False`, zero behavior change
+unless set): swaps only the Anthropic slot in `build_registry`
+(`llm/client.py`) for a new `StagingCodeProvider` (`llm/providers/staging.py`).
+Gemini is untouched — Discovery, Compliance, lead planning, and outreach copy still
+run for real. Orthogonal to `factory_dry_run`, not a variant of it.
+
+The fixture content is genuinely functional, not a placeholder: a landing-page
+fixture (interest-capture form posting to the real per-run interest URL, extracted
+deterministically from the prompt the same way `generate_landing_page` composed it)
+and an MVP fixture (real password hashing, real token auth, real Stripe Checkout
+wiring reading `PRODUCT_ID`/setting `client_reference_id`, exactly as
+`SYSTEM_PROMPT` requires of a real generation). Both pass the real, deterministic
+Bug Council scanners (`scan_secrets`/`scan_privilege`) and the MVP fixture's own
+pytest suite genuinely passes — so the *rest* of the pipeline (real sandbox
+install/test, real deploy, real lead sourcing, real outreach composition) can be
+exercised repeatedly against a real working product without paying Opus prices on
+every run.
+
+**A real regression caught and fixed during this pass, not shipped**: an earlier
+version of the fixture-verification test ran `pip install -r <fixture's
+requirements.txt>` with `sys.executable` — `cwd=` only changes the working
+directory, not the target environment, so this silently installed into the
+*shared local dev venv* regardless of which directory it ran from. It downgraded
+`stripe` from 15.x (what every Docker build this session has resolved, matching
+the project's real unbounded `stripe>=11.0` constraint) to 11.6.0 to satisfy the
+fixture's own upper-bound pin, which broke an unrelated test
+(`test_finance_webhooks.py`) via a stripe SDK deprecation warning. Caught by the
+full local suite before commit, root-caused, stripe restored to latest, and the
+test rewritten to run pytest directly against the fixture — relying on
+fastapi/httpx/stripe already being real project dependencies — so verifying the
+fixture can never again have a side effect on the environment running it.
+
+**Single-idea concurrency and bounded lead sourcing for the actual staging run**
+(Phase 7) need no new code — both already exist as settings:
+`max_concurrent_builds=1` + `max_concurrent_validations=1` constrain how many
+products can be active at once, and `validation_outreach_batch_size` already caps
+the lead-harvest limit specifically for a `VALIDATING` product (the exact path a
+staging run's single idea takes).
+
+**Verified**: 610 unit + 139 integration tests green on Linux (scratch Postgres).
+No schema change this phase. `ruff check`, `ruff format --check`, `mypy src/` clean.
+
+**Deployed live** (2026-08-11): committed (`04ff038`), transferred via
+`git archive HEAD`, image rebuilt, service restarted. `/health` reports `ok`, all
+six engines enabled, boot log clean. The flag defaults off, so this deploy changes
+no live behavior until a staging run explicitly sets it.
