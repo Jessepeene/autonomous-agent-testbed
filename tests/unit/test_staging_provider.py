@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from factory.engines.development.bug_council import scan_privilege, scan_secrets
+from factory.engines.development.seo import missing_seo_requirements
 from factory.llm.client import build_registry
 from factory.llm.providers.base import Provider
 from factory.llm.providers.staging import StagingCodeProvider
@@ -208,6 +209,37 @@ async def test_the_mvp_fixture_passes_the_real_secrets_and_privilege_scans() -> 
     sources = _sources(completion.value)
     assert scan_secrets(sources).approved is True
     assert scan_privilege(sources).approved is True
+
+
+# --- the fixtures also pass the new deterministic SEO check -----------------------
+#
+# Without this, every staging build would immediately heal-cycle on its own
+# fixture's missing SEO markers, defeating the "always passes cleanly" point of
+# having a staging mode at all.
+
+
+async def test_the_landing_page_fixture_meets_seo_requirements() -> None:
+    provider = StagingCodeProvider()
+    completion = await provider.parse(
+        ScaffoldPlan,
+        system="validation agent",
+        prompt=_LANDING_PROMPT,
+        task_type=TaskType.CODE_GENERATION,
+        model="claude-opus-5",
+    )
+    assert missing_seo_requirements(_sources(completion.value)) == []
+
+
+async def test_the_mvp_fixture_meets_seo_requirements() -> None:
+    provider = StagingCodeProvider()
+    completion = await provider.parse(
+        ScaffoldPlan,
+        system="engineering agent",
+        prompt=_MVP_PROMPT,
+        task_type=TaskType.CODE_GENERATION,
+        model="claude-opus-5",
+    )
+    assert missing_seo_requirements(_sources(completion.value)) == []
 
 
 # --- the MVP fixture's own test suite genuinely passes under a real pytest run ----

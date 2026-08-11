@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from factory.engines.development import bug_council, repair
+from factory.engines.development import bug_council, repair, seo
 from factory.engines.development import deploy as deploy_module
 from factory.engines.development.scaffold.generator import (
     LANDING_PAGE_SYSTEM,
@@ -52,12 +52,15 @@ MAX_HEAL_CYCLES = 3
 #: whole approach is built around.
 #: `guided`: a human has diagnosed the problem and said what to change, which is the
 #: highest-information repair this factory ever performs.
+#: `seo_incomplete`: a missing <title>/meta-description/sitemap.xml/robots.txt (see
+#: seo.py) is a small, well-defined addition -- exactly what surgical repair is for,
+#: and unlike a Council rejection the check is free to re-run after the edit.
 #:
 #: Everything else is deliberately absent. `dependency_*` cannot be fixed by an agent
 #: whose sandbox has no network; `deploy_failure` is not a workspace bug at all;
 #: `council_rejection:*` is plausible future work but the agent cannot re-run the
 #: Council, so it would be editing blind to the only opinion that decides the outcome.
-SURGICAL_CATEGORIES = frozenset({"test_failure", "guided"})
+SURGICAL_CATEGORIES = frozenset({"test_failure", "guided", "seo_incomplete"})
 
 
 async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
@@ -654,6 +657,23 @@ async def _verify_and_ship(
         )
 
     sources = read_workspace(workspace, ctx.settings)
+
+    # Cheapest, earliest check: no LLM call, so a missing <title> is caught before
+    # ever paying for three Opus reviewers to review code that was going to heal
+    # regardless. Deliberately not part of Bug Council's own gate -- see seo.py's
+    # module docstring for why this is a separate, surgically-repairable category.
+    missing_seo = seo.missing_seo_requirements(sources)
+    if missing_seo:
+        return await _heal(
+            ctx,
+            session,
+            product_id,
+            "SEO requirements from the system prompt were not met:\n"
+            + "\n".join(f"- {item}" for item in missing_seo),
+            idea_id,
+            category="seo_incomplete",
+        )
+
     try:
         council = await bug_council.convene(ctx, sources, task_id=task_id)
     except bug_council.CouncilUnavailable as exc:

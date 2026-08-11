@@ -55,6 +55,23 @@ def _extract_url(pattern: re.Pattern[str], prompt: str, fallback: str) -> str:
     return match.group(1) if match else fallback
 
 
+def _seo_files() -> list[GeneratedFile]:
+    """The two standalone SEO files both prompts require -- shared since their
+    content has nothing product-specific about it (see seo.py's deterministic
+    check for what these satisfy)."""
+    sitemap = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+        "  <url><loc>https://example.test/</loc></url>\n"
+        "</urlset>\n"
+    )
+    robots = "User-agent: *\nAllow: /\n"
+    return [
+        GeneratedFile(path="app/sitemap.xml", contents=sitemap),
+        GeneratedFile(path="app/robots.txt", contents=robots),
+    ]
+
+
 def _analytics_beacon_script(analytics_url: str) -> str:
     """The exact fire-and-forget pattern both prompts require: never block
     rendering on it, never surface a failure to the visitor."""
@@ -87,6 +104,10 @@ def _landing_page_files(prompt: str) -> list[GeneratedFile]:
 <head>
 <meta charset="UTF-8">
 <title>Staging fixture landing page</title>
+<meta name="description" content="A deterministic staging fixture, not a real pitch.">
+<meta property="og:title" content="Staging fixture landing page">
+<meta property="og:description" content="A deterministic staging fixture, not a real pitch.">
+<link rel="canonical" href="https://example.test/">
 </head>
 <body>
 <main>
@@ -175,6 +196,7 @@ def test_page_loads_and_contains_pitch_and_form() -> None:
         GeneratedFile(path="tests/test_page.py", contents=test),
         GeneratedFile(path="requirements.txt", contents=requirements),
         GeneratedFile(path="README.md", contents=readme),
+        *_seo_files(),
     ]
 
 
@@ -304,7 +326,14 @@ def create_checkout(user: str = Depends(_current_user)) -> CheckoutResponse:
 '''
     index_html = f"""<!DOCTYPE html>
 <html lang="en">
-<head><meta charset="UTF-8"><title>Staging fixture MVP</title></head>
+<head>
+<meta charset="UTF-8">
+<title>Staging fixture MVP</title>
+<meta name="description" content="A deterministic staging fixture exercising the pipeline.">
+<meta property="og:title" content="Staging fixture MVP">
+<meta property="og:description" content="A deterministic staging fixture exercising the pipeline.">
+<link rel="canonical" href="https://example.test/">
+</head>
 <body>
 <main><h1>Staging fixture</h1><p>Exercises the real build/deploy pipeline.</p></main>
 {_analytics_beacon_script(analytics_url)}
@@ -386,6 +415,7 @@ def test_checkout_creates_a_session_for_an_authenticated_user() -> None:
         GeneratedFile(path="tests/test_app.py", contents=test),
         GeneratedFile(path="requirements.txt", contents=requirements),
         GeneratedFile(path="README.md", contents=readme),
+        *_seo_files(),
     ]
 
 

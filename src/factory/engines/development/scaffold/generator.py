@@ -35,6 +35,12 @@ The MVP must include, as actual files with real contents:
   JSON {"path": ..., "referrer": ...} to the exact analytics URL given below.
   Fire-and-forget — never block page rendering on it, and never surface a failure
   to the visitor.
+- SEO hygiene on the frontend page: a non-empty <title>, a <meta name="description"
+  content="..."> summarising what the product does, Open Graph tags (og:title,
+  og:description), a <link rel="canonical"> pointing at the product's own root
+  URL, and semantic landmark elements (<header>, <main>, <nav> as applicable)
+  rather than an unstructured soup of <div>s. Also produce two standalone files:
+  sitemap.xml (listing the root URL) and robots.txt (allowing all crawlers).
 - A pytest suite covering the core feature and the auth boundary.
 - requirements.txt with a minimum-version lower bound per package (e.g. \
 "pydantic>=2.9,<3"), and a README with run instructions.
@@ -118,6 +124,12 @@ can retry.
 {"path": ..., "referrer": ...} to the exact analytics URL given below. \
 Fire-and-forget — never block page rendering on it, and never surface a failure to \
 the visitor.
+- SEO hygiene: a non-empty <title>, a <meta name="description" content="..."> \
+summarising the pitch, Open Graph tags (og:title, og:description), a \
+<link rel="canonical"> pointing at the page's own root URL, and semantic landmark \
+elements (<header>, <main>) rather than an unstructured soup of <div>s. Also \
+produce two standalone files: sitemap.xml (listing the root URL) and robots.txt \
+(allowing all crawlers) — a page nobody can find gathers no interest signal at all.
 - A pytest suite that serves the page (e.g. via FastAPI's StaticFiles, or an \
 equivalent minimal static server) and asserts the page loads and contains the pitch \
 and the form.
