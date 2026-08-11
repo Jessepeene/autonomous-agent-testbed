@@ -1808,3 +1808,58 @@ Postgres), migration `0014` applies cleanly.
 the restart, image rebuilt, service restarted. `/health` reports `ok`, all
 six engines enabled, `alembic current` is `0014_growth_roles (head)`, boot
 log clean.
+
+## Pre-launch validation plan, Phase 6 — custom domain request + Vercel attachment — 2026-08-11
+
+Sixth phase of the 7-phase pre-launch plan: "ask me for a domain," the one
+remaining item from the original funnel list not yet real. Follows
+`CampaignApproval`'s poll pattern in shape only — a product is already
+reachable on its Vercel subdomain the instant it goes LIVE, so this is
+deliberately **not** a blocking gate the way campaign approval is.
+`development/domain.py::ensure_requested` fires a one-time, non-blocking
+interrupt the first time a product goes LIVE, guarded by a new
+`Product.domain_status` so a later redeploy (a repair pass, a `growth_seo`
+edit) never asks twice.
+
+**A human's reply is captured by a new branch in `collect_replies`, checked
+deliberately ahead of the existing generic one.** `DOMAIN_REQUIRED`'s
+interrupt shape (`product_id` set, `task_id` unset) is identical to a heal-
+exhaustion escalation's — and that one's REJECT retires the product outright.
+`Interrupt.reason` is what disambiguates them, checked before the generic
+branch fires. A valid hostname enqueues `ATTACH_DOMAIN`; SKIP or an empty
+reply marks the product `'skipped'` for good; anything unparseable is logged
+and left alone — the same convention this module already used for every
+other malformed-reply case, not a new gap.
+
+**`ATTACH_DOMAIN` targets the exact Vercel project slug the deploy used**,
+now persisted on `Product.vercel_project` at deploy time (`deploy.py`'s
+`DeployResult` gained a `project` field) rather than re-derived from
+`product_name`, which can drift across builds (a repair pass can rename a
+product). The required DNS records are relayed back over Telegram
+(`domain.format_dns_instructions`). **`VERIFY_DOMAIN`** is a periodic,
+LLM-free sweep (hourly, same cadence as the AB-test sweep) that polls until
+Vercel confirms, then flips `domain_status` to `'verified'` and
+`deploy_url` to the custom domain.
+
+**Explicitly unverified against a live Vercel project**, matching
+`deploy.py`'s own existing disclaimer for the deployment endpoint itself —
+the attach/verify endpoint shapes follow Vercel's documented contract, not
+a confirmed live call. Confirming the real contract is a Phase 7 manual
+runbook item.
+
+**A real bug caught while writing this phase's own integration tests, not
+shipped**: the first version of the "domain requested on first LIVE deploy"
+tests called `_verify_and_ship` with the context's default `DisabledSandbox`,
+which fails before ever reaching the deploy step it meant to exercise —
+fixed by giving those tests a passing sandbox fake, the same pattern
+`test_seo_gate.py` already established for exercising `_verify_and_ship`'s
+success path without a real Docker daemon.
+
+**Verified**: 670 unit + 188 integration tests green on Linux (scratch
+Postgres), migration `0015` applies cleanly.
+
+**Deployed live** (2026-08-11): committed (`4cbfd06`), transferred via
+`git archive HEAD`, migration `0015` applied to the live database *before*
+the restart, image rebuilt, service restarted. `/health` reports `ok`, all
+six engines enabled, `alembic current` is `0015_custom_domains (head)`, boot
+log clean.
