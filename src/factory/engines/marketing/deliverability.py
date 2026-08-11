@@ -130,6 +130,7 @@ async def process_event(
 
     if event in _BOUNCE_EVENTS:
         await repository.record_bounce(session, outreach_log_id)
+        await _check_and_trip(session, settings)
         return WebhookOutcome(True, event, detail="bounce recorded")
 
     if event in _COMPLAINT_EVENTS:
@@ -141,22 +142,44 @@ async def process_event(
 
 
 async def _check_and_trip(session: AsyncSession, settings: Settings) -> None:
-    """Re-evaluated on every complaint event, not on a schedule — the whole point of
-    a circuit breaker is that it reacts the moment the threshold is crossed, not on
-    the next maintenance tick."""
-    sent, complained = await repository.deliverability_counts(session)
+    """Re-evaluated on every bounce or complaint event, not on a schedule — the
+    whole point of a circuit breaker is that it reacts the moment a threshold is
+    crossed, not on the next maintenance tick.
+
+    Two independent thresholds, either one trips the same freeze: `bounced_at` was
+    previously recorded on every bounce webhook but never read anywhere -- a
+    sustained high bounce rate (dead/invalid addresses, a burned sending domain) is
+    exactly the kind of reputation damage this circuit breaker exists to catch, and
+    it had no backstop at all.
+    """
+    sent, complained, bounced = await repository.deliverability_counts(session)
     if sent < settings.deliverability_min_sample_size:
         return
-    rate = complained / sent
-    if rate < settings.spam_complaint_rate_threshold:
+
+    complaint_rate = complained / sent
+    bounce_rate = bounced / sent
+    if (
+        complaint_rate < settings.spam_complaint_rate_threshold
+        and bounce_rate < settings.bounce_rate_threshold
+    ):
         return
 
-    reason = (
-        f"Spam complaint rate {rate:.4%} ({complained}/{sent} over the trailing "
-        f"window) is at or above the {settings.spam_complaint_rate_threshold:.4%} "
-        "threshold major mailbox providers use as their own blocking bar."
+    if complaint_rate >= settings.spam_complaint_rate_threshold:
+        reason = (
+            f"Spam complaint rate {complaint_rate:.4%} ({complained}/{sent} over the "
+            f"trailing window) is at or above the "
+            f"{settings.spam_complaint_rate_threshold:.4%} threshold major mailbox "
+            "providers use as their own blocking bar."
+        )
+    else:
+        reason = (
+            f"Bounce rate {bounce_rate:.4%} ({bounced}/{sent} over the trailing "
+            f"window) is at or above the {settings.bounce_rate_threshold:.4%} "
+            "threshold major mailbox providers use as their own sender-reputation bar."
+        )
+    freeze = await repository.create_marketing_freeze(
+        session, reason=reason, complaint_rate=complaint_rate
     )
-    freeze = await repository.create_marketing_freeze(session, reason=reason, complaint_rate=rate)
     if freeze is None:
         return  # already tripped; the partial-unique index made this a no-op
 
@@ -173,7 +196,14 @@ async def _check_and_trip(session: AsyncSession, settings: Settings) -> None:
     )
     if interrupt_id is not None:
         await repository.set_marketing_freeze_interrupt(session, freeze.id, interrupt_id)
-    log.warning("deliverability.frozen", complaint_rate=rate, sent=sent, complained=complained)
+    log.warning(
+        "deliverability.frozen",
+        complaint_rate=complaint_rate,
+        bounce_rate=bounce_rate,
+        sent=sent,
+        complained=complained,
+        bounced=bounced,
+    )
 
 
 async def ensure_not_frozen(session: AsyncSession) -> None:

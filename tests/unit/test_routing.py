@@ -29,7 +29,7 @@ def _snapshot(**overrides: Any) -> routing.FactorySnapshot:
         "pending_by_engine": {"discovery": 5},
         "active_dev_products": 0,
         "max_concurrent_builds": 2,
-        "pending_patch_tasks": 0,
+        "pending_dev_retries": 0,
         "approved_ideas_waiting": 3,
         "pending_ideas": 10,
         "open_interrupts": 0,
@@ -90,6 +90,34 @@ def test_deterministic_route_is_ambiguous_for_an_unranked_engine() -> None:
     would hit before this table is updated for it."""
     snapshot = _snapshot(pending_by_engine={"some_future_engine": 3}, pending_tasks_total=3)
     assert routing.deterministic_route(snapshot) is None
+
+
+def test_supervisor_only_pending_work_routes_deterministically_not_ambiguous() -> None:
+    """Regression test: SUPERVISOR was previously absent from PRIORITY, so
+    maintenance-only pending work (a common, not rare, steady state) always
+    returned None here -- forcing a real orchestration LLM call every tick until
+    the model happened to route to SUPERVISOR."""
+    snapshot = _snapshot(pending_by_engine={"supervisor": 2}, pending_tasks_total=2)
+    decision = routing.deterministic_route(snapshot)
+    assert decision is not None
+    assert decision.target_engine is EngineName.SUPERVISOR
+    assert decision.next_action is NextAction.ROUTE
+
+
+def test_supervisor_ranks_last_behind_every_revenue_bearing_engine() -> None:
+    snapshot = _snapshot(
+        pending_by_engine={"supervisor": 5, "discovery": 1, "finance": 1, "development": 1}
+    )
+    decision = routing.deterministic_route(snapshot)
+    assert decision is not None
+    assert decision.target_engine is EngineName.FINANCE
+
+    only_supervisor_and_discovery = _snapshot(
+        pending_by_engine={"supervisor": 5, "discovery": 1}
+    )
+    decision = routing.deterministic_route(only_supervisor_and_discovery)
+    assert decision is not None
+    assert decision.target_engine is EngineName.DISCOVERY
 
 
 # --- deliberation_reason --------------------------------------------------------

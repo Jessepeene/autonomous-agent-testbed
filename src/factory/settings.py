@@ -90,6 +90,11 @@ class Settings(BaseSettings):
     # 0.1%: the industry-standard spam-complaint threshold major mailbox providers
     # (Gmail, Yahoo, Microsoft) use as their own blocking bar.
     spam_complaint_rate_threshold: float = Field(default=0.001, ge=0.0, le=1.0)
+    # 5%: the industry-standard hard-bounce threshold major mailbox providers use as
+    # their own sender-reputation bar (same shape as the complaint threshold above,
+    # two orders of magnitude looser -- a wrong/dead address bouncing is expected at
+    # some background rate; a sustained high rate is what damages sender reputation).
+    bounce_rate_threshold: float = Field(default=0.05, ge=0.0, le=1.0)
 
     # --- Operational ------------------------------------------------------------
     factory_dry_run: bool = True

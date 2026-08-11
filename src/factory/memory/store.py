@@ -25,6 +25,7 @@ which would turn one leaked address into a permanent one.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -109,10 +110,10 @@ async def remember(
     if len(text) < 20:
         return None
 
-    tokens = tokenize(text)
+    tokens = tokenize(text, include_numeric=True)
     existing = await _in_scopes(session, [scope])
     for row in existing:
-        if jaccard(tokens, tokenize(row.content)) >= 0.6:
+        if jaccard(tokens, tokenize(row.content, include_numeric=True)) >= 0.6:
             await session.execute(
                 update(Memory)
                 .where(Memory.id == row.id)
@@ -261,9 +262,19 @@ def _net_value_score(memory: Memory, *, now: datetime) -> float:
     in this codebase yet attributes a downstream failure back to a specific memory
     (doing that properly would need the same kind of outcome-tracking the
     `factory.learning` statistical loop has for prompts, and memory is not wired
-    into that). Dividing by content length still gets the main practical benefit: a
-    concise, frequently-useful memory outranks a verbose, rarely-used one of similar
-    confidence, so the budget is spent on signal rather than length.
+    into that).
+
+    Dividing by ``log2(length)`` rather than raw length: content ranges 20-2000
+    chars (an 80x spread) while ``value`` itself only ranges roughly 0.0-1.0 (a 4x
+    spread) -- dividing by raw length let length dominate completely regardless of
+    value, the opposite of the intent stated below. A 25-char, never-recalled,
+    year-old note (value~=0.24) would score *higher* than a 2000-char,
+    confidence-1.0, heavily-recalled, written-today lesson (value~=1.0) --
+    0.24/25=0.0096 vs 1.0/2000=0.0005 -- so the most valuable memory in the store
+    was always the first one evicted. log2 compresses length to a ~2.5x spread
+    (log2(20)~=4.3 to log2(2000)~=11), which is enough to still gently favour a
+    concise memory over an equally-valuable verbose one -- the original intent --
+    without letting length overwhelm the three weighted value terms.
     """
     reference = memory.last_used_at or memory.created_at
     if reference.tzinfo is None:
@@ -276,7 +287,7 @@ def _net_value_score(memory: Memory, *, now: datetime) -> float:
     value = (
         _CONFIDENCE_WEIGHT * memory.confidence + _HIT_WEIGHT * hit_score + _RECENCY_WEIGHT * recency
     )
-    return float(value) / max(len(memory.content), 1)
+    return float(value) / math.log2(max(len(memory.content), 2))
 
 
 async def prune(
@@ -298,13 +309,22 @@ async def prune(
     for scope in scopes:
         report.scopes_checked += 1
         rows = await _in_scopes(session, [scope])
-        overflow = len(rows) - max_per_scope
+        # The budget applies only to the prunable population -- PREFERENCE rows are
+        # exempt from *both* eviction and the count that decides how much eviction
+        # is needed, not just eviction alone. Computing overflow against every row
+        # (the previous behaviour) meant a scope dominated by PREFERENCE rows (e.g.
+        # 205 preferences + 30 lessons, budget 200) computed overflow=35 against
+        # only 30 evictable rows: every non-preference memory got evicted trying to
+        # reach a budget that PREFERENCE rows alone already exceeded, and the scope
+        # was left permanently over budget with nothing left to evict on any later
+        # run.
+        prunable = [row for row in rows if row.kind != MemoryKind.PREFERENCE.value]
+        overflow = len(prunable) - max_per_scope
         if overflow <= 0:
             continue
 
-        prunable = [row for row in rows if row.kind != MemoryKind.PREFERENCE.value]
         prunable.sort(key=lambda row: _net_value_score(row, now=now))
-        for row in prunable[: min(overflow, len(prunable))]:
+        for row in prunable[:overflow]:
             await forget(session, row.id, "pruned: low value/byte score under the scope budget")
             report.pruned += 1
 

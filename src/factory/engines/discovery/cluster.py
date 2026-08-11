@@ -17,6 +17,20 @@ from dataclasses import dataclass, field
 from factory.engines.discovery.sources.base import Signal
 
 _TOKEN = re.compile(r"[a-z][a-z0-9+.-]{2,}")
+#: Adds a bare run of digits (any length, including a single digit) as its own
+#: token -- used for memory dedup (see `tokenize`'s `include_numeric` parameter),
+#: where a fact's number is frequently the entire point ("retry after 30 seconds"
+#: vs "300 seconds", "cap raised to 40 percent" vs "60 percent",
+#: "max_concurrent_builds is 2" vs "5"). The original letter-starting `_TOKEN` alone
+#: never produces a purely-numeric token, so two facts differing only in a number
+#: hashed to identical token sets and were treated as duplicates -- the more recent
+#: one merged into the older, less-confident row instead of being stored, and the
+#: stale number could end up with *higher* confidence than a correction would have.
+#: Discovery clustering deliberately keeps the letter-only default: a bare number
+#: scattered across unrelated public complaints is usually noise (a page count, a
+#: year), not a real similarity signal, and that tokenizer's output composition has
+#: never been re-tuned against including one.
+_TOKEN_WITH_NUMERIC = re.compile(r"[a-z][a-z0-9+.-]{2,}|[0-9]+")
 
 _STOPWORDS: frozenset[str] = frozenset(
     """
@@ -51,8 +65,9 @@ class Cluster:
         return "\n\n".join(parts)[:max_chars]
 
 
-def tokenize(text: str) -> frozenset[str]:
-    return frozenset(t for t in _TOKEN.findall(text.lower()) if t not in _STOPWORDS)
+def tokenize(text: str, *, include_numeric: bool = False) -> frozenset[str]:
+    pattern = _TOKEN_WITH_NUMERIC if include_numeric else _TOKEN
+    return frozenset(t for t in pattern.findall(text.lower()) if t not in _STOPWORDS)
 
 
 def jaccard(left: frozenset[str], right: frozenset[str]) -> float:

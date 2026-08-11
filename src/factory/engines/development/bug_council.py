@@ -35,7 +35,17 @@ from factory.supervisor.context import FactoryContext
 
 log = get_logger(__name__)
 
-_MAX_REVIEW_CHARS = 60_000
+#: A live scaffold has been observed at ~150 KB (15 files, ~37k output tokens) --
+#: the model context window is 1M tokens (~4M chars), so there is no technical
+#: reason to cap this anywhere near that low. Raised 5x from the original 60_000,
+#: which silently dropped files (and, per `render_sources`, gave no indication it
+#: had) on any build even modestly larger than a small scaffold; `sorted()` order
+#: means whatever sorts alphabetically last (often `tests/`) was always what got
+#: cut. Still bounded, not unlimited: three reviewers each pay for this corpus
+#: (the first read is cached for the other two, but the first write and any cache
+#: miss are not free), and a pathological build should not make one review
+#: unboundedly expensive.
+_MAX_REVIEW_CHARS = 300_000
 
 REVIEWER_PROMPTS: dict[ReviewCategory, str] = {
     ReviewCategory.SECURITY: """\
@@ -209,29 +219,74 @@ def _finding(
 # --- model reviewers --------------------------------------------------------
 
 
-def render_sources(sources: dict[str, str], limit: int = _MAX_REVIEW_CHARS) -> str:
+def render_sources(sources: dict[str, str], limit: int | None = None) -> tuple[str, bool]:
+    """Returns ``(rendered, truncated)``. When the budget runs out, an explicit
+    marker naming every omitted or partially-shown file is appended -- a reviewer
+    silently handed a partial corpus (the previous behaviour) cannot account for
+    what it never saw, and `review_corpus` used to actively tell it "the complete
+    codebase under review follows" even when that was false.
+
+    ``limit`` defaults to the module-level ``_MAX_REVIEW_CHARS``, read at call
+    time (not baked in as a parameter default) so a test can monkeypatch it.
+    """
+    if limit is None:
+        limit = _MAX_REVIEW_CHARS
     parts: list[str] = []
     budget = limit
-    for path, content in sources.items():
+    omitted: list[str] = []
+    cut_short: str | None = None
+    paths = list(sources)
+    for index, path in enumerate(paths):
+        content = sources[path]
         chunk = f"--- {path} ---\n{content}\n"
         if len(chunk) > budget:
             parts.append(chunk[:budget])
+            cut_short = path
+            omitted = paths[index + 1 :]
             break
         parts.append(chunk)
         budget -= len(chunk)
-    return "".join(parts)
+    truncated = cut_short is not None
+    if truncated:
+        names = ([cut_short] if cut_short else []) + omitted
+        parts.append(
+            "\n\n[TRUNCATED: the review budget ran out. The following file was cut "
+            f"off mid-content or never shown at all: {', '.join(names)}]\n"
+        )
+    return "".join(parts), truncated
 
 
-def review_corpus(rendered: str) -> str:
+def review_corpus(rendered: str, *, truncated: bool = False) -> str:
     """Byte-identical across all three model reviewers — any variation here defeats
     the cache, so `convene` computes this once and passes the same string to each.
     Document-then-instruction is also the better prompt order for long context, which
     is what moving the corpus ahead of the per-reviewer mandate does anyway."""
+    if truncated:
+        return (
+            "The codebase under review follows. IMPORTANT: it was too large to show "
+            "in full -- see the [TRUNCATED] marker near the end for exactly what you "
+            "were not shown. Do not assume anything you cannot see is safe; if a file "
+            "or region relevant to your mandate was omitted, say so explicitly and "
+            "withhold approval rather than reasoning about code you never saw.\n\n"
+            f"{rendered}"
+            "\n\nEnd of codebase (partial -- see the TRUNCATED marker above). Your "
+            "specific review mandate follows."
+        )
     return (
         "The complete codebase under review follows.\n\n"
         f"{rendered}"
         "\n\nEnd of codebase. Your specific review mandate follows."
     )
+
+
+class CouncilUnavailable(RuntimeError):
+    """One or more reviewers could not complete -- an infrastructure/provider
+    failure, not a verdict on the code. Must never be silently converted into a
+    normal `approved=False` rejection: that would route into the ordinary heal
+    cycle, spending an LLM call regenerating code that was never actually
+    reviewed, let alone found bad. Callers should treat this like any other
+    `DevOpsError` (see `development/graph.py::_verify_and_ship`).
+    """
 
 
 async def _model_review(
@@ -241,34 +296,18 @@ async def _model_review(
     *,
     task_id: str | None = None,
 ) -> ReviewVerdict:
-    try:
-        return await ctx.llm.parse(
-            ReviewVerdict,
-            task_type=TaskType.CODE_REVIEW,
-            system=REVIEWER_PROMPTS[category],
-            prompt="Emit your verdict for the codebase above.",
-            engine=EngineName.DEVELOPMENT,
-            task_id=task_id,
-            cache_prefix=corpus,
-        )
-    except LLMError as exc:
-        # A reviewer that could not run has not approved anything. Fail closed.
-        log.warning("council.reviewer_failed", category=str(category), detail=str(exc)[:200])
-        return ReviewVerdict(
-            category=category,
-            approved=False,
-            findings=[
-                _finding(
-                    category,
-                    "high",
-                    "<review>",
-                    1,
-                    f"{category.value} review could not be completed",
-                    f"The reviewer failed with: {exc}. An unreviewed deploy is not permitted.",
-                    "Re-run the review once the provider is reachable.",
-                )
-            ],
-        )
+    """Raises whatever the provider call raises -- callers decide what an
+    incomplete review means; this function does not silently turn "could not run"
+    into "ran and rejected"."""
+    return await ctx.llm.parse(
+        ReviewVerdict,
+        task_type=TaskType.CODE_REVIEW,
+        system=REVIEWER_PROMPTS[category],
+        prompt="Emit your verdict for the codebase above.",
+        engine=EngineName.DEVELOPMENT,
+        task_id=task_id,
+        cache_prefix=corpus,
+    )
 
 
 async def convene(
@@ -285,7 +324,10 @@ async def convene(
             ),
         )
 
-    corpus = review_corpus(render_sources(sources))
+    rendered, truncated = render_sources(sources)
+    corpus = review_corpus(rendered, truncated=truncated)
+    if truncated:
+        log.warning("council.corpus_truncated", files=len(sources), limit=_MAX_REVIEW_CHARS)
     categories = list(REVIEWER_PROMPTS)
 
     # The shared corpus is a cached prefix (see `_model_review`/`_system_blocks`),
@@ -294,11 +336,32 @@ async def convene(
     # worse, each pays the 1.25x cache-*write* premium with nothing ever reading it
     # back, a net loss over not caching at all. Running the first alone lets its
     # write land before the other two are sent, so they can read it at 0.1x instead.
-    first_verdict = await _model_review(ctx, categories[0], corpus, task_id=task_id)
+    #
+    # return_exceptions=True on the gather (and a try/except around the solo first
+    # call): a raised exception here is never routed into `_finding()`-style
+    # "reviewer rejected" bookkeeping. Without return_exceptions, one reviewer
+    # raising would cancel this coroutine's await on the gather while the *other*
+    # sibling reviewer tasks keep running in the background -- a real, billed
+    # provider call whose result is never retrieved or recorded.
+    try:
+        first_verdict: ReviewVerdict | BaseException = await _model_review(
+            ctx, categories[0], corpus, task_id=task_id
+        )
+    except LLMError as exc:
+        first_verdict = exc
     rest = await asyncio.gather(
-        *(_model_review(ctx, category, corpus, task_id=task_id) for category in categories[1:])
+        *(_model_review(ctx, category, corpus, task_id=task_id) for category in categories[1:]),
+        return_exceptions=True,
     )
-    model_verdicts = [first_verdict, *rest]
+
+    outcomes: list[ReviewVerdict | BaseException] = [first_verdict, *rest]
+    failures = [outcome for outcome in outcomes if isinstance(outcome, BaseException)]
+    if failures:
+        detail = "; ".join(str(f)[:200] for f in failures)
+        log.warning("council.unavailable", failed_reviewers=len(failures), detail=detail)
+        raise CouncilUnavailable(f"{len(failures)} reviewer(s) could not complete: {detail}")
+
+    model_verdicts = [outcome for outcome in outcomes if isinstance(outcome, ReviewVerdict)]
     verdicts = [scan_secrets(sources), scan_privilege(sources), *model_verdicts]
 
     approved = all(v.approved for v in verdicts)

@@ -108,10 +108,26 @@ async def ensure_approval(
         raise CampaignRejected(f"campaign for task {task_id} was rejected by the operator")
 
     if approval.interrupt_id is None:
+        # open_interrupt() dedups on subject text alone ("duplicate open subjects
+        # collapse into the existing one"), and Interrupt.subject is a bounded
+        # String(200) column. product_name is a multi-line product summary that can
+        # run long -- if it alone consumes the column budget, two DIFFERENT
+        # cohorts for the same product (different task_id, different lead count)
+        # can truncate to an *identical* subject. The second campaign-approval
+        # request then silently collapses into the first: its own interrupt_id
+        # never gets set, so sync_decisions() (which only looks at approvals with
+        # a real interrupt_id) can never resolve it -- CampaignApprovalPending
+        # forever. task_id[:8] is placed first, before any truncation risk, and
+        # is unique per task by construction (same short-id convention as
+        # `interrupts.tag_for`), so two different cohorts can never collide here.
+        subject = (
+            f"Campaign approval needed ({task_id[:8]}, {len(candidates)} leads): "
+            f"{product_name.splitlines()[0][:120]}"
+        )
         interrupt_id = await interrupts.request(
             session,
             reason=InterruptReason.CAMPAIGN_APPROVAL,
-            subject=f"Campaign approval needed: {product_name} ({len(candidates)} leads)",
+            subject=subject,
             detail=brief,
             task_id=task_id,
         )

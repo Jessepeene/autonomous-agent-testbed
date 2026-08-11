@@ -32,13 +32,22 @@ from factory.state.schemas import NextAction, OrchestratorDecision
 if TYPE_CHECKING:
     from factory.supervisor.context import FactoryContext
 
-#: Deterministic priority order. Revenue-bearing work outranks discovering more of it.
+#: Deterministic priority order. Revenue-bearing work outranks discovering more of
+#: it; SUPERVISOR (maintenance/learning-loop tasks) ranks last, matching
+#: backlog.py's own "always yields to revenue-bearing work" priority=500 -- and,
+#: unlike the other five, was previously missing from this table entirely. Pending
+#: SUPERVISOR work is common (the maintenance backlog enqueues real tasks every few
+#: hours), so when it was the *only* pending work, deterministic_route() returned
+#: None ("ambiguous"), forcing a real orchestration LLM call on every 15s tick
+#: until the model happened to route here -- the exact steady-state cost regression
+#: this module's own docstring says routing was built to eliminate.
 PRIORITY: tuple[EngineName, ...] = (
     EngineName.FINANCE,
     EngineName.DEVELOPMENT,
     EngineName.COMPLIANCE,
     EngineName.MARKETING,
     EngineName.DISCOVERY,
+    EngineName.SUPERVISOR,
 )
 
 #: Actions safe to replay unchanged when state hasn't moved. SPAWN_AGENT and ESCALATE
@@ -75,13 +84,15 @@ class FactorySnapshot:
     pending_by_engine: dict[str, int]
     active_dev_products: int
     max_concurrent_builds: int
-    #: Repairs of products *already* counted in `active_dev_products` -- claiming one
-    #: does not admit a new product into the pipeline, so the capacity gate must never
-    #: hold these back the way it holds back a fresh `build_mvp`. Without this
-    #: distinction, a product stuck in PATCHING keeps `dev_at_capacity` true forever,
-    #: which blocks the very patch task that would resolve PATCHING: a permanent
-    #: deadlock, observed live.
-    pending_patch_tasks: int
+    #: Pending BUILD_MVP/PATCH_PRODUCT tasks for a product *already* counted in
+    #: `active_dev_products` -- claiming one does not admit a new product into the
+    #: pipeline, so the capacity gate must never hold these back the way it holds
+    #: back a fresh build for a product not yet in the pipeline. Without this
+    #: distinction, a product stuck in PATCHING (or a BUILD_MVP that threw and left
+    #: its product stuck in BUILDING, never reset on failure) keeps `dev_at_capacity`
+    #: true forever, which blocks the very retry that would resolve it: a permanent
+    #: deadlock, observed live for the PATCHING case.
+    pending_dev_retries: int
     approved_ideas_waiting: int
     pending_ideas: int
     open_interrupts: int
@@ -185,9 +196,9 @@ def record_decision(memo: RoutingMemo, decision: OrchestratorDecision, fp: str) 
 def deterministic_route(snapshot: FactorySnapshot) -> OrchestratorDecision | None:
     """The same fixed priority scan the Supervisor has always fallen back to.
     Returns ``None`` only when queued work exists on an engine this table does not
-    rank — today that is unreachable (the table covers every ``EngineName`` but
-    SUPERVISOR), but it is the correct signal to escalate to the model rather than
-    silently dropping the work if the engine set ever grows."""
+    rank — the table now covers every ``EngineName``, including SUPERVISOR, so this
+    is unreachable today. Kept as the correct signal to escalate to the model
+    rather than silently dropping the work if the engine set ever grows."""
     for engine in PRIORITY:
         if snapshot.pending_by_engine.get(engine.value, 0) > 0:
             return OrchestratorDecision(

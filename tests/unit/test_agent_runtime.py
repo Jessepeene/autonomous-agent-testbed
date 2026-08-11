@@ -104,6 +104,79 @@ async def test_runtime_completes_without_calling_any_tool(
     assert result.invocations == []
 
 
+async def test_an_empty_answer_with_no_tool_calls_is_not_success(
+    gemini_fake: FakeProvider, settings: Settings
+) -> None:
+    """Regression test: previously any turn with no tool calls was "completed"
+    regardless of whether it actually produced an answer -- an empty response
+    (e.g. adaptive thinking consuming the whole output budget) counted as success,
+    so a maintenance cycle that produced nothing logged "done", and a caller
+    gating a memory write on `result.succeeded` had no signal to stop it."""
+    gemini_fake.register_turns(
+        AgentTurn(
+            text="",
+            tool_calls=[],
+            stop_reason="end_turn",
+            provider=Provider.GEMINI,
+            model="gemini-2.5-flash",
+            usage=Usage(input_tokens=500, output_tokens=0),
+        )
+    )
+    runtime = AgentRuntime(
+        _client(settings, gemini=gemini_fake), settings=settings, tools=_registry_with()
+    )
+
+    result = await runtime.run(objective="Investigate.", system="s", tool_categories=[])
+
+    assert result.succeeded is False
+    assert result.stopped_because == "empty_response"
+
+
+async def test_a_max_tokens_truncated_answer_is_not_success(
+    gemini_fake: FakeProvider, settings: Settings
+) -> None:
+    """A response cut off by hitting the token budget mid-thought must not be
+    treated as a finished, trustworthy answer -- it was previously written into
+    permanent memory as a "lesson" the moment it wasn't empty."""
+    gemini_fake.register_turns(
+        AgentTurn(
+            text="Based on my analysis, the root cause appea",
+            tool_calls=[],
+            stop_reason="MAX_TOKENS",
+            provider=Provider.GEMINI,
+            model="gemini-2.5-flash",
+            usage=Usage(input_tokens=500, output_tokens=8192),
+        )
+    )
+    runtime = AgentRuntime(
+        _client(settings, gemini=gemini_fake), settings=settings, tools=_registry_with()
+    )
+
+    result = await runtime.run(objective="Investigate.", system="s", tool_categories=[])
+
+    assert result.succeeded is False
+    assert result.stopped_because == "truncated"
+    # The (untrustworthy) partial text is still surfaced for logging/debugging --
+    # only the success signal changes, not what's visible in the result.
+    assert "root cause" in result.answer
+
+
+async def test_a_normal_completed_answer_with_a_clean_stop_reason_still_succeeds(
+    gemini_fake: FakeProvider, settings: Settings
+) -> None:
+    """Regression guard for the fix above: a genuinely finished answer must not be
+    misclassified now that stop_reason is actually being checked."""
+    gemini_fake.register_turns(_turn(text="The answer is 42."))
+    runtime = AgentRuntime(
+        _client(settings, gemini=gemini_fake), settings=settings, tools=_registry_with()
+    )
+
+    result = await runtime.run(objective="What is the answer?", system="s", tool_categories=[])
+
+    assert result.succeeded is True
+    assert result.stopped_because == "completed"
+
+
 async def test_runtime_executes_a_requested_tool(
     gemini_fake: FakeProvider, settings: Settings
 ) -> None:

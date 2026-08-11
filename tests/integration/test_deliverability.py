@@ -225,3 +225,77 @@ async def test_process_event_records_a_bounce(session: AsyncSession) -> None:
     row = await session.get(OutreachLog, sent_ids[0])
     assert row is not None
     assert row.bounced_at is not None
+
+
+# --- bounce circuit breaker: 2026-08-11 audit fix -------------------------------
+#
+# bounced_at was recorded on every bounce webhook but never read by anything --
+# there was no backstop at all for a sustained high bounce rate, unlike the
+# complaint-rate circuit breaker right above.
+
+
+async def test_bounce_circuit_breaker_trips_when_the_threshold_is_crossed(
+    session: AsyncSession,
+) -> None:
+    settings = _sensitive_settings(bounce_rate_threshold=0.2)
+    lead_id = await _seed_lead(session)
+    sent_ids = await _seed_sent(session, lead_id, 5)
+    await session.commit()
+
+    # 1/5 = 20% >= 20% threshold on the last bounce.
+    outcome = await deliverability.process_event(
+        session,
+        {"event-data": {"event": "failed", "user-variables": {"outreach_log_id": sent_ids[0]}}},
+        settings=settings,
+    )
+    await session.commit()
+
+    assert outcome.handled is True
+    freeze = await repository.active_marketing_freeze(session)
+    assert freeze is not None
+    assert freeze.interrupt_id is not None
+
+    interrupt = await session.get(Interrupt, freeze.interrupt_id)
+    assert interrupt is not None
+    assert interrupt.reason == "deliverability_frozen"
+
+
+async def test_bounce_circuit_breaker_does_not_trip_below_the_minimum_sample_size(
+    session: AsyncSession,
+) -> None:
+    settings = _sensitive_settings(bounce_rate_threshold=0.2)
+    lead_id = await _seed_lead(session)
+    sent_ids = await _seed_sent(session, lead_id, 2)  # below the min sample size
+    await session.commit()
+
+    await deliverability.process_event(
+        session,
+        {"event-data": {"event": "failed", "user-variables": {"outreach_log_id": sent_ids[0]}}},
+        settings=settings,
+    )
+    await session.commit()
+
+    assert await repository.active_marketing_freeze(session) is None
+
+
+async def test_a_low_complaint_rate_does_not_mask_a_high_bounce_rate(
+    session: AsyncSession,
+) -> None:
+    """The two thresholds are independent -- a comfortably-low complaint rate must
+    not prevent the bounce rate from tripping the same breaker."""
+    settings = _sensitive_settings(bounce_rate_threshold=0.2)
+    lead_id = await _seed_lead(session)
+    sent_ids = await _seed_sent(session, lead_id, 5)
+    await session.commit()
+
+    outcome = await deliverability.process_event(
+        session,
+        {"event-data": {"event": "bounced", "user-variables": {"outreach_log_id": sent_ids[0]}}},
+        settings=settings,
+    )
+    await session.commit()
+
+    assert outcome.handled is True
+    freeze = await repository.active_marketing_freeze(session)
+    assert freeze is not None
+    assert "Bounce rate" in freeze.reason

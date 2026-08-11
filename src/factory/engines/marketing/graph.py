@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from factory.engines.compliance.rules import MAX_CONTACTS_PER_DOMAIN_PER_MONTH
 from factory.engines.marketing import campaign, deliverability, outreach
 from factory.engines.marketing import leads as leads_module
 from factory.logging import get_logger
@@ -71,12 +72,20 @@ async def _harvest(ctx: FactoryContext, session: AsyncSession, task: Task) -> st
         # real post-launch one below (outreach:{id}:*) -- if this validation later
         # succeeds and a genuine build goes LIVE for the same product_id, that
         # product's real outreach must still be able to fire.
+        #
+        # Suffixed with this harvest task's own id, not report.stored: two
+        # different harvest runs can coincidentally store the same *number* of new
+        # leads, which previously produced an identical key and silently collapsed
+        # the second run's SEND_OUTREACH enqueue into the first (ON CONFLICT DO
+        # NOTHING) -- the second batch of leads would then never be contacted.
+        # task.id is unique per harvest attempt and stable across retries of the
+        # *same* task, so a retry after a crash still correctly dedups.
         key_prefix = "outreach:validate" if validating else "outreach"
         await repository.enqueue_task(
             session,
             kind=TaskKind.SEND_OUTREACH,
             engine=EngineName.MARKETING,
-            idempotency_key=f"{key_prefix}:{resolved_id or 'general'}:{report.stored}",
+            idempotency_key=f"{key_prefix}:{resolved_id or 'general'}:{task.id}",
             payload={"product_id": resolved_id},
             product_id=resolved_id,
             priority=150,
@@ -127,6 +136,26 @@ async def _outreach(ctx: FactoryContext, session: AsyncSession, task: Task) -> s
     outcome = outreach.OutreachOutcome()
     for lead_row in candidates:
         outcome.attempted += 1
+
+        # The per-domain cap is checked at LIA time (compliance/lia.py), against
+        # the contact count *as of ingestion* -- if several leads at the same
+        # company all clear LIA before any of them are actually sent to, this
+        # batch can still send to all of them at once, blowing through the cap by
+        # however many share a domain. Re-checked live, immediately before each
+        # send: record_outreach() flushes (not just adds) its row, so an earlier
+        # send in this same batch is already visible to this count without needing
+        # a separate in-memory tally.
+        domain = lead_row.work_email.partition("@")[2]
+        contacts = await repository.outreach_count_for_domain(session, domain)
+        if contacts >= MAX_CONTACTS_PER_DOMAIN_PER_MONTH:
+            outcome.suppressed += 1
+            log.info(
+                "marketing.domain_cap_reached_mid_batch",
+                domain=domain,
+                contacts=contacts,
+            )
+            continue
+
         sent = await outreach.send_to_lead(
             ctx,
             session,

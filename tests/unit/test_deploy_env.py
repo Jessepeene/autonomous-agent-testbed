@@ -41,7 +41,9 @@ async def test_product_id_is_always_present_in_the_deploy_env(
 
     async def fake_post(self: httpx.AsyncClient, url: str, **kwargs: Any) -> httpx.Response:
         captured.update(kwargs.get("json") or {})
-        return httpx.Response(200, json={"url": "example.vercel.app"}, request=_REQUEST)
+        return httpx.Response(
+            200, json={"url": "example.vercel.app", "readyState": "READY"}, request=_REQUEST
+        )
 
     monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
     live = settings.model_copy(update={"vercel_token": "vercel-test-token"})
@@ -66,7 +68,9 @@ async def test_stripe_key_is_included_only_when_configured(
 
     async def fake_post(self: httpx.AsyncClient, url: str, **kwargs: Any) -> httpx.Response:
         captured.update(kwargs.get("json") or {})
-        return httpx.Response(200, json={"url": "example.vercel.app"}, request=_REQUEST)
+        return httpx.Response(
+            200, json={"url": "example.vercel.app", "readyState": "READY"}, request=_REQUEST
+        )
 
     monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
     live = settings.model_copy(
@@ -92,7 +96,9 @@ async def test_stripe_key_is_omitted_not_sent_empty_when_unconfigured(
 
     async def fake_post(self: httpx.AsyncClient, url: str, **kwargs: Any) -> httpx.Response:
         captured.update(kwargs.get("json") or {})
-        return httpx.Response(200, json={"url": "example.vercel.app"}, request=_REQUEST)
+        return httpx.Response(
+            200, json={"url": "example.vercel.app", "readyState": "READY"}, request=_REQUEST
+        )
 
     monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
     live = settings.model_copy(update={"vercel_token": "vercel-test-token", "stripe_api_key": None})
@@ -128,6 +134,36 @@ def test_collect_files_excludes_installed_dependencies(settings: Settings) -> No
     paths = {entry["file"] for entry in files}
     assert "app/main.py" in paths
     assert not any(path.startswith(".deps") for path in paths)
+
+
+def test_collect_files_excludes_exactly_what_bug_council_never_reviewed(
+    settings: Settings,
+) -> None:
+    """A secret or malicious code baked into dist/build output must never ship
+    without ever having been seen by Bug Council -- deploy's skip set must match
+    read_workspace's exactly (both now read from the same WORKSPACE_SKIP_DIRS)."""
+    from factory.engines.development.scaffold.generator import (
+        WORKSPACE_SKIP_DIRS,
+        read_workspace,
+    )
+
+    root = settings.workspace_root / "product-1"
+    (root / "app").mkdir(parents=True)
+    (root / "app" / "main.py").write_bytes(b"print('hi')")
+    for skip_dir in ("dist", "build", ".pytest_cache"):
+        nested = root / skip_dir / "artifact.js"
+        nested.parent.mkdir(parents=True, exist_ok=True)
+        nested.write_bytes(b"console.log('built output, never reviewed')")
+
+    deployed_paths = {entry["file"] for entry in _collect_files("product-1", settings)}
+    reviewed_paths = set(read_workspace("product-1", settings))
+
+    for skip_dir in ("dist", "build", ".pytest_cache"):
+        assert skip_dir in WORKSPACE_SKIP_DIRS
+        assert not any(p.startswith(skip_dir) for p in deployed_paths)
+        assert not any(p.startswith(skip_dir) for p in reviewed_paths)
+    assert "app/main.py" in deployed_paths
+    assert "app/main.py" in reviewed_paths
 
 
 async def test_dry_run_never_calls_the_deploy_api_at_all(

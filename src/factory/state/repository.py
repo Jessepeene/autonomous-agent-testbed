@@ -292,6 +292,33 @@ async def count_active_dev_tasks(session: AsyncSession) -> int:
     return int((await session.execute(stmt)).scalar_one())
 
 
+async def count_pending_dev_retries(session: AsyncSession) -> int:
+    """Pending Development tasks (``BUILD_MVP`` or ``PATCH_PRODUCT``) whose product
+    is *already* counted in `count_active_dev_tasks`.
+
+    Generalises what used to be a `PATCH_PRODUCT`-only check: a retried `BUILD_MVP`
+    for a product stuck in `BUILDING` after an earlier attempt threw (the status is
+    set before the attempt and never reset on failure) is exactly the same shape of
+    problem -- claiming it doesn't admit a new product into the pipeline either, so
+    the capacity gate must not hold it back the way it holds back a genuinely new
+    build. Without this, two failed builds in a row can permanently fill both of
+    `max_concurrent_builds`' slots with products whose only pending work is a retry
+    the gate never recognises as safe to claim.
+    """
+    stmt = (
+        select(func.count())
+        .select_from(Task)
+        .join(Product, Product.id == Task.product_id)
+        .where(
+            Task.status == TaskStatus.PENDING.value,
+            Task.engine == EngineName.DEVELOPMENT.value,
+            Task.kind.in_((TaskKind.BUILD_MVP.value, TaskKind.PATCH_PRODUCT.value)),
+            Product.status.in_(ACTIVE_DEV_STATUSES),
+        )
+    )
+    return int((await session.execute(stmt)).scalar_one())
+
+
 async def count_active_validations(session: AsyncSession) -> int:
     """Products currently running a validation (landing page + outreach).
 
@@ -1033,9 +1060,12 @@ async def record_complaint(session: AsyncSession, outreach_log_id: str) -> None:
     )
 
 
-async def deliverability_counts(session: AsyncSession, *, window_days: int = 30) -> tuple[int, int]:
-    """(sent, complained) over the trailing window. The denominator is every send
-    attempt regardless of later outcome — a bounce or complaint is still a send."""
+async def deliverability_counts(
+    session: AsyncSession, *, window_days: int = 30
+) -> tuple[int, int, int]:
+    """(sent, complained, bounced) over the trailing window. The denominator is
+    every send attempt regardless of later outcome — a bounce or complaint is
+    still a send."""
     since = _now() - timedelta(days=window_days)
     sent_stmt = (
         select(func.count())
@@ -1047,9 +1077,15 @@ async def deliverability_counts(session: AsyncSession, *, window_days: int = 30)
         .select_from(OutreachLog)
         .where(OutreachLog.complained_at.is_not(None), OutreachLog.sent_at >= since)
     )
+    bounced_stmt = (
+        select(func.count())
+        .select_from(OutreachLog)
+        .where(OutreachLog.bounced_at.is_not(None), OutreachLog.sent_at >= since)
+    )
     sent = int((await session.execute(sent_stmt)).scalar_one())
     complained = int((await session.execute(complained_stmt)).scalar_one())
-    return sent, complained
+    bounced = int((await session.execute(bounced_stmt)).scalar_one())
+    return sent, complained, bounced
 
 
 async def active_marketing_freeze(session: AsyncSession) -> MarketingFreeze | None:

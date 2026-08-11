@@ -142,7 +142,22 @@ class AgentRuntime:
                 result.answer = turn.text
 
             if not turn.wants_tools:
-                result.stopped_because = "completed"
+                # stop_reason was previously never consulted here: any turn with no
+                # tool calls was "completed", including an empty answer (adaptive
+                # thinking consuming the whole output budget is a real, observed
+                # failure mode -- see anthropic_provider.py's SchemaViolation handling
+                # for the identical case in parse()) or text truncated mid-thought by
+                # hitting the token budget. Both used to read as success: a
+                # maintenance cycle that produced nothing logged "done", and a
+                # truncated half-sentence got written into permanent memory as a
+                # LESSON (spawner.py gates that write on result.succeeded, so fixing
+                # the signal here is enough -- no change needed there).
+                if not turn.text.strip():
+                    result.stopped_because = "empty_response"
+                elif "max_token" in turn.stop_reason.lower():
+                    result.stopped_because = "truncated"
+                else:
+                    result.stopped_because = "completed"
                 break
 
             turns.append(Turn(role="assistant", text=turn.text, tool_calls=turn.tool_calls))

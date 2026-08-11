@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from factory.learning import store
 from factory.learning.allowlist import ProtectedKey
 from factory.learning.stats import fisher_exact_less
-from factory.learning.trials import _evaluate_one
+from factory.learning.trials import _MIN_ABSOLUTE_N, MAX_TRIAL_DAYS, _evaluate_one
 from factory.state.orm import Base, TunableParameter
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -441,3 +441,156 @@ async def test_evaluate_one_waits_for_more_data_below_the_minimum_sample(
     still_trial = await session.get(TunableParameter, trial_id)
     assert still_trial is not None
     assert still_trial.status == "trial"
+
+
+# --- 2026-08-11 audit fix: no confirming on near-zero data at timeout ----------
+
+
+async def _backdate_trial_until(session: AsyncSession, trial_id: str, *, days_ago: int) -> None:
+    """Simulates a trial whose MAX_TRIAL_DAYS deadline has already passed."""
+    past = datetime.now(UTC) - timedelta(days=days_ago)
+    await session.execute(
+        TunableParameter.__table__.update()
+        .where(TunableParameter.id == trial_id)
+        .values(trial_started_at=past, trial_until=past + timedelta(days=MAX_TRIAL_DAYS))
+    )
+
+
+async def test_timed_out_trial_with_near_zero_episodes_is_rolled_back_not_confirmed(
+    session: AsyncSession,
+) -> None:
+    """Regression test for the bug where fisher_exact_less(0, 0, base_s, base_f) ==
+    1.0 for every baseline, so a trial with essentially no data auto-confirmed by
+    default once MAX_TRIAL_DAYS passed -- silently making an unproven mutation
+    permanent."""
+    active_id = await store.bootstrap_active(
+        session,
+        kind="PROMPT",
+        key=_KEY,
+        value={"text": "baseline"},
+        created_by="bootstrap",
+        target_metric="idea_survival_rate",
+    )
+    await _seed_episodes(session, active_id, successes=40, failures=80)
+
+    trial_id = await store.insert_candidate(
+        session,
+        key=_KEY,
+        kind="PROMPT",
+        value={"text": "candidate"},
+        rationale="x" * 30,
+        created_by="agent:analyst",
+        parent_id=active_id,
+        target_metric="idea_survival_rate",
+    )
+    await store.promote_eligible_candidates(session, cooldown_hours=0, trial_days=MAX_TRIAL_DAYS)
+    await _backdate_trial_until(session, trial_id, days_ago=MAX_TRIAL_DAYS + 1)
+    # Only 2 episodes -- well under both min_n and _MIN_ABSOLUTE_N.
+    await _seed_episodes(session, trial_id, successes=2, failures=0)
+    await session.commit()
+    trial = await session.get(TunableParameter, trial_id)
+    assert trial is not None
+    await session.refresh(trial)
+
+    resolved = await _evaluate_one(session, trial)
+    await session.commit()
+
+    assert resolved is True
+    updated = await session.get(TunableParameter, trial_id)
+    assert updated is not None
+    assert updated.status == "retired"
+    assert updated.retired_reason is not None
+    assert "insufficient data" in updated.retired_reason
+    # The baseline stays active -- nothing was promoted on 2 episodes of evidence.
+    parent = await session.get(TunableParameter, active_id)
+    assert parent is not None
+    assert parent.status == "active"
+
+
+async def test_timed_out_trial_is_also_rolled_back_when_the_baseline_lacks_data(
+    session: AsyncSession,
+) -> None:
+    """The floor applies to both sides of the comparison -- a trial with plenty of
+    its own episodes still cannot be meaningfully judged against a baseline that
+    has almost none."""
+    active_id = await store.bootstrap_active(
+        session,
+        kind="PROMPT",
+        key=_KEY,
+        value={"text": "baseline"},
+        created_by="bootstrap",
+        target_metric="idea_survival_rate",
+    )
+    await _seed_episodes(session, active_id, successes=1, failures=0)  # 1 episode only
+
+    trial_id = await store.insert_candidate(
+        session,
+        key=_KEY,
+        kind="PROMPT",
+        value={"text": "candidate"},
+        rationale="x" * 30,
+        created_by="agent:analyst",
+        parent_id=active_id,
+        target_metric="idea_survival_rate",
+    )
+    await store.promote_eligible_candidates(session, cooldown_hours=0, trial_days=MAX_TRIAL_DAYS)
+    await _backdate_trial_until(session, trial_id, days_ago=MAX_TRIAL_DAYS + 1)
+    await _seed_episodes(session, trial_id, successes=20, failures=10)  # plenty on this side
+    await session.commit()
+    trial = await session.get(TunableParameter, trial_id)
+    assert trial is not None
+    await session.refresh(trial)
+
+    resolved = await _evaluate_one(session, trial)
+    await session.commit()
+
+    assert resolved is True
+    updated = await session.get(TunableParameter, trial_id)
+    assert updated is not None
+    assert updated.status == "retired"
+    assert "insufficient data" in (updated.retired_reason or "")
+
+
+async def test_timed_out_trial_at_exactly_the_absolute_floor_is_judged_normally(
+    session: AsyncSession,
+) -> None:
+    """At or above _MIN_ABSOLUTE_N on both sides, a timed-out trial is still judged
+    by Fisher's exact as before -- the floor only blocks judging on less than this."""
+    active_id = await store.bootstrap_active(
+        session,
+        kind="PROMPT",
+        key=_KEY,
+        value={"text": "baseline"},
+        created_by="bootstrap",
+        target_metric="idea_survival_rate",
+    )
+    await _seed_episodes(session, active_id, successes=_MIN_ABSOLUTE_N, failures=0)
+
+    trial_id = await store.insert_candidate(
+        session,
+        key=_KEY,
+        kind="PROMPT",
+        value={"text": "candidate"},
+        rationale="x" * 30,
+        created_by="agent:analyst",
+        parent_id=active_id,
+        target_metric="idea_survival_rate",
+    )
+    await store.promote_eligible_candidates(session, cooldown_hours=0, trial_days=MAX_TRIAL_DAYS)
+    await _backdate_trial_until(session, trial_id, days_ago=MAX_TRIAL_DAYS + 1)
+    await _seed_episodes(session, trial_id, successes=_MIN_ABSOLUTE_N, failures=0)
+    await session.commit()
+    trial = await session.get(TunableParameter, trial_id)
+    assert trial is not None
+    await session.refresh(trial)
+
+    resolved = await _evaluate_one(session, trial)
+    await session.commit()
+
+    assert resolved is True
+    updated = await session.get(TunableParameter, trial_id)
+    assert updated is not None
+    # Identical performance on both sides -- not a regression, so confirmed, and
+    # via the normal Fisher's-exact path (no "insufficient data" wording).
+    assert updated.status == "active"
+    assert updated.retired_reason is None

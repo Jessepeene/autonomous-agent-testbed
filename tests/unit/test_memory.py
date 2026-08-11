@@ -75,6 +75,32 @@ async def test_confidence_grows_with_reinforcement(memory_session: AsyncSession)
     assert row.confidence > 0.6
 
 
+async def test_facts_differing_only_in_a_number_are_not_merged(
+    memory_session: AsyncSession,
+) -> None:
+    """Regression test: the tokenizer only matched alphabetic tokens, so two facts
+    differing solely in a number hashed to identical token sets ({"timeout",
+    "seconds"} either way) and were treated as near-duplicates -- the newer,
+    corrected number never got stored at all, and the stale one could end up with
+    *higher* confidence than a real correction would have. With the number
+    included as its own token, the two sets share 2 of 4 tokens (jaccard 0.5),
+    correctly below the 0.6 reinforcement threshold."""
+    first = await memory.remember(
+        memory_session, content="Timeout is 40 seconds.", origin="test"
+    )
+    second = await memory.remember(
+        memory_session, content="Timeout is 60 seconds.", origin="test"
+    )
+    await memory_session.commit()
+
+    assert first is not None
+    assert second is not None
+    assert first != second
+    rows = (await memory_session.execute(select(Memory))).scalars().all()
+    assert len(rows) == 2
+    assert all(row.hits == 0 for row in rows)
+
+
 async def test_content_below_the_minimum_length_is_not_stored(
     memory_session: AsyncSession,
 ) -> None:
@@ -297,6 +323,12 @@ async def test_the_lowest_value_entries_are_the_ones_evicted(memory_session: Asy
 
 
 async def test_preference_memories_are_never_evicted(memory_session: AsyncSession) -> None:
+    """PREFERENCE rows are exempt from *both* eviction and the count that decides
+    how much eviction is needed -- max_per_scope bounds only the learned
+    (non-preference) population. A scope with one preference and one lesson, under
+    a budget of 1, needs no eviction at all: exactly one prunable row exists and
+    the budget allows one.
+    """
     preference = _memory(
         content="Operator preference: never contact leads at government domains",
         kind=memory.MemoryKind.PREFERENCE,
@@ -314,20 +346,46 @@ async def test_preference_memories_are_never_evicted(memory_session: AsyncSessio
     memory_session.add(lesson)
     await memory_session.commit()
 
-    # The preference scores worst of the two, yet must survive: with a budget of 1
-    # the *lesson* is evicted instead to bring the scope under budget, even though
-    # it scores far better on its own.
     report = await memory.prune(memory_session, max_per_scope=1)
     await memory_session.commit()
 
-    assert report.pruned == 1
+    assert report.pruned == 0
     still_there = await memory_session.get(Memory, preference.id)
     assert still_there is not None
     assert still_there.superseded_at is None
 
-    evicted_lesson = await memory_session.get(Memory, lesson.id)
-    assert evicted_lesson is not None
-    assert evicted_lesson.superseded_at is not None
+    lesson_row = await memory_session.get(Memory, lesson.id)
+    assert lesson_row is not None
+    assert lesson_row.superseded_at is None
+
+
+async def test_preferences_never_count_toward_the_prunable_budget(
+    memory_session: AsyncSession,
+) -> None:
+    """Regression test: overflow used to be computed against the *total* row count
+    (preferences included), so a scope with many preferences and few lessons could
+    compute an overflow larger than the number of prunable rows -- every lesson got
+    evicted trying to reach a budget that only the exempt preferences were pushing
+    it past, and the scope was left permanently over budget with nothing left to
+    prune. Preferences must not count toward the budget at all."""
+    for i in range(5):
+        memory_session.add(
+            _memory(
+                content=f"Operator preference number {i} about contact rules",
+                kind=memory.MemoryKind.PREFERENCE,
+            )
+        )
+    for i in range(3):
+        memory_session.add(_memory(content=f"lesson {i} about the checkout flow"))
+    await memory_session.commit()
+
+    # 5 preferences + 3 lessons = 8 total rows, well over a budget of 4 if
+    # preferences counted -- but only 3 rows are actually prunable, under budget.
+    report = await memory.prune(memory_session, max_per_scope=4)
+    await memory_session.commit()
+
+    assert report.pruned == 0
+    assert await memory.count(memory_session) == 8
 
 
 async def test_pruning_is_independent_per_scope(memory_session: AsyncSession) -> None:
@@ -344,6 +402,44 @@ async def test_pruning_is_independent_per_scope(memory_session: AsyncSession) ->
 
     assert report.scopes_checked == 2
     assert report.pruned == 1  # only the 5-row global scope exceeded the cap of 4
+
+
+async def test_a_verbose_high_value_memory_outranks_a_short_low_value_one(
+    memory_session: AsyncSession,
+) -> None:
+    """Regression test: dividing by raw content length let length dominate the
+    score completely (an 80x spread from a 20-2000 char range vs. value's own ~4x
+    spread), so a barely-informative short note could outscore a highly confident,
+    frequently-recalled, detailed lesson purely by being shorter -- the single most
+    valuable memory in a scope was the first one evicted."""
+    weak_but_short = _memory(
+        content="x" * 25,  # minimum-length filler, no real signal
+        confidence=0.2,
+        hits=0,
+        age_days=365,
+    )
+    strong_but_long = _memory(
+        content=(
+            "A detailed, hard-won lesson about exactly why the compliance assessor "
+            "rejected the last three fintech ideas, written out in full so the next "
+            "run does not have to rediscover it from scratch. " + ("detail " * 250)
+        )[: memory.MAX_MEMORY_CHARS],
+        confidence=1.0,
+        hits=50,
+        age_days=0,
+    )
+    memory_session.add(weak_but_short)
+    memory_session.add(strong_but_long)
+    await memory_session.commit()
+
+    report = await memory.prune(memory_session, max_per_scope=1)
+    await memory_session.commit()
+
+    assert report.pruned == 1
+    survivor = (
+        await memory_session.execute(select(Memory).where(Memory.superseded_at.is_(None)))
+    ).scalar_one()
+    assert survivor.id == strong_but_long.id
 
 
 async def test_pruning_never_hard_deletes(memory_session: AsyncSession) -> None:

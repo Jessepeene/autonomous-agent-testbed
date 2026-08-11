@@ -173,6 +173,70 @@ async def test_active_dev_count_drives_the_throttle(session: AsyncSession) -> No
     assert await repository.count_active_dev_tasks(session) == 0
 
 
+async def test_pending_dev_retries_counts_build_mvp_and_patch_for_active_products(
+    session: AsyncSession,
+) -> None:
+    """Regression coverage for the build-capacity deadlock: a pending BUILD_MVP or
+    PATCH_PRODUCT task whose product is already BUILDING/REVIEWING/PATCHING must be
+    recognised as a retry, not a fresh build -- the count that used to only look at
+    PATCH_PRODUCT missed a BUILD_MVP retry entirely (a BUILD_MVP that throws leaves
+    its product stuck BUILDING, never reset on failure)."""
+    from factory.state.schemas import ScoredIdea
+
+    def _idea(suffix: str) -> ScoredIdea:
+        # upsert_idea dedups on fingerprint(problem_statement, target_niche), not
+        # source_url -- target_niche must differ for these to be distinct ideas.
+        base = _scored_idea()
+        return base.model_copy(update={"target_niche": f"{base.target_niche} ({suffix})"})
+
+    idea_a = await repository.upsert_idea(session, _idea("a"))
+    idea_b = await repository.upsert_idea(session, _idea("b"))
+    assert idea_a is not None
+    assert idea_b is not None
+    stuck_building = await repository.create_product(session, name="Stuck", idea_id=idea_a)
+    stuck_patching = await repository.create_product(session, name="Patching", idea_id=idea_b)
+    idea_c = await repository.upsert_idea(session, _idea("c"))
+    assert idea_c is not None
+    not_yet_started = await repository.create_product(session, name="Fresh", idea_id=idea_c)
+
+    await repository.set_product_status(session, stuck_building, ProductStatus.BUILDING)
+    await repository.set_product_status(session, stuck_patching, ProductStatus.PATCHING)
+
+    assert await repository.count_pending_dev_retries(session) == 0
+
+    await repository.enqueue_task(
+        session,
+        kind=TaskKind.BUILD_MVP,
+        engine=EngineName.DEVELOPMENT,
+        idempotency_key="retry-build-1",
+        idea_id=idea_a,
+        product_id=stuck_building,
+    )
+    assert await repository.count_pending_dev_retries(session) == 1
+
+    await repository.enqueue_task(
+        session,
+        kind=TaskKind.PATCH_PRODUCT,
+        engine=EngineName.DEVELOPMENT,
+        idempotency_key="retry-patch-1",
+        idea_id=idea_b,
+        product_id=stuck_patching,
+    )
+    assert await repository.count_pending_dev_retries(session) == 2
+
+    # A BUILD_MVP for a product not yet in an active-dev status is a genuinely new
+    # build, not a retry -- must not be counted.
+    await repository.enqueue_task(
+        session,
+        kind=TaskKind.BUILD_MVP,
+        engine=EngineName.DEVELOPMENT,
+        idempotency_key="fresh-build-1",
+        idea_id=idea_c,
+        product_id=not_yet_started,
+    )
+    assert await repository.count_pending_dev_retries(session) == 2
+
+
 async def test_upsert_idea_persists_the_given_evidence_count(session: AsyncSession) -> None:
     idea_id = await repository.upsert_idea(session, _scored_idea(), evidence_count=7)
     assert idea_id is not None

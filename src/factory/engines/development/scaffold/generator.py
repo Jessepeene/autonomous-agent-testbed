@@ -277,21 +277,38 @@ def write_plan(plan: ScaffoldPlan, workspace: str, settings: Settings | None = N
     return written
 
 
+#: Shared by every reader of a generated workspace -- `read_workspace` (what Bug
+#: Council reviews) and `deploy._collect_files` (what actually ships) must exclude
+#: exactly the same directories, or something can ship that was never reviewed by
+#: anyone. `.deps`: where _verify_and_ship's install step puts dependencies (see
+#: graph.py) so they survive into the separate test-run container -- without this,
+#: Bug Council reviews third-party library source as if it were the model's own
+#: code (pytest/sqlalchemy/pydantic's legitimate internal eval()/exec()/shell=True
+#: usage tripped the privilege scanner and blocked every deploy). `.pytest_cache`:
+#: sorts early (dot-prefixed) and is pure post-test-run artifact, never source.
+WORKSPACE_SKIP_DIRS = frozenset(
+    {
+        ".git",
+        "__pycache__",
+        "node_modules",
+        ".venv",
+        "venv",
+        "dist",
+        "build",
+        ".deps",
+        ".pytest_cache",
+    }
+)
+
+
 def read_workspace(workspace: str, settings: Settings | None = None) -> dict[str, str]:
     """Read back the generated source for review. Skips binaries and vendored trees."""
     root = resolve_workspace(workspace, settings)
-    # .deps: where _verify_and_ship's install step puts dependencies (see graph.py)
-    # so they survive into the separate test-run container. Without this, Bug
-    # Council reviews third-party library source as if it were the model's own
-    # code -- observed live: pytest/sqlalchemy/pydantic's legitimate internal
-    # eval()/exec()/shell=True usage tripped the privilege scanner and blocked
-    # every deploy.
-    skip_dirs = {".git", "__pycache__", "node_modules", ".venv", "venv", "dist", "build", ".deps"}
     sources: dict[str, str] = {}
     for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
-        if any(part in skip_dirs for part in path.parts):
+        if any(part in WORKSPACE_SKIP_DIRS for part in path.parts):
             continue
         try:
             sources[str(path.relative_to(root))] = path.read_text(encoding="utf-8")

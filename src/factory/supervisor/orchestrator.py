@@ -32,7 +32,7 @@ from factory.logging import get_logger
 from factory.observability import costs
 from factory.settings import EngineName, TaskType
 from factory.state import repository
-from factory.state.schemas import InterruptReason, NextAction, OrchestratorDecision, TaskKind
+from factory.state.schemas import InterruptReason, NextAction, OrchestratorDecision
 from factory.supervisor import budget, routing
 from factory.supervisor.context import FactoryContext
 
@@ -114,10 +114,8 @@ async def build_snapshot(session: AsyncSession, ctx: FactoryContext) -> FactoryS
         ).scalar_one()
     )
 
-    pending_patch_tasks = (
-        await repository.count_pending_tasks(
-            session, EngineName.DEVELOPMENT, kind=TaskKind.PATCH_PRODUCT
-        )
+    pending_dev_retries = (
+        await repository.count_pending_dev_retries(session)
         if EngineName.DEVELOPMENT in ctx.enabled_engines
         else 0
     )
@@ -129,7 +127,7 @@ async def build_snapshot(session: AsyncSession, ctx: FactoryContext) -> FactoryS
         pending_by_engine=pending_by_engine,
         active_dev_products=await repository.count_active_dev_tasks(session),
         max_concurrent_builds=ctx.settings.max_concurrent_builds,
-        pending_patch_tasks=pending_patch_tasks,
+        pending_dev_retries=pending_dev_retries,
         approved_ideas_waiting=approved,
         pending_ideas=pending_ideas,
         open_interrupts=open_interrupts,
@@ -224,29 +222,31 @@ async def decide(session: AsyncSession, ctx: FactoryContext) -> OrchestratorDeci
     snapshot = await build_snapshot(session, ctx)
 
     if snapshot.dev_at_capacity:
-        # A pending patch/repair task belongs to a product *already* counted in
-        # active_dev_products -- claiming it doesn't admit a new product into the
-        # pipeline, so it must never be held back by this gate the way a fresh
-        # build_mvp is. Checked first, ahead of even Marketing: without this, a
-        # product stuck in PATCHING keeps dev_at_capacity true forever, which blocks
-        # the very patch task that would resolve PATCHING -- a permanent deadlock,
-        # observed live (two products stuck in PATCHING, their patch tasks sitting
-        # pending, HOLD_DISCOVERY repeating every tick indefinitely).
-        if snapshot.pending_patch_tasks > 0:
+        # A pending build/repair task for a product *already* counted in
+        # active_dev_products doesn't admit a new product into the pipeline, so it
+        # must never be held back by this gate the way a fresh build_mvp for a new
+        # product is. Checked first, ahead of even Marketing. Covers two shapes of
+        # the same deadlock: a product stuck in PATCHING (observed live -- two
+        # products stuck, their patch tasks pending, HOLD_DISCOVERY repeating every
+        # tick indefinitely), and a BUILD_MVP that threw partway through and left
+        # its product stuck in BUILDING (that status is set before the attempt and
+        # never reset on failure) with its retry sitting pending and just as
+        # invisible to a check that only ever counted PATCH_PRODUCT.
+        if snapshot.pending_dev_retries > 0:
             log.info(
                 "orchestrator.capacity_prefers_repair",
                 active=snapshot.active_dev_products,
                 capacity=snapshot.max_concurrent_builds,
-                pending_patch_tasks=snapshot.pending_patch_tasks,
+                pending_dev_retries=snapshot.pending_dev_retries,
             )
             return OrchestratorDecision(
                 next_action=NextAction.ROUTE,
                 target_engine=EngineName.DEVELOPMENT,
                 tool_call=None,
                 rationale=(
-                    "Development pipeline at capacity, but a queued repair belongs to "
-                    "a product already counted in that capacity -- fixing a live "
-                    "product outranks starting a new one."
+                    "Development pipeline at capacity, but a queued build/repair "
+                    "belongs to a product already counted in that capacity -- "
+                    "finishing a live product outranks starting a new one."
                 ),
             )
         # Distribution, not code generation, is the bottleneck: cycles freed by a

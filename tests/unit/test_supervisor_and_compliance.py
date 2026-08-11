@@ -39,7 +39,7 @@ def _snapshot(**overrides: Any) -> orchestrator.FactorySnapshot:
         "pending_by_engine": {"discovery": 5},
         "active_dev_products": 0,
         "max_concurrent_builds": 2,
-        "pending_patch_tasks": 0,
+        "pending_dev_retries": 0,
         "approved_ideas_waiting": 3,
         "pending_ideas": 10,
         "open_interrupts": 0,
@@ -154,7 +154,7 @@ async def test_a_pending_patch_task_routes_to_development_even_at_capacity(
             active_dev_products=2,
             max_concurrent_builds=2,
             pending_by_engine={"development": 1},
-            pending_patch_tasks=1,
+            pending_dev_retries=1,
         )
 
     monkeypatch.setattr(orchestrator, "build_snapshot", fake_snapshot)
@@ -175,7 +175,32 @@ async def test_a_pending_patch_task_outranks_marketing_at_capacity(
             active_dev_products=2,
             max_concurrent_builds=2,
             pending_by_engine={"development": 1, "marketing": 3},
-            pending_patch_tasks=1,
+            pending_dev_retries=1,
+        )
+
+    monkeypatch.setattr(orchestrator, "build_snapshot", fake_snapshot)
+    decision = await orchestrator.decide(None, ctx)  # type: ignore[arg-type]
+
+    assert decision.next_action is NextAction.ROUTE
+    assert decision.target_engine is EngineName.DEVELOPMENT
+
+
+async def test_a_retried_build_mvp_for_a_stuck_product_also_routes_at_capacity(
+    ctx: FactoryContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression test for the same deadlock, one task kind over: a BUILD_MVP that
+    threw partway through leaves its product stuck in BUILDING (never reset on
+    failure), and the old check only ever recognised PATCH_PRODUCT as a safe
+    retry -- a retried BUILD_MVP for that same already-counted product was
+    invisible to it, so two such products could permanently fill both capacity
+    slots with retries the gate would never claim."""
+
+    async def fake_snapshot(session: Any, context: Any) -> orchestrator.FactorySnapshot:
+        return _snapshot(
+            active_dev_products=2,
+            max_concurrent_builds=2,
+            pending_by_engine={"development": 1},
+            pending_dev_retries=1,
         )
 
     monkeypatch.setattr(orchestrator, "build_snapshot", fake_snapshot)

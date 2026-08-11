@@ -12,10 +12,12 @@ from dataclasses import dataclass, field
 
 import pytest
 
+from factory.engines.development import bug_council
+from factory.engines.development import deploy as deploy_module
 from factory.engines.development import graph as dev_graph
 from factory.sandbox.runner import DevOpsError, SandboxResult, is_devops_error
 from factory.state import repository
-from factory.state.schemas import ProductStatus
+from factory.state.schemas import CouncilResult, ProductStatus
 from factory.supervisor.context import FactoryContext
 
 # --- is_devops_error: the classifier ------------------------------------------
@@ -279,3 +281,132 @@ async def test_install_and_test_are_separate_containers_that_do_not_share_state(
     assert test_call["env"] == {"PYTHONPATH": "/workspace/.deps"}
     assert "/workspace/.deps/bin" in str(test_call["command"])
     assert "pytest -q" in str(test_call["command"])
+
+
+# --- Bug Council / deploy infra failures also route away from _heal() -----------
+
+
+def _passing_sandbox() -> _ScriptedSandbox:
+    return _ScriptedSandbox(
+        results=[
+            SandboxResult(exit_code=0, stdout="", stderr=""),  # install
+            SandboxResult(exit_code=0, stdout="5 passed", stderr=""),  # tests
+        ]
+    )
+
+
+async def test_council_unavailable_raises_devopserror_not_heal(
+    ctx: FactoryContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ctx.sandbox = _passing_sandbox()
+
+    async def fake_convene(*args: object, **kwargs: object) -> CouncilResult:
+        raise bug_council.CouncilUnavailable("3 reviewer(s) could not complete: 503; 503; 503")
+
+    heal_called = False
+
+    async def fake_heal(*args: object, **kwargs: object) -> str:
+        nonlocal heal_called
+        heal_called = True
+        return "should not be reached"
+
+    monkeypatch.setattr(bug_council, "convene", fake_convene)
+    monkeypatch.setattr(dev_graph, "_heal", fake_heal)
+
+    with pytest.raises(DevOpsError):
+        await dev_graph._verify_and_ship(
+            ctx,
+            None,  # type: ignore[arg-type]
+            product_id="prod-1",
+            product_name="Test Product",
+            workspace="product-1",
+            test_command="pytest -q",
+            idea_id="idea-1",
+        )
+
+    assert heal_called is False
+
+
+async def test_infra_deploy_failure_raises_devopserror_not_heal(
+    ctx: FactoryContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ctx.sandbox = _passing_sandbox()
+
+    async def fake_convene(*args: object, **kwargs: object) -> CouncilResult:
+        return CouncilResult(approved=True, verdicts=[])
+
+    async def fake_deploy(*args: object, **kwargs: object) -> deploy_module.DeployResult:
+        return deploy_module.DeployResult(
+            ok=False, url=None, detail="vercel returned 503", is_infra=True
+        )
+
+    heal_called = False
+
+    async def fake_heal(*args: object, **kwargs: object) -> str:
+        nonlocal heal_called
+        heal_called = True
+        return "should not be reached"
+
+    monkeypatch.setattr(bug_council, "convene", fake_convene)
+    monkeypatch.setattr(deploy_module, "deploy", fake_deploy)
+    monkeypatch.setattr(dev_graph, "_heal", fake_heal)
+
+    with pytest.raises(DevOpsError):
+        await dev_graph._verify_and_ship(
+            ctx,
+            None,  # type: ignore[arg-type]
+            product_id="prod-1",
+            product_name="Test Product",
+            workspace="product-1",
+            test_command="pytest -q",
+            idea_id="idea-1",
+        )
+
+    assert heal_called is False
+
+
+async def test_non_infra_deploy_failure_still_heals_as_before(
+    ctx: FactoryContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A genuinely malformed deploy payload (not infra) must still reach _heal() --
+    a different generation attempt might avoid it."""
+    ctx.sandbox = _passing_sandbox()
+
+    async def fake_convene(*args: object, **kwargs: object) -> CouncilResult:
+        return CouncilResult(approved=True, verdicts=[])
+
+    async def fake_deploy(*args: object, **kwargs: object) -> deploy_module.DeployResult:
+        return deploy_module.DeployResult(
+            ok=False, url=None, detail="workspace contained no deployable files", is_infra=False
+        )
+
+    healed_with: dict[str, object] = {}
+
+    async def fake_heal(
+        ctx: FactoryContext,
+        session: object,
+        product_id: str,
+        healing: str,
+        idea_id: str,
+        *,
+        category: str,
+    ) -> str:
+        healed_with["category"] = category
+        return "healed"
+
+    monkeypatch.setattr(bug_council, "convene", fake_convene)
+    monkeypatch.setattr(deploy_module, "deploy", fake_deploy)
+    monkeypatch.setattr(dev_graph, "_heal", fake_heal)
+
+    result = await dev_graph._verify_and_ship(
+        ctx,
+        None,  # type: ignore[arg-type]
+        product_id="prod-1",
+        product_name="Test Product",
+        workspace="product-1",
+        test_command="pytest -q",
+        idea_id="idea-1",
+    )
+
+    assert result == "healed"
+    assert healed_with["category"] == "deploy_failure"

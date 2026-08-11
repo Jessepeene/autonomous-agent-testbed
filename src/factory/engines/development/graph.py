@@ -430,7 +430,13 @@ async def _verify_and_ship(
         )
 
     sources = read_workspace(workspace, ctx.settings)
-    council = await bug_council.convene(ctx, sources, task_id=task_id)
+    try:
+        council = await bug_council.convene(ctx, sources, task_id=task_id)
+    except bug_council.CouncilUnavailable as exc:
+        # A reviewer that could not run rendered no verdict on the code at all --
+        # never route this into a heal cycle, which would spend an LLM call
+        # regenerating code that was never actually found bad, or even reviewed.
+        raise DevOpsError(f"Bug Council could not complete review: {exc}") from exc
     if not council.approved:
         healing = council.healing
         summary = healing.summary if healing else "Bug Council rejected the build."
@@ -453,6 +459,12 @@ async def _verify_and_ship(
         settings=ctx.settings,
         dry_run=ctx.dry_run,
     )
+    if not result.ok and result.is_infra:
+        # A transport error, missing credential, auth/rate-limit problem, or 5xx
+        # from Vercel is never the fault of the generated code -- regenerating it
+        # cannot fix an outage. Route to the same devops-escalation path as a
+        # sandbox infra failure instead of spending a heal cycle on it.
+        raise DevOpsError(f"Deployment failed with an infrastructure error: {result.detail}")
     if not result.ok:
         return await _heal(
             ctx,

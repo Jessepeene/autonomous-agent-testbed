@@ -13,7 +13,7 @@ mechanism entirely.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,13 +35,28 @@ MIN_TRIAL_N: dict[str, int] = {
     "planner_effective_rate": 30,
     "outreach_content_pass_rate": 100,
     "outreach_conversion_rate": 200,
-    # Every approved idea now generates exactly one validation episode, so this
-    # reaches useful n faster than outreach's per-send metrics -- but still
-    # lower-volume than idea/planner episodes (one per discriminated idea/lead),
-    # hence its own, intermediate threshold rather than reusing 30.
-    "landing_page_interest_rate": 20,
+    # One episode per validated product (development/graph.py::_evaluate_validation),
+    # gated behind a human campaign-approval wait and max_concurrent_validations --
+    # a realistic ceiling within MAX_TRIAL_DAYS is roughly 6-8, not the 20 this was
+    # originally set to (which made this metric's trials always resolve via the
+    # age timeout below, never via genuine volume). Lowered so a higher-volume
+    # period has a real chance to resolve on evidence; _MIN_ABSOLUTE_N is what
+    # actually protects against judging on too little data either way.
+    "landing_page_interest_rate": 10,
 }
 _DEFAULT_MIN_N = 30
+
+#: Below this, even a timed-out trial is not judged on its numbers -- it is rolled
+#: back as "insufficient data," never confirmed. Without this floor, a trial that
+#: simply never accumulated meaningful volume (0-3 episodes is common for a
+#: low-traffic metric like landing_page_interest_rate) would still reach the
+#: MAX_TRIAL_DAYS branch below and get judged by Fisher's exact anyway --
+#: `fisher_exact_less(0, 0, base_s, base_f)` is 1.0 for every baseline, so a trial
+#: with literally zero episodes auto-*confirms* by default, silently making an
+#: unproven mutation permanent. Applies to both the trial's own total and (in the
+#: has-baseline path) the baseline's total: a comparison against a baseline with
+#: too little data of its own is equally meaningless.
+_MIN_ABSOLUTE_N = 5
 
 #: A trial is judged once it has enough episodes, or once it has run this long
 #: regardless of volume — a key that simply doesn't get much traffic must not stay on
@@ -56,16 +71,20 @@ ROLLBACK_ALPHA = 0.05
 #: rows) to actually be noticed before anything goes live.
 PROMOTION_COOLDOWN_HOURS = 48
 
-#: How long a trial runs before being judged on volume alone (see MAX_TRIAL_DAYS).
-TRIAL_DAYS = 14
-
 
 async def promote_and_evaluate(session: AsyncSession) -> str:
     """The one entry point the maintenance job calls: promote at most one eligible
     candidate to trial, then judge every trial currently running (in practice, at
     most one — the one-trial-at-a-time serialization rule)."""
+    # trial_days=MAX_TRIAL_DAYS: a separate, shorter TRIAL_DAYS constant used to
+    # live here (14, vs. this module's real cutoff of 30) and was written to
+    # `trial.trial_until` but never actually read by _evaluate_one below, which
+    # computed its own age independently from `trial_started_at` -- the column
+    # and the docstring both described a 14-day cutoff that didn't exist. Now the
+    # single source of truth: this call sets trial_until, and _evaluate_one reads
+    # it back, so there is exactly one place the trial length is defined.
     promoted = await store.promote_eligible_candidates(
-        session, cooldown_hours=PROMOTION_COOLDOWN_HOURS, trial_days=TRIAL_DAYS
+        session, cooldown_hours=PROMOTION_COOLDOWN_HOURS, trial_days=MAX_TRIAL_DAYS
     )
     resolved = 0
     for trial in await store.list_trials(session):
@@ -79,19 +98,47 @@ async def _evaluate_one(session: AsyncSession, trial: TunableParameter) -> bool:
     successes, total = await store.episode_counts(session, trial.id)
     min_n = MIN_TRIAL_N.get(trial.target_metric, _DEFAULT_MIN_N)
 
-    started = trial.trial_started_at or datetime.now(UTC)
-    age_days = (datetime.now(UTC) - started).days
-    if total < min_n and age_days < MAX_TRIAL_DAYS:
+    # trial_until is the single source of truth for when volume-based patience runs
+    # out (set by promote_eligible_candidates as trial_started_at + MAX_TRIAL_DAYS);
+    # falling back to recomputing from trial_started_at only covers a row written
+    # before this field existed.
+    now = datetime.now(UTC)
+    deadline = trial.trial_until or (
+        (trial.trial_started_at or now) + timedelta(days=MAX_TRIAL_DAYS)
+    )
+    if total < min_n and now < deadline:
         return False  # still collecting
 
     baseline = await session.get(TunableParameter, trial.parent_id) if trial.parent_id else None
     if baseline is None:
-        # First-ever version for this key — nothing to compare against.
+        # First-ever version for this key — nothing to compare against, so there is
+        # no "insufficient data" rollback target either; confirming is the only
+        # outcome that keeps the key functional. (Unlike the has-baseline path
+        # below, this is not the case the near-zero-episode auto-confirm bug
+        # applies to -- there is no comparison being made here at all.)
         await store.confirm_trial(session, trial.id, numerator=successes, denominator=total)
         log.info("learning.trial_confirmed_no_baseline", key=trial.key)
         return True
 
     base_successes, base_total = await store.episode_counts(session, baseline.id, limit=200)
+    if total < _MIN_ABSOLUTE_N or base_total < _MIN_ABSOLUTE_N:
+        # Timed out with too little data on either side to draw any real
+        # conclusion -- the safe default is to revert to the known-good baseline,
+        # not to let an unproven mutation quietly become permanent.
+        await store.rollback_trial(
+            session,
+            trial.id,
+            numerator=successes,
+            denominator=total,
+            reason=(
+                f"insufficient data after {MAX_TRIAL_DAYS}d: {successes}/{total} vs. "
+                f"baseline {base_successes}/{base_total} on {trial.target_metric} "
+                f"(minimum {_MIN_ABSOLUTE_N} required on both sides)"
+            ),
+        )
+        log.info("learning.trial_rolled_back_insufficient_data", key=trial.key, total=total)
+        return True
+
     p_value = fisher_exact_less(
         successes, total - successes, base_successes, base_total - base_successes
     )

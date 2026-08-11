@@ -114,8 +114,13 @@ async def test_council_approves_when_every_reviewer_approves(ctx: FactoryContext
     assert result.healing is None
 
 
-async def test_failed_reviewer_blocks_the_deploy(ctx: FactoryContext) -> None:
-    """A review that could not run has not approved anything.
+async def test_failed_reviewer_raises_council_unavailable_not_a_rejection(
+    ctx: FactoryContext,
+) -> None:
+    """A review that could not run is not a verdict on the code -- it must never be
+    silently folded into `approved=False` (which would spend a heal cycle
+    regenerating code that was never actually reviewed). It raises instead, so the
+    caller can route it like any other infrastructure failure.
 
     Every model reviewer is made to fail (3 retries each) so the assertion does not
     depend on which concurrent reviewer happens to pop which queued response.
@@ -127,12 +132,8 @@ async def test_failed_reviewer_blocks_the_deploy(ctx: FactoryContext) -> None:
     ]
     anthropic_fake.register(ReviewVerdict, *outage)
 
-    result = await bug_council.convene(ctx, CLEAN_SOURCES)
-    assert result.approved is False
-    assert result.healing is not None
-    assert all(
-        not v.approved for v in result.verdicts if v.category in bug_council.REVIEWER_PROMPTS
-    )
+    with pytest.raises(bug_council.CouncilUnavailable):
+        await bug_council.convene(ctx, CLEAN_SOURCES)
 
 
 async def test_empty_build_is_rejected(ctx: FactoryContext) -> None:
@@ -224,6 +225,48 @@ def test_review_corpus_wraps_the_rendered_sources() -> None:
     assert corpus.startswith("The complete codebase under review follows.")
     assert "print(1)" in corpus
     assert corpus.endswith("Your specific review mandate follows.")
+
+
+# --- honest truncation, not a silent drop -----------------------------------
+
+
+def test_render_sources_reports_no_truncation_when_everything_fits() -> None:
+    rendered, truncated = bug_council.render_sources({"app.py": "print(1)\n"})
+    assert truncated is False
+    assert "TRUNCATED" not in rendered
+
+
+def test_render_sources_marks_truncation_and_names_the_dropped_files() -> None:
+    sources = {"a.py": "x" * 40, "b.py": "y" * 40, "c.py": "z" * 40}
+    rendered, truncated = bug_council.render_sources(sources, limit=50)
+
+    assert truncated is True
+    assert "TRUNCATED" in rendered
+    # b.py was cut mid-content, c.py was never reached at all -- both named.
+    assert "b.py" in rendered.split("TRUNCATED")[-1]
+    assert "c.py" in rendered.split("TRUNCATED")[-1]
+
+
+def test_review_corpus_never_claims_completeness_when_truncated() -> None:
+    corpus = bug_council.review_corpus("--- app.py ---\nprint(1)\n", truncated=True)
+    assert "complete codebase" not in corpus.lower()
+    assert "too large to show in full" in corpus
+    assert "withhold approval" in corpus
+
+
+async def test_convene_logs_when_the_corpus_is_truncated(
+    ctx: FactoryContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(bug_council, "_MAX_REVIEW_CHARS", 10)
+    anthropic_fake = _anthropic_of(ctx)
+    for category in bug_council.REVIEWER_PROMPTS:
+        anthropic_fake.register(ReviewVerdict, _approving(category))
+
+    result = await bug_council.convene(ctx, {"app.py": "x" * 1000}, task_id=None)
+
+    assert result.approved is True  # reviewers still ran; this only checks it didn't crash
+    calls = anthropic_fake.calls
+    assert any("TRUNCATED" in str(call.get("cache_prefix", "")) for call in calls)
 
 
 async def test_the_corpus_is_not_in_the_prompt_it_is_the_cache_prefix(
