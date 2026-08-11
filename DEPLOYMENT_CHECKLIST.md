@@ -1740,3 +1740,71 @@ Postgres), migration `0013` applies cleanly.
 `git archive HEAD`, migration `0013` applied to the live database *before* the
 restart, image rebuilt, service restarted. `/health` reports `ok`, all six
 engines enabled, `alembic current` is `0013_ab_tests (head)`, boot log clean.
+
+## Pre-launch validation plan, Phase 5 — growth roles + channel discovery — 2026-08-11
+
+Fifth phase of the 7-phase pre-launch plan, expanded mid-plan by explicit
+direction: "the thing about this project/system was that it should act like
+a dev/growth team... even if there's other growth opportunities, think
+reddit/forums anything of the like the orchestrator should be able to find
+them, use them, test them and learn from them." Two new Orchestrator-
+catalogued roles, both reusing the existing `AgentRole`/`SPAWN_AGENT`
+mechanism rather than a new scheduling system — the direct answer to
+"the orchestrator should have freedom to call this."
+
+**`GROWTH_ANALYST`** reads one product's traffic/conversion/AB-test state
+(new `growth_read` tool category) and decides whether to start a live AB
+test or request a growth-motivated SEO pass (new `growth_actions` category)
+— or take no action, a legitimate outcome most weeks for most products.
+Self-sufficient when spawned without a named product (`list_products_
+needing_growth_review`), so the Orchestrator's own ad hoc SPAWN_AGENT choice
+works exactly like the periodic backstop.
+
+**`SEO_OPTIMIZER`** is workspace-scoped (excluded from `role_catalogue()`,
+same precedent as `WORKSPACE_SURGEON`) and carries out the requested edit
+through the *existing* surgical-repair machinery — `development/graph.py`'s
+`_patch` pipeline gained a `growth_seo` category rather than new agent-
+runtime plumbing. Two correctness properties a naive reuse would have
+gotten wrong, both handled explicitly: a discretionary pass that is not
+safe to attempt right now (no Docker, heal budget exhausted) is skipped
+outright and must never fall through to a full regeneration the way every
+other category correctly does; and a declined edit must never touch
+`heal_attempts` or enter the `_heal()` escalation ladder — both are correct
+for a real build failure and wrong for an optional optimisation that simply
+did not pan out (would silently shrink the budget a future real bug fix
+gets, and could eventually page a human about what was only ever a
+declined SEO experiment).
+
+**`CHANNEL_SCOUT`** researches real, specific communities (the existing
+`http_get` tool against public search endpoints — no new tool needed for
+Reddit's own public search JSON) and drafts genuine, non-promotional
+content for the strongest candidate. Proposing one raises a mandatory
+human-approval interrupt (new `InterruptReason.CHANNEL_APPROVAL`, the same
+poll-based pattern as `CampaignApproval`, deliberately a *separate* pattern
+from platform-posting risk — bans, reputational damage — which is a
+different kind of judgement than GDPR-gated cold email). Real posting stays
+a human action; the factory never posts to an external platform
+automatically. New `channel_experiments` table tracks the lifecycle
+(proposed → approved/rejected → concluded); an approved proposal is
+measured later, best-effort, via `page_views.referrer`, and the outcome is
+written to memory so the next proposal for that product reads it back.
+
+**A real design bug caught by this phase's own tests, not shipped**: the
+periodic backstop sweeps initially treated a never-reviewed/never-scouted
+product as infinitely overdue, so a product that had just gone live would
+immediately compete with `HARVEST_LEADS` for the same tick's `MARKETING`
+capacity — three pre-existing scheduler tests caught this immediately.
+Fixed by measuring a never-reviewed product's staleness from its own
+`created_at` (`COALESCE(last_growth_review_at, created_at)`) instead of
+treating `NULL` as maximally stale — reviewing a day-old product with no
+traffic data yet is also pure waste on its own terms, not just a test-
+compatibility fix.
+
+**Verified**: 652 unit + 174 integration tests green on Linux (scratch
+Postgres), migration `0014` applies cleanly.
+
+**Deployed live** (2026-08-11): committed (`4f368ab`), transferred via
+`git archive HEAD`, migration `0014` applied to the live database *before*
+the restart, image rebuilt, service restarted. `/health` reports `ok`, all
+six engines enabled, `alembic current` is `0014_growth_roles (head)`, boot
+log clean.
