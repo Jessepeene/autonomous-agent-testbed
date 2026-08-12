@@ -36,7 +36,7 @@ from factory.observability import costs
 from factory.sandbox.runner import DevOpsError, SandboxUnavailable, is_devops_error
 from factory.settings import EngineName
 from factory.state import repository
-from factory.state.orm import ABTest, Idea, Product, Task
+from factory.state.orm import ABTest, Idea, Product, Task, new_id
 from factory.state.schemas import (
     InterruptReason,
     ProductStatus,
@@ -1102,11 +1102,21 @@ async def _heal(
             scope=memory_store.scope_for(engine=EngineName.DEVELOPMENT),
             origin="development:heal_exhausted",
         )
+        display_name = product.name if product else product_id
+        # A short, fresh id suffix -- not `product_id` alone -- so a product that
+        # heals successfully (heal_attempts resets to 0 on success, see below) and
+        # later exhausts its budget again on a different bug gets a subject that
+        # doesn't collide with the first escalation's now-resolved row. Same
+        # precedent as `propose_channel`'s `experiment_id[:8]`, `interrupts.py`'s
+        # own subject-collapse-by-(reason, subject, status) uniqueness otherwise
+        # blocks the *second* one from ever reaching 'resolved' -- found live,
+        # see DEPLOYMENT_CHECKLIST.md.
         await interrupts.request(
             session,
-            reason=InterruptReason.LEGAL_UNCERTAINTY,
-            subject=f"Product {product_id} failed {MAX_HEAL_CYCLES} heal cycles",
+            reason=InterruptReason.HEAL_EXHAUSTED,
+            subject=f"{display_name[:80]} needs help ({new_id()[:8]})",
             detail=(
+                f"Product: {display_name} ({product_id})\n\n"
                 "Automated repair did not converge. The last blocking feedback was:\n\n"
                 f"{healing[:2000]}\n\n"
                 "Reply with guidance, or REJECT to retire this product."

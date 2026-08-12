@@ -141,6 +141,13 @@ class InterruptReason(StrEnum):
     #: discovery weeks later by someone noticing a number looks off. See
     #: supervisor/audit.py.
     DATA_INTEGRITY = "data_integrity"
+    #: A product failed `MAX_HEAL_CYCLES` repair attempts and needs a human's
+    #: guidance or a decision to retire it. Previously raised under
+    #: LEGAL_UNCERTAINTY, which is what a human actually saw in the Telegram
+    #: `[LEGAL_UNCERTAINTY]` prefix for what is a technical repair failure, not a
+    #: legal question -- confusing enough on its own to be worth a real reason.
+    #: See development/graph.py::_heal.
+    HEAL_EXHAUSTED = "heal_exhausted"
 
 
 class ComplianceStatus(StrEnum):

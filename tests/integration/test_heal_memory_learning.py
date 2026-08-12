@@ -36,8 +36,8 @@ from factory.memory.store import scopes_for
 from factory.sandbox.disabled import DisabledSandbox
 from factory.settings import EngineName, Settings
 from factory.state import repository
-from factory.state.orm import Base, Memory, Product, Task
-from factory.state.schemas import ScoredIdea
+from factory.state.orm import Base, Interrupt, Memory, Product, Task
+from factory.state.schemas import InterruptReason, ScoredIdea
 from factory.supervisor.context import FactoryContext
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -200,6 +200,74 @@ async def test_exhausting_the_heal_budget_also_writes_an_engine_scoped_memory(
     )
     assert len(engine_rows) == 1
     assert "exhausted" in engine_rows[0].content
+
+
+async def test_heal_exhaustion_escalation_names_the_product_with_the_right_reason(
+    session: AsyncSession, tmp_path: Path, blacklist_file: Path
+) -> None:
+    """Regression: this used to read `Product {product_id} failed 3 heal cycles`
+    under `LEGAL_UNCERTAINTY` -- a bare hex id and a Telegram `[LEGAL_UNCERTAINTY]`
+    prefix on what is a technical repair failure, not a legal question."""
+    ctx = _ctx(tmp_path=tmp_path, blacklist_path=blacklist_file)
+    product_id, idea_id = await _make_product(session, "heal-memory-name-check")
+
+    for _ in range(dev_graph.MAX_HEAL_CYCLES):
+        await dev_graph._heal(
+            ctx, session, product_id, "same devops-adjacent failure", idea_id, category="x"
+        )
+
+    row = (
+        (await session.execute(select(Interrupt).where(Interrupt.product_id == product_id)))
+        .scalars()
+        .one()
+    )
+    assert row.reason == InterruptReason.HEAL_EXHAUSTED.value
+    assert "heal-memory-name-check" in row.subject
+    assert product_id not in row.subject  # readable subject, id kept out of it
+    assert product_id in row.detail  # but still traceable from the detail body
+
+
+async def test_two_separate_exhaustions_for_the_same_product_do_not_collide(
+    session: AsyncSession, tmp_path: Path, blacklist_file: Path
+) -> None:
+    """Regression: two escalations for the same product used to share an identical
+    subject (`Product {id} failed 3 heal cycles`, no per-instance uniqueness) --
+    resolving the first blocked the second from *ever* resolving, permanently,
+    via `uq_interrupts_open_subject` -- found live, not caught by any test."""
+    ctx = _ctx(tmp_path=tmp_path, blacklist_path=blacklist_file)
+    product_id, idea_id = await _make_product(session, "heal-memory-collision-check")
+
+    for _ in range(dev_graph.MAX_HEAL_CYCLES):
+        await dev_graph._heal(ctx, session, product_id, "first failure", idea_id, category="x")
+    first = (
+        (await session.execute(select(Interrupt).where(Interrupt.product_id == product_id)))
+        .scalars()
+        .one()
+    )
+    await repository.resolve_interrupt(session, first.id, "guidance for one more try")
+
+    # heal_attempts does not reset on escalation (only on a genuine success), so one
+    # more call immediately re-exhausts -- matches what actually happened live
+    # (a failed guided-patch retry re-escalating right away).
+    await dev_graph._heal(ctx, session, product_id, "second failure", idea_id, category="x")
+    open_rows = (
+        (
+            await session.execute(
+                select(Interrupt).where(
+                    Interrupt.product_id == product_id, Interrupt.status == "open"
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(open_rows) == 1
+    second = open_rows[0]
+    assert second.id != first.id
+    assert second.subject != first.subject
+
+    # The real regression: this must not raise a unique-constraint violation.
+    await repository.resolve_interrupt(session, second.id, "REJECT")
 
 
 async def test_patch_recalls_the_products_own_heal_history_into_its_prompt(
