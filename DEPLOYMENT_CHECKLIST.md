@@ -2200,3 +2200,70 @@ LLM call, by construction.
 image rebuilt, service restarted (no migration step needed). `/health` reports
 `ok`, all six engines enabled, boot log clean; `audit-snapshot-integrity`
 visibly enqueued on the very first tick after restart.
+
+## The seeded product's build failure, root-caused and fixed live — 2026-08-12
+
+The seeded idea from the section above hit heal-cycle exhaustion for real:
+`"No module named pytest"`. Root cause: both staging fixtures
+(`llm/providers/staging.py`) listed only what their own test files *import*
+(fastapi/httpx/stripe) in `requirements.txt`, never `pytest` itself — and the
+sandbox installs nothing beyond that file. Invisible until now because (a)
+the e2e test's sandbox is a scripted always-passing fake that never actually
+runs pip/pytest, and (b) this file's own real-pytest-run unit test
+deliberately runs against the ambient dev venv rather than an isolated
+install, specifically to avoid corrupting the shared venv (a previous version
+of that test did exactly that and downgraded `stripe`, breaking an unrelated
+test — see its own docstring). First real live exercise of the staging
+harness against a genuinely bare, isolated sandbox; first time this gap could
+have shown up. Fixed (`f933bea`): added `pytest` to both fixtures'
+`requirements.txt`, hardened the real (non-staging) generator prompts with
+the same explicit requirement as defense in depth, and added a deterministic
+regression test asserting both fixtures list it, with no subprocess/venv side
+effects. **Verified**: 673 unit tests green on Linux (`.env`-free scratch
+copy — bind-mounting `/opt/superagent` directly for a quick check first
+reproduced the *other* documented hazard, live `.env` leaking into `Settings`
+defaults and failing 23 unrelated tests; redone correctly against
+`/opt/scratch-test`). Deployed: image rebuilt, service restarted, `/health`
+clean.
+
+**A second, separate finding while retrying the stuck product**: a guided
+retry (`enqueue_guided_patch`) always routes to *surgical* repair
+(`SURGICAL_CATEGORIES` includes `"guided"` unconditionally, never falls back
+to full regeneration). Surgical repair edits a workspace via a real
+tool-calling agent loop (`.converse()`); the mocked `StagingCodeProvider`
+never makes real tool calls. So **no guided/surgical heal cycle can ever
+succeed while `STAGING_MOCK_EXPENSIVE_CALLS` is on** — confirmed live
+("A surgical repair attempt was rejected: the agent changed nothing"),
+regardless of what the underlying bug is or how good the guidance text is.
+Only a fresh full regeneration (a new `BUILD_MVP`/`BUILD_LANDING_PAGE`, not a
+patch) can pick up a fixture fix. Not fixed this pass — flagged as a real
+gap in the staging harness worth a decision: either exclude surgical repair
+from being attempted under staging mode (fail fast to a clean rebuild
+instead), or teach `StagingCodeProvider` to handle a minimal real edit for
+recognized failure signatures. Worked around this time by retiring the stuck
+product (`repository.retire_product`, the real function) and reseeding fresh.
+
+**Getting a product through to `validating`, for real, took three attempts** —
+and every rejection was Compliance actually doing its job, not noise. Attempt
+1 (a tutoring-notes idea) was flagged, correctly: storing lesson
+notes/progress for students who may be minors is a real data-protection
+question, not something to wave through for a test — rejected rather than
+overridden. Attempt 2 (bookkeeping across multiple clients' QuickBooks/Xero
+accounts) was also flagged, also correctly reasoned: transaction data can
+carry customer/vendor PII, real GDPR data-processor liability. Approved this
+one deliberately, as a human-standing-in judgement call specific to this
+being a synthetic test with zero real people or real data involved (dry run
+throughout) — a call that would not be made the same way for a real idea, and
+said so explicitly in the interrupt's resolution text rather than approving
+silently.
+
+**Result**: a real product now sits in `validating` with a real (staging-
+fixture) landing page deployed (`dry-run://product-e8d273d6ebcf`), and a real
+`harvest_leads` task ran against it. Also surfaced a real, live, external
+blocker there: `LEAD_SCOUT` planned a real search (6 titles, 0 domains — this
+niche has no discoverable company domains to search by) and the Apollo call
+came back `403`. `HUNTER_API_KEY` is also configured but was not queried
+(the plan had no domains, which is Hunter's own lookup key) — worth checking
+the Apollo account itself (key validity/plan/credits) if seeing real leads
+flow matters for the rest of this observation window; not a code bug, nothing
+fixed here.
