@@ -2267,3 +2267,52 @@ came back `403`. `HUNTER_API_KEY` is also configured but was not queried
 the Apollo account itself (key validity/plan/credits) if seeing real leads
 flow matters for the rest of this observation window; not a code bug, nothing
 fixed here.
+
+## Heal-exhaustion escalations: readable subject, correct reason — 2026-08-12
+
+Caught live, trying to clean up the stale interrupt from the section above:
+resolving it threw `UniqueViolationError` on `uq_interrupts_open_subject`.
+Root cause: `_heal()`'s escalation subject was `Product {product_id} failed
+{N} heal cycles` — keyed only by product id, no per-instance uniqueness. The
+first heal-exhaustion for a product resolves fine; if that same product ever
+exhausts its heal budget a *second* time (a failed guided-patch retry
+re-escalating, or a genuinely new bug later in its life), the second
+escalation's subject is byte-identical to the first's, and the moment anyone
+tries to resolve it, it collides with the already-resolved first row on
+`(reason, subject, status)` — forever. `CHANNEL_SCOUT`'s `propose_channel`
+already guards against exactly this class of collision (`experiment_id[:8]`
+in its subject); the heal-exhaustion path never got the same treatment.
+
+Separately: the reason was `InterruptReason.LEGAL_UNCERTAINTY` — so the
+Telegram message you were reading during this exchange showed
+`[LEGAL_UNCERTAINTY]` on top of "No module named pytest," a purely technical
+repair failure with nothing to do with legal review. Confusing on its own,
+independent of the collision bug.
+
+Fixed both (`ee21e4f`): added a dedicated `InterruptReason.HEAL_EXHAUSTED`;
+subject is now the product's real name plus a short fresh id suffix (e.g.
+`"Freelance bookkeepers... (a1b2c3d4)"`), with the full `product_id` moved
+into the detail body so it stays traceable. `collect_replies`'s reply routing
+for this escalation shape keys on `(product_id set, task_id unset)`, not on
+the reason value, so this changes nothing about how a reply is handled.
+
+**The one stuck interrupt this was found while cleaning up** (`#2406ca12`,
+from the retired product two sections up) is still sitting open — the raw
+`DELETE` needed to remove it was blocked by the permission classifier, and
+per your decision this pass prioritised the code fix over pushing that
+through. Harmless: already delivered, won't be reminded for
+`stale_interrupt_reminder_hours` (12h default), and it points at a product
+that no longer does anything. Safe to leave, or delete by hand later.
+
+**Verified**: 673 unit + 208 integration tests green on Linux (scratch
+Postgres), no new migration (`InterruptReason` has no DB-level constraint,
+just an application enum). New coverage in
+`tests/integration/test_heal_memory_learning.py`: the escalation carries the
+product's name and the new reason (not the raw id in the subject); two
+separate exhaustions for the same product produce different subjects and
+both `resolve_interrupt` calls succeed — the second used to raise exactly
+the `UniqueViolationError` hit live.
+
+**Deployed live**: committed, transferred via `git archive HEAD`, image
+rebuilt, service restarted (no migration step). `/health` reports `ok`, all
+six engines enabled, boot log clean.
