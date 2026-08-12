@@ -2116,3 +2116,87 @@ migration `0016` applied to the live database *before* the restart (confirmed
 via `alembic current`), image rebuilt, service restarted. `/health` reports
 `ok`, all six engines enabled, boot log clean, no errors in the minutes
 following restart.
+
+## Manually seeding a test idea, and one round of "what would a human team catch that this one can't" — 2026-08-12
+
+With the database empty after the reset and 14 Discovery cycles producing zero
+survivors, manually seeded one realistic idea straight into `ideas` (status
+`pending`, real `ScoredIdea` fields, source URL deliberately a clearly-fake
+`example.test` domain so it's never mistaken for real evidence) and enqueued
+its `ASSESS_COMPLIANCE` task directly — bypassing only the discovery-search
+step. Everything after that (Compliance, Validation build via the staging
+harness, going LIVE, lead harvest, outreach composition + approval, growth
+review) runs through the real, unmodified pipeline. Confirmed both
+`FACTORY_DRY_RUN=1` and `STAGING_MOCK_EXPENSIVE_CALLS=1` were still set first,
+so this exercises real code without spending on the Anthropic API.
+
+**A live demonstration of exactly the blind spot discussed below**: the
+background watcher left running since the earlier reset (polls for the first
+real idea, then reverts the fast Discovery cadence) fired on the seeded idea
+and restarted the factory service right as Compliance had just claimed its
+task — a genuine crash-mid-task case. The task sat `claimed` with a dead
+lease-holder; `reclaim_expired_leases()` is designed to recover this
+automatically within `task_lease_seconds` (900s), which is the kind of thing
+worth confirming actually happened rather than assuming.
+
+**Confirmed along the way, reading the real code rather than assuming**:
+analytics (Phase 2, `page_views`/`validation_signals`, read by
+`GROWTH_ANALYST`) and outreach (real per-lead LLM-composed copy, stored in
+`OutreachLog` regardless of send outcome, gated behind a mandatory human
+`CampaignApproval` and separately stubbed at the SMTP layer by
+`FACTORY_DRY_RUN`) are both real, already-built capabilities — just nothing
+had reached them yet. Also confirmed a real, honest gap: no scroll-depth or
+time-on-page data exists (`PageView` is pageview-on-load only, no unload/
+visibility-based beacon), and no path exists for `GROWTH_ANALYST` or anyone
+else to call a third-party analytics API (GA4, Clarity) — the self-hosted
+beacon was a deliberate choice over that, documented as a non-goal to revisit
+only if the self-hosted data proves insufficient. Neither built yet; flagged,
+not assumed.
+
+**The team-setup discussion that followed** turned up a concrete, generalizable
+gap: the learning loop (prompt/weight trials, `learning/trials.py`) tunes
+*within* a fixed measurement framework — it has no way to audit whether the
+framework itself is trustworthy. `approved_ideas_waiting`'s bug was exactly
+that shape: not a value the learning loop could have flagged as underperforming,
+but a silently-trusted assumption (every approved idea has a product) that no
+statistical trial could ever surface, because the bug lived one level below
+anything the learning loop's outcome-tracking looks at.
+
+### `audit-snapshot-integrity` — closing that gap for the one concrete instance found so far
+
+A new, fully deterministic (no LLM call) maintenance item, same family as
+`prune-memory`/`remind-stale-interrupts`
+(`engines/maintenance.py`/`supervisor/backlog.py`, `cadence_hours=24`). New
+module `supervisor/audit.py`: `check_approved_idea_orphans()` runs a
+genuinely different query than `build_snapshot`'s — an OUTER JOIN from `Idea`
+looking for approved ideas with *no* product row at all, rather than the
+INNER JOIN the live metric uses — so a future regression of the same shape
+(the "Compliance always creates a product" guarantee silently breaking again)
+gets caught by an independent check instead of just quietly undercounting
+again. Raises a new `InterruptReason.DATA_INTEGRITY` escalation (no DB
+migration needed — `interrupts.reason` has no CHECK constraint, just an
+application-level enum), deduped by the existing open-interrupt-by-subject
+mechanism so a persisting problem raises exactly one open interrupt, not one
+per daily check.
+
+Deliberately scoped to the one concrete instance this session actually found,
+not a general "invariant framework" for hypothetical future metrics — the
+existing `routing.py` stall-detection mechanism (fingerprint-based, triggers a
+model consultation after `supervisor_stall_ticks` identical ticks) already
+covers "is the whole snapshot stuck"; this is a narrower, complementary check
+for "does a specific metric's underlying assumption still hold," which stall
+detection cannot see (the bug metric kept the fingerprint moving the whole
+time, since other fields kept changing around it).
+
+**Verified**: 672 unit + 206 integration tests green on Linux (scratch
+Postgres), no new migration. New coverage: `repository.orphaned_approved_ideas`
+(healthy/orphaned/pending-not-yet-approved cases), `check_approved_idea_orphans`
+directly (raises exactly once, dedups on repeat calls), and
+`engines/maintenance.py`'s dispatch for the new slug end to end with a
+`FakeProvider` holding zero queued turns — proof this check can never make an
+LLM call, by construction.
+
+**Deployed live** (`3853185`): committed, transferred via `git archive HEAD`,
+image rebuilt, service restarted (no migration step needed). `/health` reports
+`ok`, all six engines enabled, boot log clean; `audit-snapshot-integrity`
+visibly enqueued on the very first tick after restart.
