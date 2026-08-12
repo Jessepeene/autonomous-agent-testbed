@@ -30,6 +30,7 @@ from factory.logging import get_logger
 from factory.settings import EngineName
 from factory.state import repository
 from factory.state.db import session_scope
+from factory.state.orm import new_id
 from factory.state.schemas import InterruptReason, TaskKind
 from factory.supervisor.context import FactoryContext
 
@@ -159,10 +160,16 @@ class Scheduler:
                 else:
                     # Second strike: the automatic retry did not help either --
                     # this is not something more waiting can fix on its own.
+                    # A fresh id, not product.id[:8]: stalled_validations() already
+                    # excludes any product with an open interrupt, so this raise is
+                    # never a duplicate of a still-open one -- but product.id is
+                    # stable across this product's whole life, and would collide
+                    # with an earlier, now-resolved escalation for the same product
+                    # (see 0017_interrupt_open_subject_partial.py).
                     await interrupts.request(
                         session,
                         reason=InterruptReason.LEAD_SOURCING_STALLED,
-                        subject=f"{product.name[:80]} can't source leads ({product.id[:8]})",
+                        subject=f"{product.name[:80]} can't source leads ({new_id()[:8]})",
                         detail=(
                             f"Product: {product.name} ({product.id})\n\n"
                             "Two lead-sourcing attempts both found nothing for this "

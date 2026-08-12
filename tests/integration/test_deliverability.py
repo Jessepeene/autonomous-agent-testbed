@@ -231,6 +231,85 @@ async def test_an_ambiguous_reply_stays_frozen_and_reissues_a_fresh_interrupt(
     assert new_interrupt.status == "open"
 
 
+async def test_two_separate_freeze_episodes_both_trip_and_clear_through_the_real_path(
+    session: AsyncSession,
+) -> None:
+    """End-to-end regression for 0017_interrupt_open_subject_partial.py, exercised
+    through the real production call sites (`process_event` -> `_check_and_trip`
+    -> `interrupts.request`, then a real RESUME reply -> `sync_freeze_clearance`
+    -> `clear_marketing_freeze`) rather than hand-built interrupt rows -- every
+    other freeze/resume test above only ever drives *one* episode. A second,
+    later episode must trip, get its own interrupt, and clear cleanly; nothing
+    about the first episode's now-resolved row may block it."""
+    settings = _sensitive_settings()  # min_sample=5, threshold=20%
+    lead_id = await _seed_lead(session)
+    first_sent_ids = await _seed_sent(session, lead_id, 5)
+    await session.commit()
+
+    # Episode 1: 1/5 = 20% >= 20% threshold.
+    outcome1 = await deliverability.process_event(
+        session,
+        {
+            "event-data": {
+                "event": "complained",
+                "user-variables": {"outreach_log_id": first_sent_ids[0]},
+            }
+        },
+        settings=settings,
+    )
+    await session.commit()
+    assert outcome1.handled is True
+
+    freeze1 = await repository.active_marketing_freeze(session)
+    assert freeze1 is not None
+    assert freeze1.interrupt_id is not None
+    interrupt1 = await session.get(Interrupt, freeze1.interrupt_id)
+    assert interrupt1 is not None
+    assert interrupt1.status == "open"
+
+    await repository.resolve_interrupt(session, freeze1.interrupt_id, "RESUME")
+    await session.commit()
+    synced1 = await deliverability.sync_freeze_clearance(session)
+    await session.commit()
+    assert synced1 == 1
+    assert await repository.active_marketing_freeze(session) is None
+
+    # Episode 2, later: sent=10, complained=2 -- still exactly 20%.
+    second_sent_ids = await _seed_sent(session, lead_id, 5)
+    await session.commit()
+    outcome2 = await deliverability.process_event(
+        session,
+        {
+            "event-data": {
+                "event": "complained",
+                "user-variables": {"outreach_log_id": second_sent_ids[0]},
+            }
+        },
+        settings=settings,
+    )
+    await session.commit()
+    assert outcome2.handled is True
+
+    freeze2 = await repository.active_marketing_freeze(session)
+    assert freeze2 is not None
+    assert freeze2.id != freeze1.id
+    assert freeze2.interrupt_id is not None
+    assert freeze2.interrupt_id != freeze1.interrupt_id
+    interrupt2 = await session.get(Interrupt, freeze2.interrupt_id)
+    assert interrupt2 is not None
+    assert interrupt2.status == "open"
+    assert interrupt2.subject != interrupt1.subject  # per-episode freeze.id suffix
+
+    # The real regression: resolving episode 2 must not collide with episode 1's
+    # already-resolved row, even though both share the same bare _SUBJECT prefix.
+    await repository.resolve_interrupt(session, freeze2.interrupt_id, "RESUME")
+    await session.commit()
+    synced2 = await deliverability.sync_freeze_clearance(session)
+    await session.commit()
+    assert synced2 == 1
+    assert await repository.active_marketing_freeze(session) is None
+
+
 async def test_process_event_records_a_bounce(session: AsyncSession) -> None:
     lead_id = await _seed_lead(session)
     sent_ids = await _seed_sent(session, lead_id, 1)

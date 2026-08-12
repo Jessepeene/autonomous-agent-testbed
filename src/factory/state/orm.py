@@ -488,7 +488,24 @@ class Interrupt(Base):
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
-        UniqueConstraint("reason", "subject", "status", name="uq_interrupts_open_subject"),
+        # A *partial* unique index, not a plain UniqueConstraint -- deliberately.
+        # (reason, subject) must only ever collapse duplicates while status='open'
+        # (that is the actual point: don't spam a human with the same still-open
+        # ask twice). A plain 3-column UniqueConstraint enforced this globally,
+        # across every status forever, so once any interrupt with a given
+        # (reason, subject) was ever resolved, no later, unrelated occurrence of
+        # that same pair could ever be resolved either -- resolve_interrupt()'s
+        # UPDATE crashed on the exact (reason, subject, 'resolved') tuple already
+        # sitting there. Found live; see alembic/versions/
+        # 0017_interrupt_open_subject_partial.py for the full account.
+        Index(
+            "uq_interrupts_open_subject",
+            "reason",
+            "subject",
+            "status",
+            unique=True,
+            postgresql_where=(status == "open"),
+        ),
         Index("ix_interrupts_status", "status", "delivered"),
     )
 

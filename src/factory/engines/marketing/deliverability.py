@@ -40,7 +40,7 @@ from factory.hitl import interrupts
 from factory.logging import get_logger
 from factory.settings import Settings, get_settings
 from factory.state import repository
-from factory.state.orm import Interrupt
+from factory.state.orm import Interrupt, new_id
 from factory.state.schemas import InterruptReason
 
 log = get_logger(__name__)
@@ -183,10 +183,16 @@ async def _check_and_trip(session: AsyncSession, settings: Settings) -> None:
     if freeze is None:
         return  # already tripped; the partial-unique index made this a no-op
 
+    # freeze.id[:8], not the bare _SUBJECT constant: create_marketing_freeze's
+    # None-return above already guarantees this raise happens at most once per
+    # freeze episode, but freeze.id is still needed to keep *this* episode's
+    # subject distinct from any earlier, now-resolved episode's -- a bare fixed
+    # subject collided the moment a *second* freeze in this factory's lifetime
+    # needed to reach 'resolved' (see 0017_interrupt_open_subject_partial.py).
     interrupt_id = await interrupts.request(
         session,
         reason=InterruptReason.DELIVERABILITY_FROZEN,
-        subject=_SUBJECT,
+        subject=f"{_SUBJECT} ({freeze.id[:8]})",
         detail=(
             f"{reason}\n\nAll outbound email is paused — SEND_OUTREACH tasks will "
             "keep deferring until this is cleared. This does not self-resolve: "
@@ -246,10 +252,16 @@ async def sync_freeze_clearance(session: AsyncSession) -> int:
     # an interrupt on *any* tagged reply, correct or not, so the tag that reply used
     # is now consumed — raise a fresh interrupt so the operator still has a live tag
     # to reply to, rather than being stuck with no way to clear it.
+    #
+    # new_id()[:8], not freeze.id[:8]: this same episode's freeze row is
+    # unchanged across however many ambiguous replies happen in a row, so
+    # freeze.id alone would not distinguish this re-raise from the previous
+    # one for the *same* episode -- each actual raise needs its own fresh id
+    # (see 0017_interrupt_open_subject_partial.py).
     new_interrupt_id = await interrupts.request(
         session,
         reason=InterruptReason.DELIVERABILITY_FROZEN,
-        subject=_SUBJECT,
+        subject=f"{_SUBJECT} ({new_id()[:8]})",
         detail=(
             f"{freeze.reason}\n\nStill frozen — the last reply was not an "
             "unambiguous RESUME. Reply RESUME to this message to resume sending."

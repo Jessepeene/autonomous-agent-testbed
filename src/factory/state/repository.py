@@ -1290,7 +1290,15 @@ async def open_interrupt(
     task_id: str | None = None,
     product_id: str | None = None,
 ) -> str | None:
-    """Raise a human escalation. Duplicate open subjects collapse into one."""
+    """Raise a human escalation. Duplicate open subjects collapse into one.
+
+    `index_where` targets the partial unique index (`orm.py::Interrupt`,
+    scoped to status='open') specifically -- without it, Postgres cannot match
+    this INSERT's conflict target to a *partial* index at all, and the
+    statement would fail with "there is no unique or exclusion constraint
+    matching the ON CONFLICT specification" rather than silently doing the
+    wrong thing, but it still has to be told explicitly.
+    """
     stmt = (
         pg_insert(Interrupt)
         .values(
@@ -1302,7 +1310,8 @@ async def open_interrupt(
             status="open",
         )
         .on_conflict_do_nothing(
-            index_elements=[Interrupt.reason, Interrupt.subject, Interrupt.status]
+            index_elements=[Interrupt.reason, Interrupt.subject, Interrupt.status],
+            index_where=text("status = 'open'"),
         )
         .returning(Interrupt.id)
     )

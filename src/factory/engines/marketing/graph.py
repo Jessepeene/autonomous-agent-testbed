@@ -17,7 +17,7 @@ from factory.logging import get_logger
 from factory.memory import store as memory_store
 from factory.settings import EngineName
 from factory.state import repository
-from factory.state.orm import ChannelExperiment, Idea, Product, Task
+from factory.state.orm import ChannelExperiment, Idea, Product, Task, new_id
 from factory.state.schemas import InterruptReason, ProductStatus, TaskKind
 from factory.supervisor.context import FactoryContext
 
@@ -146,10 +146,17 @@ async def _escalate_lead_sourcing_problem(
             "Reply with anything to try sourcing leads again, or REJECT to "
             "retire this product."
         )
+    # A fresh id, not product_id[:8]: product_id is stable across this product's
+    # whole life, so it would collide with an earlier, now-resolved escalation
+    # for the same product the moment a *second* one needed to reach 'resolved'
+    # (the exact uq_interrupts_open_subject bug -- see
+    # 0017_interrupt_open_subject_partial.py). Safe to make each raise unique:
+    # this function already returns early above if one is already open for
+    # this product, so a fresh id here is never covering up a real duplicate.
     await interrupts.request(
         session,
         reason=InterruptReason.LEAD_SOURCING_STALLED,
-        subject=f"{name[:80]} can't source leads ({product_id[:8]})",
+        subject=f"{name[:80]} can't source leads ({new_id()[:8]})",
         detail=detail,
         product_id=product_id,
     )
