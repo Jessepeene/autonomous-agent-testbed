@@ -2512,3 +2512,79 @@ correctly by failure kind, it's deduped against an already-open one, and
 **Deployed live**: committed, transferred via `git archive HEAD`, image
 rebuilt, service restarted. `/health` reports `ok`, all six engines
 enabled, boot log clean.
+
+## Root-cause fix: `uq_interrupts_open_subject` wasn't actually scoped to open interrupts — 2026-08-12
+
+After the lead-provider classification fix above, you asked to see the rest
+of the funnel work, keep the Apollo 403 noted (now recorded as a project
+memory — it's an account-side dashboard problem, not a code fix), and then
+audit and fix every remaining bug. You chose a fresh systematic audit over
+reviewing only the sites already touched this session.
+
+The audit's headline finding: `uq_interrupts_open_subject` is a plain
+`UniqueConstraint(reason, subject, status)`. Despite its name, that makes a
+given `(reason, subject)` globally unique *forever*, across every status —
+not just while `status='open'`. The moment one interrupt with a given
+`(reason, subject)` resolves, no later, unrelated occurrence of that exact
+pair can ever resolve either: `resolve_interrupt()`'s `UPDATE` to
+`status='resolved'` collides with the row already sitting at that tuple.
+This had already bitten `HEAL_EXHAUSTED` once (worked around locally, at
+that one call site, earlier this session) — the audit found the same latent
+crash waiting at several other sites that give their subject no
+per-occurrence uniqueness at all: `deliverability.py`'s freeze/re-freeze
+escalations, and this session's own new `LEAD_SOURCING_STALLED` sites in
+`marketing/graph.py` and `scheduler.py`.
+
+Fixed at the root instead of patching each site again: migration `0017`
+drops the constraint and replaces it with a partial unique index scoped to
+`status='open'` — what the name always claimed to do. `orm.py`'s
+`Interrupt.__table_args__` and `repository.open_interrupt()`'s
+`ON CONFLICT` clause both updated to match, following the exact
+`index_where` convention `create_marketing_freeze` already established
+(and already got wrong once, per that function's own docstring): an ORM
+column comparison at the DDL level, a literal `text()` clause at the
+runtime `on_conflict_do_nothing` call site — a bound parameter can never
+structurally match a partial index's own literal predicate.
+
+Every affected call site was judged individually rather than patched
+uniformly. Sites that could legitimately fire again while an *identical*
+prior occurrence is still open — main.py's preflight, Docker-unavailable,
+the orchestrator's same-day budget cap — deliberately keep a stable
+subject; that's correct dedup (repeat signals collapsing into one open
+interrupt), not the bug, and giving them a fresh id would have been a
+regression. Sites that only re-fire once the *previous* occurrence has
+already resolved — `deliverability.py`'s two raise sites,
+`LEAD_SOURCING_STALLED`'s two sites — now suffix their subject with a fresh
+id per raise, safe specifically because each is already guarded against
+firing twice while the first is still open (`create_marketing_freeze`'s
+None-return, `has_open_interrupt_for_product`).
+
+A second bug surfaced during verification, unrelated to the interrupt logic
+itself: migration `0017`'s revision id
+(`0017_interrupt_open_subject_partial`, 36 characters) overflowed
+`alembic_version.version_num`'s `VARCHAR(32)` column — every prior
+revision id in this repo had, apparently deliberately, stayed under that
+limit. Caught by the scratch-Postgres `alembic upgrade head` run, which
+failed with `StringDataRightTruncation` on the final version-bump `UPDATE`
+(and rolled back the whole run, migrations 0001–0017 included, confirming
+this project's migrations execute as one transaction). Fixed by shortening
+the stored revision id to `0017_interrupt_open_subject`; the file itself
+keeps its original, more descriptive name.
+
+**Verified**: 699 unit + 241 integration tests green on Linux (scratch
+Postgres), migration `0017` applied cleanly end to end (0001 through head,
+after the revision-id fix). New coverage: a repository-level test proving
+two separate occurrences of the *identical* `(reason, subject)` can both
+reach `resolved` without colliding, and that the still-open dedup case is
+untouched; a `deliverability.py` end-to-end test driving two full freeze
+episodes through the real `process_event` → `_check_and_trip` →
+`sync_freeze_clearance` → `clear_marketing_freeze` path (not hand-built
+interrupt rows, unlike every earlier freeze/resume test) — the second
+episode's resolve must not collide with the first episode's now-resolved
+row.
+
+**Deployed live**: committed (two commits — the fix, then the migration
+revision-id length fix caught by verification), transferred via
+`git archive HEAD`, image rebuilt, migration `0017` applied to the live
+database, service restarted. `/health` reports `ok`, all six engines
+enabled, boot log clean.
