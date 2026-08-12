@@ -2415,3 +2415,52 @@ readable rather than the wire enum value.
 **Deployed live**: committed, transferred via `git archive HEAD`, image
 rebuilt, service restarted. `/health` reports `ok`, all six engines enabled,
 boot log clean.
+
+## `/issue #<tag>` and the stalled-validation sweep — 2026-08-12
+
+Two more pieces from the same conversation. First, `/issue #<tag>`
+(`hitl/commands.py`): `/status` only shows one short `issue:` line per
+escalation by design; `/issue` returns the full original detail text --
+what a human actually needs to answer it -- without hunting back through
+Telegram history. Scoped to open interrupts only. New
+`repository.find_open_interrupt_by_tag`, a separate lookup from
+`interrupts.py`'s own identical one so `commands.py` never has to import
+from the module that already imports it.
+
+Second, and bigger: you pointed out that a validating product whose lead
+sourcing found nothing (the live Apollo-403 case from earlier) had **no
+automatic path forward at all** -- `HARVEST_LEADS` is a one-shot enqueue for
+a validating product, so nothing ever asked again and nothing ever told a
+human. Your framing: "if the internet goes out in an office, someone tries
+to fix it, and if they can't, they ask." New stalled-validation sweep in
+`scheduler.py::_schedule_periodic` (hourly check, gated by real elapsed
+time via `settings.validation_stalled_hours`, default 24h): first stall
+found → one automatic re-harvest; still zero leads after that → a new
+`InterruptReason.LEAD_SOURCING_STALLED` escalation instead of trying again.
+A product already escalated is excluded from the sweep (no piling a second
+automatic action onto a pending human decision). Reply handling matches
+every other product-scoped escalation: REJECT retires, anything else
+queues one more fresh harvest attempt.
+
+**A real deploy-ordering bug caught by verification, not live**: the
+`/issue` command's `commands.py` changes were still sitting uncommitted
+when the stalled-validation work landed in the same working tree.
+`git add`-ing only the files intended for the stalled-validation commit
+picked up `interrupts.py` (which by then called `commands.ISSUE_COMMAND`)
+without `commands.py` itself (which defines it) — a broken cross-file
+reference that would have shipped if scratch-Postgres verification hadn't
+caught the `AttributeError` before the image ever reached the live
+service. Fixed by committing the missing files as their own commit, then
+re-verifying the corrected tree from a clean rebuild.
+
+**Verified**: 686 unit + 233 integration tests green on Linux (scratch
+Postgres), no new migration. New coverage for the sweep: the query's
+inclusion/exclusion logic (too young, has leads, already escalated, wrong
+status), the retry-then-escalate state transition across two sweep runs,
+that an already-escalated product is left alone, and both reply paths
+(REJECT retires, anything else queues a fresh attempt).
+
+**Deployed live**: committed (two commits — `/issue` retroactively, then
+the stalled-validation sweep), transferred via `git archive HEAD`, image
+rebuilt, service restarted. `/health` reports `ok`, all six engines
+enabled, boot log clean.
