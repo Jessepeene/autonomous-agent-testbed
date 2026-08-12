@@ -2384,3 +2384,34 @@ above it.
 **Deployed live**: committed, transferred via `git archive HEAD`, image
 rebuilt, service restarted. `/health` reports `ok`, all six engines enabled,
 boot log clean.
+
+### Second fix, same day: the name was still confusable, and the layout itself was unclear
+
+Two more rounds of live feedback on the same message. First: the escalation's
+product name was `[:60]`-truncated -- for two real, similarly-worded products
+("...small-business clients on QuickBooks or Xero" vs "...retail-shop
+clients on QuickBooks or Xero") the cut landed right before the one word
+that told them apart, and produced a visible double space where the cut
+text's trailing space collided with the literal `" -- "` separator. Removed
+the truncation entirely -- `Product.name` is capped at 80 chars at creation
+and the whole report is well under Telegram's 3900-char cap, so there was
+never a real need for it.
+
+Second: even with the right name showing, the layout itself didn't make
+clear that products and escalations are two different *kinds* of thing --
+same bullet, escalation fields crammed onto one bracketed line
+(`#tag (reason) [name -- status]`). Redesigned into two headed, numbered
+sections with their own distinct fields: `PRODUCTS` shows stage/url/numbers,
+`ESCALATIONS` shows reason (now a human label via a new `_REASON_LABEL` map
+-- "Repair failed repeatedly", not the raw `heal_exhausted`) /about/issue/
+reply, each on its own line. The structural difference, not just the
+content, now makes the two sections impossible to conflate.
+
+**Verified**: 680 unit + 215 integration tests green on Linux (scratch
+Postgres), no new migration. Regression tests lock in both: a long,
+realistic product name renders in full, and the reason label is human-
+readable rather than the wire enum value.
+
+**Deployed live**: committed, transferred via `git archive HEAD`, image
+rebuilt, service restarted. `/health` reports `ok`, all six engines enabled,
+boot log clean.
