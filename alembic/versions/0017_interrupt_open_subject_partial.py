@@ -1,6 +1,6 @@
 """Fix uq_interrupts_open_subject to actually be scoped to open interrupts.
 
-Revision ID: 0017_interrupt_open_subject_partial
+Revision ID: 0017_interrupt_open_subject
 Revises: 0016_scout_signals
 Create Date: 2026-08-12
 
@@ -32,7 +32,7 @@ from collections.abc import Sequence
 
 from alembic import op
 
-revision: str = "0017_interrupt_open_subject_partial"
+revision: str = "0017_interrupt_open_subject"
 down_revision: str | None = "0016_scout_signals"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
