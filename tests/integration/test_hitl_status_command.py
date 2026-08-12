@@ -99,11 +99,12 @@ async def test_reports_no_active_products_and_the_open_escalations_content(
 
     report = await build_status_report(session)
 
-    assert "No active products yet" in report
-    assert "Open escalations (1):" in report
-    assert "STRIPE_API_KEY missing" in report
-    assert "missing_credential" in report
-    assert f"#{interrupt_id[:8]}" in report
+    assert "PRODUCTS — 0 active" in report
+    assert "ESCALATIONS — 1 open" in report
+    assert "issue: STRIPE_API_KEY missing" in report
+    assert "Missing credential" in report  # human label, not the raw "missing_credential"
+    assert f"reply: #{interrupt_id[:8]} <your answer>" in report
+    assert "about: (not tied to a specific product)" in report
 
 
 async def test_an_escalations_product_is_named_even_if_it_is_not_in_the_active_list(
@@ -130,7 +131,7 @@ async def test_an_escalations_product_is_named_even_if_it_is_not_in_the_active_l
     assert "healthy-current-product" in report
     # The escalation names its own (retired) product explicitly, distinct from
     # the currently active one listed above it.
-    assert "stuck-old-product -- retired" in report
+    assert "about: stuck-old-product (retired)" in report
     assert healthy_product_id != stuck_product_id
 
 
@@ -140,8 +141,7 @@ async def test_an_escalations_product_name_is_never_truncated(session: AsyncSess
     worded names (a realistic case: a reseeded idea reusing most of the original
     wording) had their one differentiating word land past that cutoff -- the
     escalation then showed a name that looked identical to whatever product was
-    listed as active above it, plus a literal double space where the cut text
-    collided with " -- "."""
+    listed as active above it."""
     long_name = "Freelance bookkeepers managing 5+ small-business clients on QuickBooks or Xero"
     assert len(long_name) > 60  # the fixture must actually exercise the old cutoff
     stuck_product_id = await _make_product(session, long_name)
@@ -158,8 +158,7 @@ async def test_an_escalations_product_name_is_never_truncated(session: AsyncSess
 
     report = await build_status_report(session)
 
-    assert f"{long_name} -- retired" in report
-    assert "  --" not in report  # no leftover double space from a mid-cut name
+    assert f"about: {long_name} (retired)" in report
 
 
 async def test_reports_a_products_name_stage_and_numbers(session: AsyncSession) -> None:
@@ -189,7 +188,7 @@ async def test_excludes_retired_products(session: AsyncSession) -> None:
     report = await build_status_report(session)
 
     assert "status-report-retired" not in report
-    assert "No active products yet" in report
+    assert "PRODUCTS — 0 active" in report
 
 
 async def test_old_page_views_fall_outside_the_seven_day_window(session: AsyncSession) -> None:
@@ -231,8 +230,8 @@ async def test_collect_replies_answers_status_without_resolving_anything(
     assert resolved == 0
     assert len(notifier.sent) == 1
     assert "status-dispatch-product" in notifier.sent[0]
-    assert "Open escalations (1):" in notifier.sent[0]
-    assert "unrelated escalation" in notifier.sent[0]
+    assert "ESCALATIONS — 1 open" in notifier.sent[0]
+    assert "issue: unrelated escalation" in notifier.sent[0]
 
     # The unrelated interrupt must still be open -- /status must not resolve anything.
     still_open = await repository.stale_open_interrupts(session, older_than=timedelta(seconds=0))
