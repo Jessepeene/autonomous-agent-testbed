@@ -10,5 +10,6 @@ from __future__ import annotations
 
 from factory.tools import (
     builtin,  # noqa: F401 - import populates REGISTRY
+    discovery,  # noqa: F401 - import populates REGISTRY
     growth,  # noqa: F401 - import populates REGISTRY
 )

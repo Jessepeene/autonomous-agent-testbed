@@ -213,6 +213,10 @@ class Settings(BaseSettings):
     # delivery first and this only fires once the human has clearly had time to see it.
     stale_interrupt_reminder_hours: int = Field(default=12, ge=1)
     discovery_interval_seconds: int = Field(default=6 * 3600, ge=60)
+    # DISCOVERY_SCOUT (see agents/roles.py) runs once per Discovery cycle alongside
+    # the fixed HN/GitHub/Reddit/Product Hunt sources. Off switch for operational
+    # control -- e.g. if it turns out too costly or too noisy -- without a code change.
+    discovery_scout_enabled: bool = True
     supervisor_tick_seconds: int = Field(default=15, ge=1)
     # The model is consulted on this cadence even when the deterministic route is
     # unambiguous — 40 ticks (10 min) is 6x faster than the hourly finance reconcile

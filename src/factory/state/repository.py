@@ -36,6 +36,7 @@ from factory.state.orm import (
     PageView,
     Product,
     ProductLock,
+    ScoutSignal,
     Task,
     ValidationSignal,
     new_id,
@@ -1421,6 +1422,43 @@ async def recent_channel_experiments(
         .limit(limit)
     )
     return list((await session.execute(stmt)).scalars().all())
+
+
+# ----------------------------------------------------------------- scout signals
+
+
+async def record_scout_signal(
+    session: AsyncSession,
+    *,
+    task_id: str,
+    title: str,
+    body: str,
+    url: str,
+    source: str,
+    engagement: int = 0,
+) -> str:
+    row = ScoutSignal(
+        task_id=task_id,
+        title=title[:300],
+        body=body[:4000],
+        url=url[:500],
+        source=source[:60],
+        engagement=max(0, engagement),
+    )
+    session.add(row)
+    await session.flush()
+    return row.id
+
+
+async def drain_scout_signals(session: AsyncSession, task_id: str) -> list[ScoutSignal]:
+    """Read back every signal DISCOVERY_SCOUT submitted for this task, and delete
+    them -- this table is a one-shot hand-off buffer, not a durable record (see
+    `state/orm.py::ScoutSignal`)."""
+    stmt = select(ScoutSignal).where(ScoutSignal.task_id == task_id)
+    rows = list((await session.execute(stmt)).scalars().all())
+    if rows:
+        await session.execute(delete(ScoutSignal).where(ScoutSignal.task_id == task_id))
+    return rows
 
 
 # --------------------------------------------------------------- entity verdicts

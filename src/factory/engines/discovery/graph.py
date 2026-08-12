@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from factory.engines.discovery import score
 from factory.engines.discovery.cluster import Cluster, cluster_signals
+from factory.engines.discovery.scout import scout_signals
 from factory.engines.discovery.sources.base import Signal, Source
 from factory.engines.discovery.sources.github import GitHubIssuesSource
 from factory.engines.discovery.sources.hackernews import HackerNewsSource
@@ -84,15 +85,19 @@ async def gather_signals(sources: list[Source]) -> list[Signal]:
 
 async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
     sources = build_sources(ctx.settings)
-    if not sources:
-        return "discovery: no sources are configured"
-
-    signals = await gather_signals(sources)
+    fixed_signals = await gather_signals(sources) if sources else []
+    scouted = await scout_signals(ctx, session, task)
+    signals = fixed_signals + scouted
     if not signals:
         return "discovery: no signals returned this cycle"
 
     clusters = cluster_signals(signals)
-    log.info("discovery.clustered", signals=len(signals), clusters=len(clusters))
+    log.info(
+        "discovery.clustered",
+        signals=len(signals),
+        scouted=len(scouted),
+        clusters=len(clusters),
+    )
     if not clusters:
         return f"discovery: {len(signals)} signals produced no clusters"
 
@@ -153,6 +158,7 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
         )
 
     return (
-        f"discovery: {len(signals)} signals → {len(clusters)} clusters → "
-        f"{len(batch.ideas)} candidates → {len(kept)} survivors → {stored} new"
+        f"discovery: {len(signals)} signals ({len(scouted)} scouted) → "
+        f"{len(clusters)} clusters → {len(batch.ideas)} candidates → "
+        f"{len(kept)} survivors → {stored} new"
     )

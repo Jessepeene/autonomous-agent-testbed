@@ -577,6 +577,37 @@ class ChannelExperiment(Base):
     )
 
 
+class ScoutSignal(Base):
+    """One market-signal candidate DISCOVERY_SCOUT found while free-roaming the web.
+
+    Purely a hand-off buffer, not a durable record: `discovery/scout.py` writes a
+    row per `submit_signal` tool call during one agent run, the same cycle reads
+    every row for that ``task_id`` straight back out as `Signal` objects and
+    deletes them, so this table is empty between Discovery cycles by design --
+    signals themselves have never been persisted anywhere in this codebase (the
+    fixed HN/GitHub/Reddit sources hand `Signal` objects to the clusterer
+    in-memory, within the same call), and an agent-produced signal keeps that
+    property. ``task_id`` -- not a foreign key -- is deliberately loose: the task
+    is a `DISCOVER_OPPORTUNITIES` row, not something this table needs to join
+    against.
+    """
+
+    __tablename__ = "scout_signals"
+
+    id: Mapped[str] = _pk()
+    task_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    url: Mapped[str] = mapped_column(String(500), nullable=False)
+    source: Mapped[str] = mapped_column(String(60), nullable=False)
+    engagement: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (Index("ix_scout_signals_task", "task_id"),)
+
+
 class Memory(Base):
     """A lesson the factory retains across sessions.
 

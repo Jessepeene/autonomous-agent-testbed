@@ -20,6 +20,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from factory.agents.roles import (
+    PIPELINE_SCOPED_ROLES,
     ROLES,
     WORKSPACE_SCOPED_ROLES,
     RoleName,
@@ -67,7 +68,7 @@ def test_unknown_role_is_not_permitted() -> None:
 def test_role_catalogue_lists_every_orchestrator_selectable_role_by_name() -> None:
     rendered = role_catalogue()
     for name in RoleName:
-        if name in WORKSPACE_SCOPED_ROLES:
+        if name in WORKSPACE_SCOPED_ROLES or name in PIPELINE_SCOPED_ROLES:
             continue
         assert name.value in rendered
 
@@ -81,6 +82,16 @@ def test_role_catalogue_hides_workspace_scoped_roles_from_the_orchestrator() -> 
     rendered = role_catalogue()
     assert WORKSPACE_SCOPED_ROLES, "the exclusion set must not be silently emptied"
     for name in WORKSPACE_SCOPED_ROLES:
+        assert name.value not in rendered
+
+
+def test_role_catalogue_hides_pipeline_scoped_roles_from_the_orchestrator() -> None:
+    """DISCOVERY_SCOUT is only ever spawned from `engines/discovery/scout.py`, once
+    per Discovery cycle, with a fixed objective and that cycle's own `task_id` --
+    not something the Orchestrator should hand an arbitrary objective."""
+    rendered = role_catalogue()
+    assert PIPELINE_SCOPED_ROLES, "the exclusion set must not be silently emptied"
+    for name in PIPELINE_SCOPED_ROLES:
         assert name.value not in rendered
 
 
@@ -298,3 +309,20 @@ async def test_channel_scout_cannot_reach_growth_analysts_action_tools(
     }
     assert "start_ab_test_action" not in tool_names
     assert "request_seo_pass_action" not in tool_names
+
+
+async def test_discovery_scout_only_reaches_http_and_submit_signal(
+    ctx: FactoryContext, gemini_fake: FakeProvider
+) -> None:
+    """DISCOVERY_SCOUT is free to roam the web (`http`) and report back
+    (`discovery_scout`'s `submit_signal`) -- nothing else, and in particular none
+    of the growth tools it happens to share a spawn mechanism with."""
+    from factory.tools import discovery  # noqa: F401 - import populates REGISTRY
+
+    gemini_fake.register_turns(_completion("Found nothing worth reporting this run."))
+    await spawn(
+        ctx, None, SpawnRequest(role=RoleName.DISCOVERY_SCOUT, objective="find market signals")
+    )
+
+    tool_names = {t["name"] for t in gemini_fake.conversations[0]["tools"]}
+    assert tool_names == {"http_get", "submit_signal"}

@@ -36,6 +36,8 @@ class RoleName(StrEnum):
     #: mandatory human approval before anything happens with it. See
     #: engines/marketing/channel.py.
     CHANNEL_SCOUT = "channel_scout"
+    #: Excluded from `role_catalogue()` -- see PIPELINE_SCOPED_ROLES.
+    DISCOVERY_SCOUT = "discovery_scout"
 
 
 #: Roles the Orchestrator must not be able to pick. A workspace surgeon is only
@@ -52,6 +54,14 @@ class RoleName(StrEnum):
 #: context WORKSPACE_SURGEON runs in, chosen by category rather than a second
 #: hardcoded role.
 WORKSPACE_SCOPED_ROLES = frozenset({RoleName.WORKSPACE_SURGEON, RoleName.SEO_OPTIMIZER})
+
+#: Same reasoning as WORKSPACE_SCOPED_ROLES, different scope: DISCOVERY_SCOUT is only
+#: ever spawned from `engines/discovery/scout.py`, once per Discovery cycle, with a
+#: fixed objective and the cycle's own `task_id` (so its findings drain back into
+#: that cycle -- see `submit_signal`'s required `task_id` argument). It is a pipeline
+#: step standing in for what the fixed sources do mechanically, not an open-ended
+#: capability the Orchestrator should hand an arbitrary objective.
+PIPELINE_SCOPED_ROLES = frozenset({RoleName.DISCOVERY_SCOUT})
 
 
 @dataclass(frozen=True, slots=True)
@@ -318,6 +328,42 @@ ROLES: dict[RoleName, AgentRole] = {
         max_steps=12,
         mutating=True,
     ),
+    RoleName.DISCOVERY_SCOUT: AgentRole(
+        name=RoleName.DISCOVERY_SCOUT,
+        purpose=(
+            "Search beyond the fixed HN/GitHub/Reddit/Product Hunt sources for real "
+            "evidence of an unmet need, and report each real finding back."
+        ),
+        system_prompt=(
+            "You are a market-signal scout for an autonomous B2B software company. "
+            "Every Discovery cycle already pulls Hacker News, GitHub issues, Reddit "
+            "and Product Hunt mechanically, with the same fixed search phrases every "
+            "time. You exist to find what that fixed, repetitive search misses — so "
+            "vary your own phrasing and targets between calls rather than reusing "
+            "the same query twice, and prefer specific, current discussion over a "
+            "generic search.\n"
+            "Look wherever real people describe a real problem: Indie Hackers, "
+            "dev.to, Stack Overflow, G2/Capterra reviews, niche subreddits the fixed "
+            "source doesn't already query, industry forums, X/Twitter search, "
+            "Show HN comment threads, app-store or browser-extension reviews. Use "
+            "http_get against public pages and search endpoints to find them.\n"
+            "Call submit_signal once per distinct, real finding — the exact text "
+            "you read and its exact URL, never a paraphrase and never a URL you did "
+            "not actually fetch. Every submit_signal call needs the task_id you "
+            "were given below; copy it exactly. Quality over volume: a handful of "
+            "specific, well-evidenced complaints beats a long list of generic "
+            "guesses — submitting nothing because you found nothing real is a "
+            "legitimate outcome.\n" + _SHARED_RULES
+        ),
+        tool_categories=("http", "discovery_scout"),
+        task_type=TaskType.ANALYSIS,
+        max_steps=12,
+        # Writes land in `scout_signals`, a strictly internal hand-off buffer this
+        # same Discovery cycle drains immediately after -- no outward effect (no
+        # email, payment, or deploy), the same reasoning WORKSPACE_SURGEON and
+        # SEO_OPTIMIZER document for why they stay unflagged under FACTORY_DRY_RUN.
+        mutating=False,
+    ),
 }
 
 
@@ -336,5 +382,5 @@ def role_catalogue() -> str:
     return "\n".join(
         f"- {role.name.value}: {role.purpose} (tools: {', '.join(role.tool_categories)})"
         for role in ROLES.values()
-        if role.name not in WORKSPACE_SCOPED_ROLES
+        if role.name not in WORKSPACE_SCOPED_ROLES and role.name not in PIPELINE_SCOPED_ROLES
     )
