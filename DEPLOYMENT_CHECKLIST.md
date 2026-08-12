@@ -2355,3 +2355,32 @@ rebuilt, service restarted (no migration step). `/health` reports `ok`, all
 six engines enabled, boot log clean. Not yet exercised against the real
 Telegram API in this pass — that needs an actual message sent from your
 account, which only you can do; try texting the bot `/status`.
+
+### Fix, same day: a bare escalation count read as though it belonged to the wrong product
+
+First real use exposed this immediately: `/status` showed one active product
+("...retail-shop clients...") directly above "Open escalations: 1", and you
+reasonably read the escalation as being about that product. It was actually
+about a different, already-retired product with an almost identical name
+("...small-business clients..." — the original seeded idea that hit the
+missing-`pytest` bug, before the fix). A bare count next to one product's
+listing gives no way to tell.
+
+Fixed: each open escalation now names its own product (a fresh id lookup,
+independent of whether that product is still in the active list) alongside
+its reason and reply tag --
+`#2406ca12 (legal_uncertainty) [Freelance bookkeepers managing 5+
+small-business clients on QuickBooks or Xero -- retired]`. New
+`repository.list_open_interrupts` (oldest first, capped) alongside
+`count_open_interrupts`, which still drives the header total and a
+"...and N more." tail when the list is capped.
+
+**Verified**: 680 unit + 214 integration tests green on Linux (scratch
+Postgres), no new migration. New regression test asserts the exact scenario
+hit live: an escalation about a since-retired product must name that product
+explicitly, distinct from whatever product is currently active and listed
+above it.
+
+**Deployed live**: committed, transferred via `git archive HEAD`, image
+rebuilt, service restarted. `/health` reports `ok`, all six engines enabled,
+boot log clean.
