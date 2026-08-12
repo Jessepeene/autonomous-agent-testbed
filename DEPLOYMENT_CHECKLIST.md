@@ -1983,3 +1983,136 @@ This closes the 7-phase pre-launch plan. Everything above it in this
 document is the record of how each phase was built, verified, and deployed;
 this runbook is what turns "the code is correct" into "the system actually
 works," which only real external state can prove.
+
+## Live operation, 2026-08-12 — staging harness enabled, factory reset, orchestrator bug fix
+
+With all 7 phases live, focus shifted to actually watching the factory run
+without spending on Anthropic's expensive coding calls. What happened, in
+order:
+
+- **`STAGING_MOCK_EXPENSIVE_CALLS=1`** added to the live `.env` (Phase 1's
+  provider-level split, built for the e2e test, turned on for real for the
+  first time). Anthropic's slot now serves the scripted `StagingCodeProvider`;
+  Gemini stays real for Discovery/Compliance/Orchestrator. `FACTORY_DRY_RUN`
+  was already `1`.
+- **Two heal-exhausted products retired.** Both were infra-broken, not
+  application bugs (one DNS resolution failure that later tested as
+  transient, one missing `pydantic-core` wheel) — confirmed live rather than
+  assumed, then retired per your explicit call, overriding a more
+  conservative RETRY/GUIDED-PATCH suggestion. Found a real gap doing this:
+  `DevOpsError`-shaped escalations carry `task_id`, not `product_id`, so
+  `collect_replies()` has no REJECT-retires-the-product path for them — worked
+  around with a direct `repository.retire_product()` call for these two, the
+  gap itself not yet fixed as its own change.
+- **Full reset ("start from 0"), your explicit instruction.** Took a real
+  `pg_dump -F c` backup (`/opt/backups/factory_backup_20260812_091803.dump`),
+  then `TRUNCATE ... RESTART IDENTITY CASCADE` across every data table
+  (schema/`alembic_version` untouched). Blocked once on the restart step by
+  the auto-mode permission classifier; stopped and asked rather than working
+  around it, you confirmed, restart succeeded.
+- **Bug found while watching the reset run: `approved_ideas_waiting` was a
+  lifetime tally, not a live queue depth.** `build_snapshot()` counted every
+  `Idea.status=='approved'` row ever, with no join to the product it produced
+  — since Compliance always creates a product in the same pass an idea is
+  approved, this count never dropped even once a product shipped or was
+  retired, and it was one of the signals the Orchestrator's own LLM
+  consultation read before deciding to route to Development. Your own
+  question ("doesn't this mean the orchestrator doesn't have a clear
+  overview?") pointed straight at it. Fixed with a join to `Product` excluding
+  `RETIRED`/`LIVE` statuses; added `tests/integration/
+  test_orchestrator_snapshot.py` (3 cases) since `build_snapshot()` had never
+  actually been exercised for its real query logic before, only mocked.
+  **Deployed live** (`663d6d5`): committed, transferred via `git archive
+  HEAD`, image rebuilt, service restarted, `/health` clean.
+- **Discovery cadence sped up temporarily**: `DISCOVERY_INTERVAL_SECONDS`
+  600 (10 min) instead of the usual 10800 (3h), specifically so a idea would
+  surface inside the observation window instead of the usual multi-hour wait.
+  A background watcher (`watch_discovery.sh`, polls the live `ideas` count
+  every 60s) auto-reverts this to 10800 the moment a real idea is stored, or
+  after a 4-hour bound, whichever comes first — left running unattended
+  rather than needing a manual check-in to undo the change.
+- **Observed while watching it run: the faster cadence didn't actually
+  increase variety.** Every cycle inside the fast window returned the
+  identical `signals=74, clusters=30` — traced to the fixed, hardcoded
+  `COMPLAINT_QUERIES`/`_QUERIES` phrase lists HN/Reddit/GitHub all search off
+  every cycle (GitHub additionally sorts by `comments`, i.e. engagement, not
+  recency). Reported this proactively, which led directly to the next
+  section.
+
+## DISCOVERY_SCOUT — an agentic complement to Discovery's fixed sources — 2026-08-12
+
+You asked for the fixed HN/GitHub/Reddit/Product Hunt sources to get the same
+"genuine agentic freedom" already proven by `CHANNEL_SCOUT` — but first, a
+quick survey of the rest of the codebase for other candidates matching that
+same shape, before building anything.
+
+**Survey result: Discovery's sources were the only real match.**
+`LEAD_SCOUT` (Hunter/Apollo) already refines its own queries autonomously via
+real tool calls — the provider pair itself is deliberately fixed, tied
+directly to the GDPR/LIA guarantee documented in `engines/marketing/
+leads.py` ("the planner never sees personal data"); opening it to arbitrary
+web scraping for contact data would break that guarantee, not improve it.
+`GROWTH_ANALYST`/`SEO_OPTIMIZER` already exercise real judgement over real
+data rather than a fixed list. Scheduler cadences (12h lead harvest, hourly
+reconciliation) are timing knobs, not "what to look for" decisions — a
+different category. The PLG gate, Bug Council, and compliance rules are
+deliberately deterministic for legal/safety correctness. Confirmed via grep
+that `COMPLAINT_QUERIES` (`sources/base.py`, shared by HN and Reddit) and
+`_QUERIES` (`sources/github.py`, `sort="comments"`) are indeed fixed tuples
+with no rotation and no model input — the concrete evidence behind both the
+"variety didn't increase" observation above and this build.
+
+**Built `RoleName.DISCOVERY_SCOUT`**, following the `CHANNEL_SCOUT` template
+exactly: an ephemeral `AgentRole`, `http` tool category (free web search, no
+new plumbing), plus a new `discovery_scout` category holding one tool,
+`submit_signal` (`tools/discovery.py`) — quote the real text found and its
+real URL, never a paraphrase or an invented URL, matching the same standard
+already held for `RESEARCHER`/`CHANNEL_SCOUT`. Its system prompt tells it
+explicitly what the fixed sources already cover so it looks elsewhere (Indie
+Hackers, dev.to, G2/Capterra reviews, Stack Overflow, app-store reviews,
+niche subreddits/forums the fixed queries don't reach) and to vary its own
+phrasing between runs rather than repeat a query.
+
+**The hand-off problem**: a tool call has no return channel back to its
+caller except the database in this codebase — `CHANNEL_SCOUT`'s
+`propose_channel` writes a durable, human-facing `ChannelExperiment` row, but
+a raw market signal has never been persisted anywhere (the fixed sources
+return `Signal` objects in-process, straight into the clusterer, within one
+call). Rather than durably storing something this codebase has always kept
+ephemeral, added `scout_signals` (`ScoutSignal`, migration `0016`) as a
+strictly one-shot hand-off buffer: `submit_signal` writes a row scoped to the
+Discovery cycle's own `task_id`, and `engines/discovery/scout.py::
+scout_signals()` reads every row back and deletes them the moment the agent
+finishes — empty between cycles by design, same as before this existed.
+`engines/discovery/graph.py::run()` now merges `fixed_signals + scouted`
+before clustering; a fixed-sources-unconfigured or a scout-finds-nothing
+cycle both degrade gracefully (mirrors the existing "one source fails, others
+continue" behaviour). `DISCOVERY_SCOUT` is excluded from `role_catalogue()`
+via a new `PIPELINE_SCOPED_ROLES` set (same reasoning as
+`WORKSPACE_SCOPED_ROLES`, different owner): only ever spawned from
+`scout.py` itself, once per cycle, with a fixed objective — not a capability
+the Orchestrator should hand an arbitrary one. Gated by a new
+`discovery_scout_enabled` settings flag (default on) for an operational off
+switch with no code change. Kept `mutating=False` — same reasoning
+`WORKSPACE_SURGEON`/`SEO_OPTIMIZER` already document: its only effect is an
+internal buffer this same cycle drains, no outward effect, so flagging it
+would make dry run strictly worse than doing nothing.
+
+**Verified**: 672 unit + 199 integration tests green on Linux (scratch
+Postgres), migration `0016` applies cleanly. New coverage: repository
+round-trip (write/drain, scoped correctly per task, one-shot), the
+`submit_signal` tool directly (records, rejects a non-http URL), `scout_signals()`
+end to end via a scripted `FakeProvider` tool call (returns what the agent
+submitted, drains the buffer, respects the disabled flag without ever calling
+the model, tolerates finding nothing), and one full `graph.run()` pass
+proving a scouted signal reaches clustering even with every fixed source
+unconfigured. Role-catalogue exclusion and tool-isolation (only `http_get`
++ `submit_signal`, nothing from `growth`) covered in
+`tests/unit/test_agent_spawner.py` alongside the existing `CHANNEL_SCOUT`/
+`GROWTH_ANALYST` isolation tests.
+
+**Deployed live** (`9412bb0`): committed, transferred via `git archive HEAD`,
+migration `0016` applied to the live database *before* the restart (confirmed
+via `alembic current`), image rebuilt, service restarted. `/health` reports
+`ok`, all six engines enabled, boot log clean, no errors in the minutes
+following restart.
