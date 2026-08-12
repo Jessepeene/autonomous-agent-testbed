@@ -85,7 +85,7 @@ async def _make_product(
 # --- build_status_report -------------------------------------------------------------
 
 
-async def test_reports_no_active_products_and_the_open_interrupt_count(
+async def test_reports_no_active_products_and_the_open_escalations_content(
     session: AsyncSession,
 ) -> None:
     interrupt_id = await repository.open_interrupt(
@@ -100,7 +100,38 @@ async def test_reports_no_active_products_and_the_open_interrupt_count(
     report = await build_status_report(session)
 
     assert "No active products yet" in report
-    assert "Open escalations: 1" in report
+    assert "Open escalations (1):" in report
+    assert "STRIPE_API_KEY missing" in report
+    assert "missing_credential" in report
+    assert f"#{interrupt_id[:8]}" in report
+
+
+async def test_an_escalations_product_is_named_even_if_it_is_not_in_the_active_list(
+    session: AsyncSession,
+) -> None:
+    """Regression: an escalation about a since-retired (or otherwise inactive)
+    product used to render as a bare count next to whatever product *is*
+    currently active, reading as though it belonged to that one instead."""
+    stuck_product_id = await _make_product(session, "stuck-old-product")
+    await repository.retire_product(session, stuck_product_id)
+    interrupt_id = await repository.open_interrupt(
+        session,
+        reason=InterruptReason.HEAL_EXHAUSTED,
+        subject=f"stuck-old-product needs help ({stuck_product_id[:8]})",
+        detail="Automated repair did not converge.",
+        product_id=stuck_product_id,
+    )
+    assert interrupt_id is not None
+    healthy_product_id = await _make_product(session, "healthy-current-product")
+    await session.flush()
+
+    report = await build_status_report(session)
+
+    assert "healthy-current-product" in report
+    # The escalation names its own (retired) product explicitly, distinct from
+    # the currently active one listed above it.
+    assert "stuck-old-product -- retired" in report
+    assert healthy_product_id != stuck_product_id
 
 
 async def test_reports_a_products_name_stage_and_numbers(session: AsyncSession) -> None:
@@ -172,7 +203,8 @@ async def test_collect_replies_answers_status_without_resolving_anything(
     assert resolved == 0
     assert len(notifier.sent) == 1
     assert "status-dispatch-product" in notifier.sent[0]
-    assert "Open escalations: 1" in notifier.sent[0]
+    assert "Open escalations (1):" in notifier.sent[0]
+    assert "unrelated escalation" in notifier.sent[0]
 
     # The unrelated interrupt must still be open -- /status must not resolve anything.
     still_open = await repository.stale_open_interrupts(session, older_than=timedelta(seconds=0))

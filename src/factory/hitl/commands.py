@@ -30,10 +30,18 @@ _MAX_PRODUCTS = 10
 async def build_status_report(session: AsyncSession) -> str:
     """A factual snapshot: every active product's name, stage, and the same
     numbers `GROWTH_ANALYST` reads (`tools/growth.py::read_product_growth`) --
-    views, interest signals, leads, whether an AB test is running -- plus how
-    many escalations are waiting on a human right now."""
+    views, interest signals, leads, whether an AB test is running -- plus what
+    (not just how many) escalations are waiting on a human right now.
+
+    Each escalation names the product it's about, by id lookup, independent of
+    whether that product still appears in the active list above -- a heal-
+    exhaustion escalation for a since-retired product must not read as though
+    it belongs to whatever is currently active, which is exactly what a bare
+    count next to one active product's listing looked like.
+    """
     products = await repository.active_products(session, limit=_MAX_PRODUCTS)
-    open_interrupts = await repository.count_open_interrupts(session)
+    interrupt_total = await repository.count_open_interrupts(session)
+    interrupts = await repository.list_open_interrupts(session, limit=_MAX_PRODUCTS)
 
     lines = ["\U0001f4ca Factory status"]
     if not products:
@@ -53,5 +61,15 @@ async def build_status_report(session: AsyncSession) -> str:
                 + (" | AB test running" if ab_test else "")
             )
 
-    lines.append(f"\nOpen escalations: {open_interrupts}")
+    lines.append(f"\nOpen escalations ({interrupt_total}):")
+    for interrupt in interrupts:
+        where = ""
+        if interrupt.product_id:
+            escalation_product = await repository.get_product(session, interrupt.product_id)
+            if escalation_product is not None:
+                where = f" [{escalation_product.name[:60]} -- {escalation_product.status}]"
+        lines.append(f"\n• #{interrupt.id[:8]} ({interrupt.reason}){where}\n  {interrupt.subject}")
+    if interrupt_total > len(interrupts):
+        lines.append(f"\n...and {interrupt_total - len(interrupts)} more.")
+
     return "\n".join(lines)

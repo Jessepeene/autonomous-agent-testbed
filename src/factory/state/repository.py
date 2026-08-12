@@ -1267,6 +1267,18 @@ async def count_open_interrupts(session: AsyncSession) -> int:
     return int((await session.execute(stmt)).scalar_one())
 
 
+async def list_open_interrupts(session: AsyncSession, limit: int = 10) -> list[Interrupt]:
+    """Oldest first -- the ones a human has been waiting longest on are the ones
+    `/status` (`hitl/commands.py`) should surface first if the list is capped."""
+    stmt = (
+        select(Interrupt)
+        .where(Interrupt.status == "open")
+        .order_by(Interrupt.created_at.asc())
+        .limit(limit)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
 async def stale_open_interrupts(session: AsyncSession, *, older_than: timedelta) -> list[Interrupt]:
     """Interrupts still waiting on a human past ``older_than`` since they were raised.
 
