@@ -26,6 +26,8 @@ from factory.engines.marketing.providers.base import (
     LeadSearchPlan,
     Provenance,
     ProvenanceKind,
+    ProviderAuthError,
+    ProviderRequestError,
     usable_person_email,
 )
 from factory.logging import get_logger
@@ -91,7 +93,19 @@ class ApolloProvider:
             return []
 
         if response.status_code != 200:
-            log.warning("leads.apollo_rejected", status=response.status_code)
+            detail = response.text
+            log.warning("leads.apollo_rejected", status=response.status_code, detail=detail[:200])
+            # 401/403: the key is present (`available` already checked that) but
+            # being refused -- invalid, expired, or the plan/credits do not cover
+            # this call. 400/422: the request itself is malformed -- a bug in how
+            # this module builds it, not an account problem. Anything else (429
+            # rate limit, 5xx) is left as today's graceful degrade: log and return
+            # empty, since it may well resolve on its own before anyone needs to
+            # act on it.
+            if response.status_code in (401, 403):
+                raise ProviderAuthError(self.name, response.status_code, detail)
+            if response.status_code in (400, 422):
+                raise ProviderRequestError(self.name, response.status_code, detail)
             return []
 
         body_json = response.json()

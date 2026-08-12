@@ -12,12 +12,13 @@ from factory.agents.spawner import SpawnRequest, spawn
 from factory.engines.compliance.rules import MAX_CONTACTS_PER_DOMAIN_PER_MONTH
 from factory.engines.marketing import campaign, deliverability, outreach
 from factory.engines.marketing import leads as leads_module
+from factory.hitl import interrupts
 from factory.logging import get_logger
 from factory.memory import store as memory_store
 from factory.settings import EngineName
 from factory.state import repository
 from factory.state.orm import ChannelExperiment, Idea, Product, Task
-from factory.state.schemas import ProductStatus, TaskKind
+from factory.state.schemas import InterruptReason, ProductStatus, TaskKind
 from factory.supervisor.context import FactoryContext
 
 log = get_logger(__name__)
@@ -75,6 +76,8 @@ async def _harvest(ctx: FactoryContext, session: AsyncSession, task: Task) -> st
     report = await leads_module.ingest(
         ctx, session, product_summary=summary, product_id=resolved_id, limit=limit, task_id=task.id
     )
+    if resolved_id and (report.credential_problem or report.request_problem):
+        await _escalate_lead_sourcing_problem(session, resolved_id, report)
     if report.stored:
         # Validation harvest uses a distinct idempotency-key namespace from the
         # real post-launch one below (outreach:{id}:*) -- if this validation later
@@ -99,6 +102,57 @@ async def _harvest(ctx: FactoryContext, session: AsyncSession, task: Task) -> st
             priority=150,
         )
     return f"marketing/harvest: {report.summary()}"
+
+
+async def _escalate_lead_sourcing_problem(
+    session: AsyncSession, product_id: str, report: leads_module.IngestReport
+) -> None:
+    """Raised immediately, not deferred to the stalled-validation sweep's next
+    check: a diagnosed credential/request problem is not something waiting
+    will fix, so there is no reason to make a human wait up to
+    `validation_stalled_hours` to be asked about something they could fix in
+    two minutes -- the same reasoning `MISSING_CREDENTIAL` already asks about
+    a genuinely absent key immediately rather than waiting for it to matter.
+
+    Skips raising a second escalation for a product already awaiting one --
+    a persistently broken credential must not re-ask on every later harvest
+    cycle (the periodic live-product sweep runs every 12h; a validating
+    product's own automatic retry could otherwise pile a second ask on top).
+    """
+    if await repository.has_open_interrupt_for_product(session, product_id):
+        return
+    product = await repository.get_product(session, product_id)
+    name = product.name if product is not None else product_id
+
+    if report.credential_problem:
+        detail = (
+            f"Product: {name} ({product_id})\n\n"
+            f"{report.credential_problem}\n\n"
+            "HTTP 401/403 means the API key is present but being refused -- "
+            "invalid, expired, or the plan/credits do not cover this call. "
+            "This is an account problem, not a code bug: check the provider's "
+            "dashboard directly (key validity, plan, remaining credits).\n\n"
+            "Reply with anything to try sourcing leads again, or REJECT to "
+            "retire this product."
+        )
+    else:
+        detail = (
+            f"Product: {name} ({product_id})\n\n"
+            f"{report.request_problem}\n\n"
+            "HTTP 400/422 means the provider rejected the request itself as "
+            "malformed -- this looks like a bug in how the factory calls this "
+            "provider, not something fixable in its dashboard. Worth a look "
+            "at the request-building code, not just a retry.\n\n"
+            "Reply with anything to try sourcing leads again, or REJECT to "
+            "retire this product."
+        )
+    await interrupts.request(
+        session,
+        reason=InterruptReason.LEAD_SOURCING_STALLED,
+        subject=f"{name[:80]} can't source leads ({product_id[:8]})",
+        detail=detail,
+        product_id=product_id,
+    )
 
 
 async def _outreach(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:

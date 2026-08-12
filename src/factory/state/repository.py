@@ -1320,6 +1320,20 @@ async def count_open_interrupts(session: AsyncSession) -> int:
     return int((await session.execute(stmt)).scalar_one())
 
 
+async def has_open_interrupt_for_product(session: AsyncSession, product_id: str) -> bool:
+    """Whether a human is already being asked about this product -- checked
+    before raising a new automatic escalation for it (e.g. a diagnosed
+    lead-sourcing credential problem, see marketing/graph.py) so nothing piles
+    a second one onto a pending decision, and a persistently broken credential
+    does not re-escalate on every subsequent harvest cycle."""
+    stmt = (
+        select(func.count())
+        .select_from(Interrupt)
+        .where(Interrupt.product_id == product_id, Interrupt.status == "open")
+    )
+    return int((await session.execute(stmt)).scalar_one()) > 0
+
+
 async def list_open_interrupts(session: AsyncSession, limit: int = 10) -> list[Interrupt]:
     """Oldest first -- the ones a human has been waiting longest on are the ones
     `/status` (`hitl/commands.py`) should surface first if the list is capped."""

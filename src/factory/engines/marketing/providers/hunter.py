@@ -19,6 +19,8 @@ from factory.engines.marketing.providers.base import (
     LeadSearchPlan,
     Provenance,
     ProvenanceKind,
+    ProviderAuthError,
+    ProviderRequestError,
     usable_person_email,
 )
 from factory.logging import get_logger
@@ -76,7 +78,18 @@ class HunterProvider:
                     log.warning("leads.hunter_failed", domain=domain, detail=str(exc)[:200])
                     continue
                 if response.status_code != 200:
-                    log.warning("leads.hunter_rejected", status=response.status_code)
+                    detail = response.text
+                    log.warning(
+                        "leads.hunter_rejected", status=response.status_code, detail=detail[:200]
+                    )
+                    # The key applies uniformly across every domain in this loop, so
+                    # one 401/403 already proves the account itself is the problem --
+                    # no reason to keep hammering the remaining domains with the same
+                    # rejected key. Same reasoning as apollo.py for the status split.
+                    if response.status_code in (401, 403):
+                        raise ProviderAuthError(self.name, response.status_code, detail)
+                    if response.status_code in (400, 422):
+                        raise ProviderRequestError(self.name, response.status_code, detail)
                     continue
 
                 try:

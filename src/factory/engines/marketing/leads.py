@@ -54,6 +54,8 @@ from factory.engines.marketing.providers import (
     LeadCandidate,
     LeadProvider,
     LeadSearchPlan,
+    ProviderAuthError,
+    ProviderRequestError,
 )
 from factory.learning import prompts as learning_prompts
 from factory.llm.providers.base import LLMError
@@ -104,6 +106,15 @@ class IngestReport:
     rejected_unverified_entity: int = 0
     by_provider: dict[str, int] = field(default_factory=dict)
     quota_blocked: bool = False
+    #: Set when a provider rejected the request over the credential itself
+    #: (HTTP 401/403) -- the key is present but refused. Distinct from
+    #: MISSING_CREDENTIAL's "absent entirely"; see
+    #: `providers.base.ProviderAuthError` and `marketing/graph.py`'s immediate
+    #: escalation on this field.
+    credential_problem: str | None = None
+    #: Set when a provider rejected the request itself as malformed (HTTP
+    #: 400/422) -- a bug in how this factory calls it, not an account problem.
+    request_problem: str | None = None
 
     def summary(self) -> str:
         if self.quota_blocked:
@@ -285,6 +296,23 @@ async def ingest(
             break
         try:
             found = await provider.search(plan, limit=limit - len(candidates))
+        except ProviderAuthError as exc:
+            # Checked before the generic handler below: this is diagnosable and
+            # worth telling a human about specifically, not just a warning log --
+            # see marketing/graph.py's immediate escalation on this field.
+            log.warning(
+                "leads.provider_auth_rejected", provider=provider.name, status=exc.status_code
+            )
+            if report.credential_problem is None:
+                report.credential_problem = str(exc)
+            continue
+        except ProviderRequestError as exc:
+            log.warning(
+                "leads.provider_request_rejected", provider=provider.name, status=exc.status_code
+            )
+            if report.request_problem is None:
+                report.request_problem = str(exc)
+            continue
         except Exception as exc:
             log.warning("leads.provider_failed", provider=provider.name, detail=str(exc)[:200])
             continue

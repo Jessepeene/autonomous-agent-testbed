@@ -9,6 +9,8 @@ from factory.engines.marketing.providers.base import (
     LeadSearchPlan,
     Provenance,
     ProvenanceKind,
+    ProviderAuthError,
+    ProviderRequestError,
 )
 from factory.engines.marketing.providers.csv_drop import CsvDropProvider
 from factory.engines.marketing.providers.hunter import HunterProvider
@@ -23,6 +25,8 @@ __all__ = [
     "LeadSearchPlan",
     "Provenance",
     "ProvenanceKind",
+    "ProviderAuthError",
+    "ProviderRequestError",
     "build_providers",
 ]
 

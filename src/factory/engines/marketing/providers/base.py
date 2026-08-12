@@ -117,6 +117,39 @@ class LeadProvider(Protocol):
     async def search(self, plan: LeadSearchPlan, *, limit: int = 25) -> list[LeadCandidate]: ...
 
 
+class ProviderAuthError(Exception):
+    """The provider rejected the request over the credential itself -- invalid,
+    expired, or lacking the plan/credits/permission for this call (HTTP 401/403).
+    `available` was true (a key is configured), so this is not
+    MISSING_CREDENTIAL's "absent entirely" -- it is present and being refused.
+
+    Retrying with the same key will fail identically; only a human fixing the
+    provider account can resolve this. See marketing/graph.py's immediate
+    escalation on this exception -- there is no reason to wait a day to ask
+    for something a human could fix in two minutes, the same way this factory
+    already asks immediately for a genuinely missing credential.
+    """
+
+    def __init__(self, provider: str, status_code: int, detail: str) -> None:
+        self.provider = provider
+        self.status_code = status_code
+        self.detail = detail[:300]
+        super().__init__(f"{provider} rejected the request (HTTP {status_code}): {self.detail}")
+
+
+class ProviderRequestError(Exception):
+    """The provider rejected the request itself as malformed (HTTP 400/422) --
+    a bug in how this factory calls the provider, not an account problem.
+    Retrying the identical request will fail identically; this needs a code
+    fix, not anything a human can do in the provider's own dashboard."""
+
+    def __init__(self, provider: str, status_code: int, detail: str) -> None:
+        self.provider = provider
+        self.status_code = status_code
+        self.detail = detail[:300]
+        super().__init__(f"{provider} rejected the request (HTTP {status_code}): {self.detail}")
+
+
 #: Below this the record is treated as unverified and discarded. This is an accuracy
 #: obligation (GDPR Art. 5(1)(d)) before it is a deliverability preference: emailing
 #: a guessed address means processing a real person's data on a wrong assumption.
