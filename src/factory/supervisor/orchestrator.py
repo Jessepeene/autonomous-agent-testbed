@@ -86,16 +86,33 @@ FactorySnapshot = routing.FactorySnapshot
 async def build_snapshot(session: AsyncSession, ctx: FactoryContext) -> FactorySnapshot:
     from sqlalchemy import func, select
 
-    from factory.state.orm import Idea, Interrupt
+    from factory.state.orm import Idea, Interrupt, Product
+    from factory.state.schemas import ProductStatus
 
     pending_by_engine = {
         engine.value: await repository.count_pending_tasks(session, engine)
         for engine in ctx.enabled_engines
     }
+    # An approved idea always gets a product in the same compliance pass (see
+    # test_approved_idea_creates_a_validating_product_not_a_build), so a bare
+    # count of approved ideas is monotonically increasing forever -- it never
+    # drops even once every one of them has shipped or been retired, and by
+    # itself tells the model nothing about whether Development actually has
+    # anything left to do. Excluding the two terminal statuses (nothing further
+    # is ever queued for either) is what makes this a live "still needs
+    # attention" count rather than a lifetime tally. Observed live: this stale
+    # count alone was enough to make the model route to Development on a tick
+    # where its queue was provably empty.
     approved = int(
         (
             await session.execute(
-                select(func.count()).select_from(Idea).where(Idea.status == "approved")
+                select(func.count())
+                .select_from(Idea)
+                .join(Product, Product.idea_id == Idea.id)
+                .where(
+                    Idea.status == "approved",
+                    Product.status.notin_([ProductStatus.RETIRED.value, ProductStatus.LIVE.value]),
+                )
             )
         ).scalar_one()
     )
