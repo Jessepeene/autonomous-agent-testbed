@@ -2316,3 +2316,42 @@ the `UniqueViolationError` hit live.
 **Deployed live**: committed, transferred via `git archive HEAD`, image
 rebuilt, service restarted (no migration step). `/health` reports `ok`, all
 six engines enabled, boot log clean.
+
+## `/status` — a Telegram command, not just push notifications — 2026-08-12
+
+You asked for the current status plus a way to ask for it on demand instead
+of only ever receiving escalations. Confirmed along the way: products already
+had real names (`Product.name = idea.target_niche[:80]`, set at creation in
+`compliance/graph.py::_create_validation`) — `_heal()`'s escalation was the
+only place in the whole codebase using a raw id instead
+(`development/graph.py`, `campaign.py`, `channel.py` all already did this
+right); fixed in the section above.
+
+**New `/status` command** (`hitl/commands.py`): sends back every active
+product's name, current stage, deploy URL, 7-day page views, validation
+signals, lead count, and whether an AB test is running — the same numbers
+`GROWTH_ANALYST` reads (`tools/growth.py::read_product_growth`) — plus how
+many escalations are currently open. Deterministic, no LLM call, so it costs
+nothing to check.
+
+**Dispatched from `collect_replies`, not a second poller**:
+`TelegramNotifier.poll_replies` advances a stateful `offset` on every call, so
+a second, independent `poll_replies()` loop for commands alone would silently
+consume updates the reply-handling loop never saw, or vice versa — one inbound
+channel, one poll per tick, routed by message shape (`/status` vs `#<tag>
+<answer>`) before the existing tag-matching logic runs.
+
+**Verified**: 680 unit + 213 integration tests green on Linux (scratch
+Postgres), no new migration. New coverage: the `STATUS_COMMAND` regex
+(matches `/status`, `/status@BotName`, trailing text; rejects `/statuses`,
+a tagged reply, and plain text mentioning "status"); `build_status_report`
+directly (empty state, a real product's numbers, RETIRED products excluded,
+page views outside the 7-day window excluded); and `collect_replies`
+end-to-end with a scripted notifier, confirming `/status` never resolves or
+touches an unrelated open interrupt sitting in the same poll batch.
+
+**Deployed live**: committed, transferred via `git archive HEAD`, image
+rebuilt, service restarted (no migration step). `/health` reports `ok`, all
+six engines enabled, boot log clean. Not yet exercised against the real
+Telegram API in this pass — that needs an actual message sent from your
+account, which only you can do; try texting the bot `/status`.
