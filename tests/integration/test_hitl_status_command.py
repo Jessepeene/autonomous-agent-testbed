@@ -1,5 +1,6 @@
-"""`/status`: a human can ask the factory for a live snapshot over Telegram,
-instead of only ever receiving push notifications.
+"""`/status` and `/issue #<tag>`: a human can ask the factory for a live
+snapshot, or drill into one escalation's full detail, over Telegram instead
+of only ever receiving push notifications.
 
 Needs Postgres:
 
@@ -18,7 +19,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from factory.hitl.commands import build_status_report
+from factory.hitl.commands import build_issue_detail, build_status_report
 from factory.hitl.interrupts import collect_replies
 from factory.state import repository
 from factory.state.orm import Base
@@ -234,5 +235,106 @@ async def test_collect_replies_answers_status_without_resolving_anything(
     assert "issue: unrelated escalation" in notifier.sent[0]
 
     # The unrelated interrupt must still be open -- /status must not resolve anything.
+    still_open = await repository.stale_open_interrupts(session, older_than=timedelta(seconds=0))
+    assert any(row.id == interrupt_id for row in still_open)
+
+
+# --- build_issue_detail --------------------------------------------------------------
+
+
+async def test_issue_detail_shows_the_full_text_status_only_summarises(
+    session: AsyncSession,
+) -> None:
+    product_id = await _make_product(session, "issue-detail-product")
+    interrupt_id = await repository.open_interrupt(
+        session,
+        reason=InterruptReason.HEAL_EXHAUSTED,
+        subject="issue-detail-product needs help",
+        detail=(
+            "Automated repair did not converge. The last blocking feedback was:\n\n"
+            "The test suite failed (exit 1): ModuleNotFoundError: No module named 'foo'"
+        ),
+        product_id=product_id,
+    )
+    assert interrupt_id is not None
+    await session.flush()
+
+    detail = await build_issue_detail(session, interrupt_id[:8])
+
+    assert "Repair failed repeatedly" in detail
+    assert "issue-detail-product" in detail
+    assert "ModuleNotFoundError: No module named 'foo'" in detail
+    assert f"Reply: #{interrupt_id[:8]} <your answer>" in detail
+
+
+async def test_issue_detail_reports_a_tag_that_matches_nothing_open(
+    session: AsyncSession,
+) -> None:
+    detail = await build_issue_detail(session, "deadbeef")
+
+    assert "No open escalation matches #deadbeef" in detail
+
+
+async def test_issue_detail_does_not_match_a_resolved_interrupt(session: AsyncSession) -> None:
+    interrupt_id = await repository.open_interrupt(
+        session,
+        reason=InterruptReason.MISSING_CREDENTIAL,
+        subject="already handled",
+        detail="the real question",
+    )
+    assert interrupt_id is not None
+    await repository.resolve_interrupt(session, interrupt_id, "fixed")
+    await session.flush()
+
+    detail = await build_issue_detail(session, interrupt_id[:8])
+
+    assert "No open escalation matches" in detail
+    assert "the real question" not in detail
+
+
+async def test_issue_detail_reflects_a_redaction_from_a_retired_product(
+    session: AsyncSession,
+) -> None:
+    """The exact scenario found live: a product's interrupt detail is redacted
+    the moment the product is retired (`purge_product_pii`) -- /issue must show
+    whatever is actually left, not error out or fabricate the original text."""
+    product_id = await _make_product(session, "issue-detail-retired-product")
+    interrupt_id = await repository.open_interrupt(
+        session,
+        reason=InterruptReason.HEAL_EXHAUSTED,
+        subject="needs help",
+        detail="The real original question, before redaction.",
+        product_id=product_id,
+    )
+    assert interrupt_id is not None
+    await repository.purge_product_pii(session, product_id)
+    await session.flush()
+
+    detail = await build_issue_detail(session, interrupt_id[:8])
+
+    assert "redacted" in detail
+    assert "The real original question" not in detail
+
+
+# --- collect_replies dispatches /issue ------------------------------------------------
+
+
+async def test_collect_replies_answers_issue_without_resolving_it(session: AsyncSession) -> None:
+    interrupt_id = await repository.open_interrupt(
+        session,
+        reason=InterruptReason.MISSING_CREDENTIAL,
+        subject="STRIPE_API_KEY missing",
+        detail="Set STRIPE_API_KEY in the environment and reply retry.",
+    )
+    assert interrupt_id is not None
+    await session.flush()
+
+    notifier = _ScriptedNotifier([f"/issue #{interrupt_id[:8]}"])
+    resolved = await collect_replies(session, notifier)
+
+    assert resolved == 0
+    assert len(notifier.sent) == 1
+    assert "Set STRIPE_API_KEY in the environment and reply retry." in notifier.sent[0]
+
     still_open = await repository.stale_open_interrupts(session, older_than=timedelta(seconds=0))
     assert any(row.id == interrupt_id for row in still_open)

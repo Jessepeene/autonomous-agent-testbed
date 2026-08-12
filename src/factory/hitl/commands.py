@@ -1,5 +1,9 @@
-"""``/status`` -- the one Telegram command a human can send the factory, as
-opposed to a tagged reply to a specific escalation (`#<tag> <answer>`).
+"""``/status`` and ``/issue #<tag>`` -- Telegram commands a human can send the
+factory, as opposed to a tagged reply to a specific escalation
+(`#<tag> <answer>`). `/status` is the summary; `/issue` is the drill-down --
+`/status` only shows one line per escalation (`issue: <subject>`), and the
+full original detail text (what a human actually needs to answer it) lives
+one command away rather than requiring a scroll back through Telegram history.
 
 Lives separately from `interrupts.py`'s reply-resolution logic, but is
 dispatched from the same place (`collect_replies`): Telegram polling
@@ -23,6 +27,10 @@ from factory.state import repository
 #: Telegram appends "@BotName" to a command in a group chat; a bare "/status"
 #: is what a 1:1 chat sends. Matches either, and ignores anything after.
 STATUS_COMMAND = re.compile(r"^/status(@\w+)?\b", re.IGNORECASE)
+
+#: "/issue #a1b2c3d4" or "/issue a1b2c3d4" -- the "#" is optional since /status
+#: itself prints the tag with one, and typing it back is the natural instinct.
+ISSUE_COMMAND = re.compile(r"^/issue(@\w+)?\s+#?([0-9a-f]{8})\b", re.IGNORECASE)
 
 _MAX_PRODUCTS = 10
 
@@ -102,5 +110,35 @@ async def build_status_report(session: AsyncSession) -> str:
         )
     if interrupt_total > len(interrupts):
         lines.append(f"\n...and {interrupt_total - len(interrupts)} more.")
+    if interrupts:
+        lines.append("\nSend /issue #<tag> for the full detail on any one of these.")
 
     return "\n".join(lines)
+
+
+async def build_issue_detail(session: AsyncSession, tag: str) -> str:
+    """The full text behind one escalation's short `issue:` line in `/status` --
+    what a human actually needs to answer it, without hunting back through
+    Telegram history for the original push message (which may have scrolled
+    off, or arrived before the human was watching).
+
+    Scoped to *open* interrupts only, same as a tagged reply (`#<tag> <answer>`)
+    -- a resolved one has nothing left to act on.
+    """
+    interrupt = await repository.find_open_interrupt_by_tag(session, tag)
+    if interrupt is None:
+        return f"No open escalation matches #{tag}. Send /status for the current list."
+
+    about = "(not tied to a specific product)"
+    if interrupt.product_id:
+        product = await repository.get_product(session, interrupt.product_id)
+        if product is not None:
+            about = f"{product.name} ({product.status})"
+    reason_label = _REASON_LABEL.get(interrupt.reason, interrupt.reason)
+
+    return (
+        f"#{tag} — {reason_label}\n"
+        f"about: {about}\n\n"
+        f"{interrupt.detail}\n\n"
+        f"Reply: #{tag} <your answer>"
+    )
