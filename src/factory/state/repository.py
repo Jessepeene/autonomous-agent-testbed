@@ -586,6 +586,19 @@ async def live_products(session: AsyncSession, limit: int = 20) -> list[Product]
     return list((await session.execute(stmt)).scalars().all())
 
 
+async def active_products(session: AsyncSession, limit: int = 20) -> list[Product]:
+    """Every product still doing something -- everything except RETIRED, not just
+    LIVE -- for `/status`'s Telegram report (`hitl/commands.py`), which should show
+    a product mid-build or mid-validation too, not only ones already shipped."""
+    stmt = (
+        select(Product)
+        .where(Product.status != ProductStatus.RETIRED.value)
+        .order_by(Product.updated_at.desc())
+        .limit(limit)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
 async def set_growth_reviewed(session: AsyncSession, product_id: str) -> None:
     await _set_product_timestamp(session, product_id, "last_growth_review_at")
 
@@ -828,6 +841,11 @@ async def leads_for_outreach(
         stmt = stmt.where(Lead.product_id == product_id)
     stmt = stmt.order_by(Lead.created_at.asc()).limit(limit)
     return list((await session.execute(stmt)).scalars().all())
+
+
+async def count_leads(session: AsyncSession, product_id: str) -> int:
+    stmt = select(func.count()).select_from(Lead).where(Lead.product_id == product_id)
+    return int((await session.execute(stmt)).scalar_one())
 
 
 async def insert_validation_signal(
@@ -1242,6 +1260,11 @@ async def open_interrupt(
 async def undelivered_interrupts(session: AsyncSession) -> list[Interrupt]:
     stmt = select(Interrupt).where(Interrupt.status == "open", Interrupt.delivered.is_(False))
     return list((await session.execute(stmt)).scalars().all())
+
+
+async def count_open_interrupts(session: AsyncSession) -> int:
+    stmt = select(func.count()).select_from(Interrupt).where(Interrupt.status == "open")
+    return int((await session.execute(stmt)).scalar_one())
 
 
 async def stale_open_interrupts(session: AsyncSession, *, older_than: timedelta) -> list[Interrupt]:

@@ -16,6 +16,7 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from factory.hitl import commands
 from factory.logging import get_logger
 from factory.settings import EngineName
 from factory.state import repository
@@ -122,7 +123,11 @@ async def deliver_pending(session: AsyncSession, notifier: Notifier) -> int:
 
 
 async def collect_replies(session: AsyncSession, notifier: Notifier) -> int:
-    """Resolve interrupts from tagged human replies.
+    """Resolve interrupts from tagged human replies -- and, before that, hand off
+    a bare `/status` message to `commands.py` (see its own module docstring for
+    why a command is dispatched from here rather than a second poller: Telegram
+    polling advances a stateful offset per call, so a second `poll_replies()`
+    for commands alone would silently miss whatever this one already consumed).
 
     A reply containing "retry" to an interrupt tied to a specific task (one whose
     detail explicitly asked for this — see `graph.py`'s escalation text) reopens
@@ -151,6 +156,9 @@ async def collect_replies(session: AsyncSession, notifier: Notifier) -> int:
         return 0
     resolved = 0
     for message in await notifier.poll_replies():
+        if commands.STATUS_COMMAND.match(message.strip()):
+            await notifier.send(await commands.build_status_report(session))
+            continue
         match = _TAG.search(message)
         if match is None:
             continue
