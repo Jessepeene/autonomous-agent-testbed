@@ -1461,6 +1461,28 @@ async def drain_scout_signals(session: AsyncSession, task_id: str) -> list[Scout
     return rows
 
 
+# ---------------------------------------------------------------- data integrity
+
+
+async def orphaned_approved_ideas(session: AsyncSession) -> list[Idea]:
+    """Every idea marked 'approved' should have at least one product --
+    Compliance always creates one in the same pass an idea is approved. An
+    approved idea with no product at all means that guarantee broke somewhere.
+
+    Deliberately the mirror image of `orchestrator.py::build_snapshot`'s
+    `approved_ideas_waiting` query: that one INNER JOINs and filters on product
+    status, which silently drops (undercounts, never flags) any approved idea
+    with no matching product row at all. This checks the assumption the other
+    query just trusts.
+    """
+    stmt = (
+        select(Idea)
+        .outerjoin(Product, Product.idea_id == Idea.id)
+        .where(Idea.status == "approved", Product.id.is_(None))
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
 # --------------------------------------------------------------- entity verdicts
 
 

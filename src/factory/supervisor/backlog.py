@@ -140,6 +140,21 @@ CATALOGUE: tuple[MaintenanceItem, ...] = (
         engine=EngineName.SUPERVISOR,
         cadence_hours=6,
     ),
+    # --- metric integrity ---------------------------------------------------------
+    # A different failure mode than everything above: not "is this value good",
+    # but "does the assumption a snapshot metric silently relies on still hold at
+    # all" -- the learning loop tunes within a measurement framework, this checks
+    # the framework itself. Deterministic, no LLM call -- see supervisor/audit.py.
+    MaintenanceItem(
+        slug="audit-snapshot-integrity",
+        objective=(
+            "Verify the structural assumptions behind Orchestrator-facing snapshot "
+            "metrics still hold -- e.g. that every approved idea actually has a "
+            "product, the guarantee approved_ideas_waiting's query silently relies on."
+        ),
+        engine=EngineName.SUPERVISOR,
+        cadence_hours=24,
+    ),
 )
 
 

@@ -133,6 +133,14 @@ class InterruptReason(StrEnum):
     #: product, never blocking (the Vercel subdomain already works). See
     #: development/domain.py.
     DOMAIN_REQUIRED = "domain_required"
+    #: A structural assumption an Orchestrator-facing snapshot metric silently
+    #: relies on has stopped holding -- e.g. an idea marked 'approved' with no
+    #: product at all, which `build_snapshot`'s `approved_ideas_waiting` query
+    #: would just quietly undercount rather than ever flag. Not urgent (nothing
+    #: crashes, no money moves), but worth a human's attention rather than
+    #: discovery weeks later by someone noticing a number looks off. See
+    #: supervisor/audit.py.
+    DATA_INTEGRITY = "data_integrity"
 
 
 class ComplianceStatus(StrEnum):

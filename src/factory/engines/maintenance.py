@@ -72,6 +72,11 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
         threshold = timedelta(hours=ctx.settings.stale_interrupt_reminder_hours)
         count = await remind_stale(session, ctx.notifier, older_than=threshold)
         return f"hitl/remind: {count} stale interrupt(s) reminded"
+    if slug == "audit-snapshot-integrity":
+        from factory.supervisor.audit import check_approved_idea_orphans
+
+        count = await check_approved_idea_orphans(session)
+        return f"supervisor/audit: {count} orphaned approved idea(s) found"
 
     objective = str(task.payload.get("objective", "Improve the factory."))
     role = ROLE_BY_SLUG.get(slug, RoleName.ANALYST)
