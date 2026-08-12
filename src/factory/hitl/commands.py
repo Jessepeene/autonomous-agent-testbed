@@ -67,7 +67,15 @@ async def build_status_report(session: AsyncSession) -> str:
         if interrupt.product_id:
             escalation_product = await repository.get_product(session, interrupt.product_id)
             if escalation_product is not None:
-                where = f" [{escalation_product.name[:60]} -- {escalation_product.status}]"
+                # No truncation here, unlike the active-product listing above being
+                # this section's only real distinguishing text: a name mid-cut right
+                # before the one word that actually told two similarly-worded
+                # products apart read as confusingly identical to the untruncated
+                # name shown above it -- found live. `Product.name` is capped at 80
+                # chars at creation (idea.target_niche[:80]) and Telegram's own
+                # message cap is 3900 chars for the whole report, so showing it in
+                # full here is always safe.
+                where = f" [{escalation_product.name} -- {escalation_product.status}]"
         lines.append(f"\n• #{interrupt.id[:8]} ({interrupt.reason}){where}\n  {interrupt.subject}")
     if interrupt_total > len(interrupts):
         lines.append(f"\n...and {interrupt_total - len(interrupts)} more.")

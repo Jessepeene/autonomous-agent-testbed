@@ -134,6 +134,34 @@ async def test_an_escalations_product_is_named_even_if_it_is_not_in_the_active_l
     assert healthy_product_id != stuck_product_id
 
 
+async def test_an_escalations_product_name_is_never_truncated(session: AsyncSession) -> None:
+    """Regression, found live: the escalation's product name used to be cut at 60
+    chars. Real product names are `target_niche[:80]`, so two long, similarly-
+    worded names (a realistic case: a reseeded idea reusing most of the original
+    wording) had their one differentiating word land past that cutoff -- the
+    escalation then showed a name that looked identical to whatever product was
+    listed as active above it, plus a literal double space where the cut text
+    collided with " -- "."""
+    long_name = "Freelance bookkeepers managing 5+ small-business clients on QuickBooks or Xero"
+    assert len(long_name) > 60  # the fixture must actually exercise the old cutoff
+    stuck_product_id = await _make_product(session, long_name)
+    await repository.retire_product(session, stuck_product_id)
+    interrupt_id = await repository.open_interrupt(
+        session,
+        reason=InterruptReason.HEAL_EXHAUSTED,
+        subject="needs help",
+        detail="Automated repair did not converge.",
+        product_id=stuck_product_id,
+    )
+    assert interrupt_id is not None
+    await session.flush()
+
+    report = await build_status_report(session)
+
+    assert f"{long_name} -- retired" in report
+    assert "  --" not in report  # no leftover double space from a mid-cut name
+
+
 async def test_reports_a_products_name_stage_and_numbers(session: AsyncSession) -> None:
     product_id = await _make_product(session, "status-report-product")
     await repository.record_page_view(session, product_id=product_id, path="/")
