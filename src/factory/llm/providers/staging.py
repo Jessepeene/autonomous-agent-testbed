@@ -243,7 +243,13 @@ def test_page_loads_and_contains_pitch_and_form() -> None:
     assert "interest-form" in body
     assert "<form" in body
 '''
-    requirements = "fastapi>=0.115,<1\nuvicorn>=0.30,<1\nhttpx>=0.27,<1\n"
+    # pytest itself, not just what the tests import: the sandbox installs nothing
+    # beyond this file (`development/graph.py`'s install step), and the real
+    # e2e test's sandbox is a scripted always-passing fake that never actually
+    # runs pip/pytest -- so a fixture that forgot to list its own test runner
+    # passed every check until the first real live build against a real,
+    # bare sandbox actually tried to run `pytest tests/ -q` and found it missing.
+    requirements = "fastapi>=0.115,<1\nuvicorn>=0.30,<1\nhttpx>=0.27,<1\npytest>=8.0,<9\n"
     readme = "# Staging fixture\n\nRun: `uvicorn app.server:app`\nTest: `pytest tests/ -q`\n"
     return [
         GeneratedFile(path="app/__init__.py", contents=""),
@@ -462,7 +468,9 @@ def test_checkout_creates_a_session_for_an_authenticated_user() -> None:
     assert response.status_code == 200
     assert response.json()["checkout_url"] == "https://checkout.stripe.test/fake"
 '''
-    requirements = "fastapi>=0.115,<1\nuvicorn>=0.30,<1\nhttpx>=0.27,<1\nstripe>=11.0,<12\n"
+    requirements = (
+        "fastapi>=0.115,<1\nuvicorn>=0.30,<1\nhttpx>=0.27,<1\nstripe>=11.0,<12\npytest>=8.0,<9\n"
+    )
     readme = "# Staging fixture MVP\n\nRun: `uvicorn app.server:app`\nTest: `pytest tests/ -q`\n"
     return [
         GeneratedFile(path="app/__init__.py", contents=""),

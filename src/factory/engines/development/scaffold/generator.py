@@ -43,7 +43,9 @@ The MVP must include, as actual files with real contents:
   sitemap.xml (listing the root URL) and robots.txt (allowing all crawlers).
 - A pytest suite covering the core feature and the auth boundary.
 - requirements.txt with a minimum-version lower bound per package (e.g. \
-"pydantic>=2.9,<3"), and a README with run instructions.
+"pydantic>=2.9,<3"), and a README with run instructions. The sandbox installs \
+nothing beyond this file, so requirements.txt must list pytest itself, not just \
+the packages the tests import.
 
 Hard constraints:
 - Every file must be complete. No TODOs, no placeholders, no "implement this".
@@ -134,7 +136,9 @@ produce two standalone files: sitemap.xml (listing the root URL) and robots.txt 
 equivalent minimal static server) and asserts the page loads and contains the pitch \
 and the form.
 - requirements.txt with a minimum-version lower bound per package (see the pinning \
-rule below), and a README with run instructions.
+rule below), and a README with run instructions. The sandbox installs nothing \
+beyond this file, so requirements.txt must list pytest itself, not just the \
+packages the tests import.
 
 This is deliberately NOT a real product:
 - No authentication, no user accounts, no database beyond nothing.

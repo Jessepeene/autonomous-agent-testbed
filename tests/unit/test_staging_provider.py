@@ -97,6 +97,36 @@ async def test_an_mvp_prompt_yields_the_auth_and_billing_fixture() -> None:
     assert "prod-123" not in sources["app/index.html"]
 
 
+async def test_both_fixtures_requirements_list_pytest_itself() -> None:
+    """Regression: found live, not in this suite. The sandbox installs nothing
+    beyond a build's own requirements.txt (`development/graph.py`'s install
+    step), and this file's own real-pytest-run test above deliberately does NOT
+    isolate from the ambient dev venv (it relies on pytest already being
+    installed here, to avoid corrupting the shared venv -- see its docstring),
+    so a fixture that listed everything its tests *import* but forgot to list
+    pytest *itself* passed every check here and still failed the moment a real,
+    genuinely isolated sandbox tried to run `pytest tests/ -q` against it."""
+    provider = StagingCodeProvider()
+
+    landing = await provider.parse(
+        ScaffoldPlan,
+        system="s",
+        prompt=_LANDING_PROMPT,
+        task_type=TaskType.CODE_GENERATION,
+        model="claude-opus-5",
+    )
+    mvp = await provider.parse(
+        ScaffoldPlan,
+        system="s",
+        prompt=_MVP_PROMPT,
+        task_type=TaskType.CODE_GENERATION,
+        model="claude-opus-5",
+    )
+
+    assert "pytest" in _sources(landing.value)["requirements.txt"]
+    assert "pytest" in _sources(mvp.value)["requirements.txt"]
+
+
 async def test_the_interest_url_falls_back_safely_when_the_prompt_has_no_match() -> None:
     """A malformed or missing marker must not crash generation -- it should degrade
     to a placeholder URL, not raise, since this stands in for a real provider call
