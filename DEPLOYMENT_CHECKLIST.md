@@ -2464,3 +2464,51 @@ that an already-escalated product is left alone, and both reply paths
 the stalled-validation sweep), transferred via `git archive HEAD`, image
 rebuilt, service restarted. `/health` reports `ok`, all six engines
 enabled, boot log clean.
+
+## Classifying lead-provider failures: key problem vs. code problem vs. transient — 2026-08-12
+
+You proposed making the stalled-validation escalation itself smarter first:
+a 403 means either the code or the key is wrong — check that before asking
+for help, and if it *is* the key, that's the same basket as asking for a
+genuinely missing credential, not a novel kind of ask.
+
+HTTP semantics already carry this distinction cleanly: 401/403 means the key
+is present but refused (invalid, expired, insufficient plan/credits) — an
+account problem no retry will ever fix. 400/422 means the request itself is
+malformed — a bug in this factory's own code, not an account problem.
+Neither of Apollo's or Hunter's adapters previously captured this: any
+non-200 response just logged a bare status code and returned `[]`,
+indistinguishable from "searched successfully, found nobody real."
+
+Added `ProviderAuthError`/`ProviderRequestError` (`providers/base.py`),
+raised by both adapters on the matching status codes; Hunter's per-domain
+search loop stops on the first one rather than repeating the same rejected
+key across the remaining domains. `leads.ingest()` catches both and records
+them on `IngestReport`. `marketing/graph.py::_harvest()` now escalates
+*immediately* when either is diagnosed — not deferred to the
+stalled-validation sweep's next check, since there is no reason to make a
+human wait up to a day to be asked about something fixable in two minutes.
+Reuses the existing `LEAD_SOURCING_STALLED` reason and reply handling
+(REJECT retires, anything else retries) rather than a new mechanism, worded
+honestly and differently for each case ("check the provider's dashboard" vs.
+"this looks like a bug in the request-building code, not an account issue").
+Deduped against an already-open escalation, same as the sweep, so a
+persistently broken credential does not re-ask on every later harvest cycle
+(the periodic live-product sweep runs every 12h).
+
+429/5xx/network failures are untouched — still logged and degraded
+gracefully, since those may resolve on their own and are exactly what the
+slower, patient stalled-validation sweep already covers.
+
+**Verified**: 699 unit + 238 integration tests green on Linux (scratch
+Postgres), no new migration. New unit coverage: both adapters raise the
+right exception on 401/403/400/422 and degrade gracefully on 429/5xx/503;
+Hunter's domain loop stops after exactly one rejected-key response instead
+of repeating it. New integration coverage: the escalation's wording differs
+correctly by failure kind, it's deduped against an already-open one, and
+`_harvest()` actually calls it when `ingest()` reports a diagnosed problem
+(and does *not* when a search just genuinely finds nobody).
+
+**Deployed live**: committed, transferred via `git archive HEAD`, image
+rebuilt, service restarted. `/health` reports `ok`, all six engines
+enabled, boot log clean.
