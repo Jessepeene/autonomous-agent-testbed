@@ -162,6 +162,14 @@ class Settings(BaseSettings):
     # tallies referrer hits and concludes it. Long enough that a human has had time
     # to actually post the draft and for any resulting traffic to show up.
     channel_experiment_measure_days: int = Field(default=14, ge=1)
+    # How long a VALIDATING product with zero leads waits before the stalled-
+    # validation sweep (scheduler.py) tries one automatic re-harvest, and how long
+    # after *that* before it escalates to a human if still empty. Short relative to
+    # the day-scale settings above: a stalled validation blocks everything
+    # downstream for that product, so catching it sooner has real value, and a
+    # provider outage or a bad credential is worth surfacing quickly, not after a
+    # week of silent nothing. See repository.stalled_validations.
+    validation_stalled_hours: int = Field(default=24, ge=1)
     compliance_min_confidence: float = Field(default=0.85, ge=0.0, le=1.0)
     # Hard ceiling on aggregate LLM spend in any trailing 24h window. `None` (the
     # default) leaves the breaker disabled — an operator opts in deliberately, since

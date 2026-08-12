@@ -148,6 +148,15 @@ class InterruptReason(StrEnum):
     #: legal question -- confusing enough on its own to be worth a real reason.
     #: See development/graph.py::_heal.
     HEAL_EXHAUSTED = "heal_exhausted"
+    #: A validating product's lead sourcing found nothing, and one automatic
+    #: retry (`scheduler.py`'s stalled-validation sweep) *also* found nothing --
+    #: e.g. a lead-provider credential that is present but being rejected (a
+    #: 403, not MISSING_CREDENTIAL's "absent entirely"), or a niche too narrow
+    #: for either provider. Before this, a validation stuck this way had no
+    #: automatic path forward at all: HARVEST_LEADS is a one-shot enqueue, so
+    #: nothing ever asked again and nothing ever told a human -- observed live.
+    #: See marketing/graph.py and supervisor/scheduler.py.
+    LEAD_SOURCING_STALLED = "lead_sourcing_stalled"
 
 
 class ComplianceStatus(StrEnum):

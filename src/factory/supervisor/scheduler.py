@@ -30,7 +30,7 @@ from factory.logging import get_logger
 from factory.settings import EngineName
 from factory.state import repository
 from factory.state.db import session_scope
-from factory.state.schemas import TaskKind
+from factory.state.schemas import InterruptReason, TaskKind
 from factory.supervisor.context import FactoryContext
 
 log = get_logger(__name__)
@@ -126,6 +126,55 @@ class Scheduler:
                     product_id=product.id,
                     priority=120,
                 )
+
+            # The stalled-validation net: unlike the live-products sweep above,
+            # HARVEST_LEADS for a *validating* product is a one-shot enqueue
+            # (see development/graph.py) -- nothing else ever asks again on its
+            # own. A validation stuck at zero leads (an external provider
+            # credential rejected, or a niche too narrow for either provider)
+            # previously just sat there forever with no automatic path forward
+            # and nothing telling a human -- observed live. Checked hourly
+            # (cheap: a few counts, not a paid lookup) so a fresh stall is
+            # caught promptly, but the actual retry/escalate decision is gated
+            # by real elapsed time (`validation_stalled_hours`), not this
+            # cadence.
+            for product in await repository.stalled_validations(
+                session,
+                older_than=timedelta(hours=ctx.settings.validation_stalled_hours),
+                limit=5,
+            ):
+                if not await repository.has_retried_lead_sourcing(session, product.id):
+                    # First strike: try once more, exactly like a person finding
+                    # the internet down would first check whether it is back up
+                    # before bothering anyone.
+                    await repository.enqueue_task(
+                        session,
+                        kind=TaskKind.HARVEST_LEADS,
+                        engine=EngineName.MARKETING,
+                        idempotency_key=f"leads:validate:{product.id}:retry",
+                        payload={"product_id": product.id},
+                        product_id=product.id,
+                        priority=120,
+                    )
+                else:
+                    # Second strike: the automatic retry did not help either --
+                    # this is not something more waiting can fix on its own.
+                    await interrupts.request(
+                        session,
+                        reason=InterruptReason.LEAD_SOURCING_STALLED,
+                        subject=f"{product.name[:80]} can't source leads ({product.id[:8]})",
+                        detail=(
+                            f"Product: {product.name} ({product.id})\n\n"
+                            "Two lead-sourcing attempts both found nothing for this "
+                            "validating product. This usually means a lead-provider "
+                            "credential (Hunter/Apollo) is present but being "
+                            "rejected, not that it's genuinely missing -- worth "
+                            "checking the provider account directly.\n\n"
+                            "Reply with anything to try sourcing leads again, or "
+                            "REJECT to retire this product."
+                        ),
+                        product_id=product.id,
+                    )
 
             # CHANNEL_SCOUT's reliability net -- the Orchestrator can spawn it
             # directly (it is in role_catalogue()); this is what still finds a

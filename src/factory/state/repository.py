@@ -652,6 +652,59 @@ async def products_needing_channel_scout(
     return list((await session.execute(stmt)).scalars().all())
 
 
+async def stalled_validations(
+    session: AsyncSession, *, older_than: timedelta, limit: int = 10
+) -> list[Product]:
+    """VALIDATING products old enough that their one-shot validation harvest
+    (``leads:validate:{id}``, see `development/graph.py::_build_landing_page`)
+    has had time to run, but that still have zero leads at all -- the exact
+    shape of a silent dead end. `HARVEST_LEADS` is enqueued exactly once per
+    validating product; nothing else ever asks again on its own, so a product
+    stuck this way (an external lead-provider credential rejected, or a niche
+    too narrow for either provider) previously just sat there forever with no
+    automatic path forward and nothing telling a human -- observed live.
+
+    Excludes any product that already has an open interrupt -- a human is
+    already being asked, so this must not pile on a second automatic action
+    (a retry, or another escalation) while that reply is still pending.
+    """
+    cutoff = _now() - older_than
+    no_leads = ~select(Lead.id).where(Lead.product_id == Product.id).exists()
+    no_open_interrupt = (
+        ~select(Interrupt.id)
+        .where(Interrupt.product_id == Product.id, Interrupt.status == "open")
+        .exists()
+    )
+    stmt = (
+        select(Product)
+        .where(
+            Product.status == ProductStatus.VALIDATING.value,
+            Product.created_at < cutoff,
+            no_leads,
+            no_open_interrupt,
+        )
+        .order_by(Product.created_at.asc())
+        .limit(limit)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def has_retried_lead_sourcing(session: AsyncSession, product_id: str) -> bool:
+    """Whether more than the original one-shot validation harvest has ever run
+    for this product -- the signal the stalled-validation sweep
+    (`scheduler.py::_schedule_periodic`) uses to decide "try once more"
+    (the first time) vs. "ask a human" (every time after), regardless of
+    whether that later attempt came from the sweep's own retry or a human's
+    `#tag <answer>` reply asking for one.
+    """
+    stmt = (
+        select(func.count())
+        .select_from(Task)
+        .where(Task.product_id == product_id, Task.kind == TaskKind.HARVEST_LEADS.value)
+    )
+    return int((await session.execute(stmt)).scalar_one()) >= 2
+
+
 async def set_vercel_project(session: AsyncSession, product_id: str, project: str) -> None:
     await session.execute(
         update(Product).where(Product.id == product_id).values(vercel_project=project)
@@ -1277,6 +1330,20 @@ async def list_open_interrupts(session: AsyncSession, limit: int = 10) -> list[I
         .limit(limit)
     )
     return list((await session.execute(stmt)).scalars().all())
+
+
+async def find_open_interrupt_by_tag(session: AsyncSession, tag: str) -> Interrupt | None:
+    """Same short-tag scheme as `hitl.interrupts.tag_for` (an interrupt id's first
+    8 characters) -- used by `/issue` (`hitl/commands.py`) to look up one specific
+    escalation's full detail, independent of `interrupts.py`'s own identical
+    reply-matching lookup (`_find_open_by_tag`) so `commands.py` never has to
+    import from the module that already imports it."""
+    needle = tag.lower()
+    stmt = select(Interrupt).where(Interrupt.status == "open")
+    for row in (await session.execute(stmt)).scalars().all():
+        if row.id.lower().startswith(needle):
+            return row
+    return None
 
 
 async def stale_open_interrupts(session: AsyncSession, *, older_than: timedelta) -> list[Interrupt]:

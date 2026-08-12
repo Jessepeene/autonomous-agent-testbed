@@ -20,7 +20,7 @@ from factory.hitl import commands
 from factory.logging import get_logger
 from factory.settings import EngineName
 from factory.state import repository
-from factory.state.orm import Interrupt, Task
+from factory.state.orm import Interrupt, Task, new_id
 from factory.state.schemas import InterruptReason, TaskKind
 
 log = get_logger(__name__)
@@ -124,10 +124,11 @@ async def deliver_pending(session: AsyncSession, notifier: Notifier) -> int:
 
 async def collect_replies(session: AsyncSession, notifier: Notifier) -> int:
     """Resolve interrupts from tagged human replies -- and, before that, hand off
-    a bare `/status` message to `commands.py` (see its own module docstring for
-    why a command is dispatched from here rather than a second poller: Telegram
-    polling advances a stateful offset per call, so a second `poll_replies()`
-    for commands alone would silently miss whatever this one already consumed).
+    a `/status` or `/issue #<tag>` message to `commands.py` (see its own module
+    docstring for why a command is dispatched from here rather than a second
+    poller: Telegram polling advances a stateful offset per call, so a second
+    `poll_replies()` for commands alone would silently miss whatever this one
+    already consumed).
 
     A reply containing "retry" to an interrupt tied to a specific task (one whose
     detail explicitly asked for this — see `graph.py`'s escalation text) reopens
@@ -151,6 +152,13 @@ async def collect_replies(session: AsyncSession, notifier: Notifier) -> int:
     the build, or REJECT to discard the idea" text was equally aspirational --
     neither word did anything, and the idea just sat `flagged` forever, invisible to
     every pipeline count but never actually resolved either way.
+
+    A reply to a stalled-validation interrupt (`scheduler.py`'s stalled-validation
+    sweep, raised once an automatic retry also found zero leads) is handled the
+    same shape again: REJECT retires the product, anything else queues a fresh
+    lead-sourcing attempt. Before this existed at all, a validation stuck at zero
+    leads had no automatic path forward and nothing ever told a human -- observed
+    live.
     """
     if not notifier.available:
         return 0
@@ -158,6 +166,10 @@ async def collect_replies(session: AsyncSession, notifier: Notifier) -> int:
     for message in await notifier.poll_replies():
         if commands.STATUS_COMMAND.match(message.strip()):
             await notifier.send(await commands.build_status_report(session))
+            continue
+        issue_match = commands.ISSUE_COMMAND.match(message.strip())
+        if issue_match:
+            await notifier.send(await commands.build_issue_detail(session, issue_match.group(2)))
             continue
         match = _TAG.search(message)
         if match is None:
@@ -192,6 +204,16 @@ async def collect_replies(session: AsyncSession, notifier: Notifier) -> int:
             # completely wrong for a domain reply, which shares the same
             # (product_id set, task_id unset) shape for an unrelated reason.
             action = await _act_on_domain_reply(session, target.product_id, answer)
+        elif (
+            target.reason == InterruptReason.LEAD_SOURCING_STALLED.value
+            and target.product_id
+            and not target.task_id
+        ):
+            # Same reasoning as the DOMAIN_REQUIRED branch above: this shares the
+            # generic branch's (product_id set, task_id unset) shape, but "reply
+            # with anything to try again" is a completely different action from
+            # that branch's "anything but REJECT means code-patch guidance."
+            action = await _act_on_lead_sourcing_reply(session, target.product_id, answer)
         elif target.product_id and not target.task_id:
             action = await _act_on_product_reply(session, target.id, target.product_id, answer)
         log.info("hitl.resolved", interrupt_id=target.id, action=action)
@@ -270,6 +292,27 @@ async def _act_on_domain_reply(session: AsyncSession, product_id: str, answer: s
         priority=80,
     )
     return "domain_attach_queued" if task_id else "none"
+
+
+async def _act_on_lead_sourcing_reply(session: AsyncSession, product_id: str, answer: str) -> str:
+    """REJECT retires the product, same convention as heal-exhaustion. Any other
+    reply -- "fixed the Apollo key", "try again", or anything else -- is treated
+    as "go ahead and try sourcing leads again": a fresh, unbounded-key harvest
+    (not the sweep's own `:retry` key, already spent) so it is not blocked by
+    the two idempotency keys that already exist for this product."""
+    if _REJECT_WORD.search(answer):
+        retired = await repository.retire_product(session, product_id)
+        return "retired" if retired else "none"
+    task_id = await repository.enqueue_task(
+        session,
+        kind=TaskKind.HARVEST_LEADS,
+        engine=EngineName.MARKETING,
+        idempotency_key=f"leads:validate:{product_id}:human-retry:{new_id()}",
+        payload={"product_id": product_id},
+        product_id=product_id,
+        priority=120,
+    )
+    return "retry_queued" if task_id else "none"
 
 
 async def _find_open_by_tag(session: AsyncSession, tag: str) -> Interrupt | None:
