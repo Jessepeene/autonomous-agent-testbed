@@ -241,7 +241,11 @@ async def test_heal_exhaustion_escalation_names_the_product_with_the_right_reaso
     assert row.reason == InterruptReason.HEAL_EXHAUSTED.value
     assert "heal-memory-name-check" in row.subject
     assert product_id not in row.subject  # readable subject, id kept out of it
-    assert product_id in row.detail  # but still traceable from the detail body
+    # `detail` is now a plain-language LLM rewrite for a non-technical operator
+    # (see interrupts.plain_language_error) -- it deliberately no longer embeds
+    # the raw hex id. Traceability lives in the row's own `product_id` column
+    # (queried above) and in structured logs, not in the human-facing text.
+    assert row.product_id == product_id
 
 
 async def test_two_separate_exhaustions_for_the_same_product_do_not_collide(
