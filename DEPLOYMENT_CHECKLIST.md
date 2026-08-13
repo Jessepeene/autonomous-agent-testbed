@@ -2686,3 +2686,58 @@ provider across two calls).
 rebuilt, migration `0018` applied to the live database, service restarted.
 `/health` reports `ok`, all six engines enabled, boot log clean. Not yet
 active — waiting on `SERPER_API_KEY`.
+
+## First real test, and a no-call list for domains that block the scraper — 2026-08-13
+
+You supplied `SERPER_API_KEY`. Set it live, restarted, and ran a real test
+harvest against the still-stuck bookkeepers product — the orchestrator was mid
+way through building two newly-approved products and its own tick-repeat
+detector didn't fire this time (a separate, pre-existing quirk not touched
+here), so the harvest task was run directly rather than waiting on the
+scheduler.
+
+**Result: the provider works end to end, found zero leads.** Real Serper
+results came back, robots.txt was correctly respected (a Reddit thread was
+skipped without a fetch), no crash, no auth error — but every single page
+fetch failed: `ConnectTimeout` against small sites
+(`adequatebookkeeping.com`), `ReadTimeout` against a large one
+(`quickbooks.intuit.com`). Confirmed via a direct diagnostic from inside the
+live container that this is not a general networking problem —
+`example.com`/`python.org` both fetched instantly from the same box. It's
+specifically these target sites resisting a request from the server's
+DigitalOcean datacenter IP: basic host-level blocking on the small sites,
+likely Akamai/Cloudflare-style bot defenses stalling the response on Intuit.
+This is a real, structural limitation of scraping from a cloud IP without
+bot-evasion infrastructure, not a bug in the request-building code — recorded
+as [[project-scraping-datacenter-ip-blocking]] for future reference.
+
+Per your direction: try a bigger sample before concluding anything, but stop
+repeatedly paying for the same known-bad domains — put them on a "no call
+list." A real scraper-proxy fix (residential IPs) is deliberately deferred,
+not forgotten.
+
+**Fix**: `scrape_domain_failures` (migration `0019`) — a running per-domain
+failure count, global across products (a site blocking this server's IP
+blocks every product's harvest equally). `repository.record_scrape_failure`
+upserts and returns the post-increment count via `RETURNING`, avoiding a
+second round trip to check the threshold. `_fetch_page_text` now returns
+`(page_text, block_reason)`; only `httpx.TimeoutException` and HTTP 403 count
+toward blocking (a 404 or a non-HTML content type is a normal skip, not a
+rejection). Once a domain crosses `_DOMAIN_BLOCK_THRESHOLD` (2), it's skipped
+before a fetch is even attempted — checked once at the top of `search()` and
+updated in-call, so a third same-domain result within one harvest is also
+skipped, not just on a future one.
+
+**Verified**: 990 unit + integration tests green on Linux (scratch Postgres),
+migration `0019` applied cleanly (0001 through head). New coverage: a domain
+already on the no-call list is never fetched, a timeout/403 correctly
+records a failure, and a same-call third result on a domain that just
+crossed the threshold is skipped while the first two (which had no way to be
+known-bad in advance) still get attempted. Two new repository-level
+integration tests confirm the failure count persists and blocks correctly
+against real Postgres, and that two different domains' counts stay
+independent.
+
+**Deployed live**: committed, transferred via `git archive HEAD`, image
+rebuilt, migration `0019` applied to the live database, service restarted.
+`/health` reports `ok`, all six engines enabled, boot log clean.
