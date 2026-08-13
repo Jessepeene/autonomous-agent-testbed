@@ -226,6 +226,8 @@ async def test_channel_experiment_lifecycle_from_proposal_to_decision(
         reason=InterruptReason.CHANNEL_APPROVAL,
         subject=f"Channel proposal ({experiment_id[:8]}): reddit",
         detail="...",
+        headline="Test escalation",
+        reply_hint="Reply APPROVE to authorise, or REJECT to decline.",
     )
     assert interrupt_id is not None
     await repository.set_channel_experiment_interrupt(session, experiment_id, interrupt_id)
@@ -264,6 +266,8 @@ async def test_channel_experiment_rejection_is_fail_closed(session: AsyncSession
         reason=InterruptReason.CHANNEL_APPROVAL,
         subject=f"Channel proposal ({experiment_id[:8]}): forum",
         detail="...",
+        headline="Test escalation",
+        reply_hint="Reply APPROVE to authorise, or REJECT to decline.",
     )
     assert interrupt_id is not None
     await repository.set_channel_experiment_interrupt(session, experiment_id, interrupt_id)

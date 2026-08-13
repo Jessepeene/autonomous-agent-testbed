@@ -125,26 +125,22 @@ async def _escalate_lead_sourcing_problem(
     name = product.name if product is not None else product_id
 
     if report.credential_problem:
+        headline = "\U0001f511 Account problem — can't source leads"
         detail = (
-            f"Product: {name} ({product_id})\n\n"
             f"{report.credential_problem}\n\n"
             "HTTP 401/403 means the API key is present but being refused -- "
             "invalid, expired, or the plan/credits do not cover this call. "
             "This is an account problem, not a code bug: check the provider's "
-            "dashboard directly (key validity, plan, remaining credits).\n\n"
-            "Reply with anything to try sourcing leads again, or REJECT to "
-            "retire this product."
+            "dashboard directly (key validity, plan, remaining credits)."
         )
     else:
+        headline = "\U0001f41b Code bug — can't source leads"
         detail = (
-            f"Product: {name} ({product_id})\n\n"
             f"{report.request_problem}\n\n"
             "HTTP 400/422 means the provider rejected the request itself as "
             "malformed -- this looks like a bug in how the factory calls this "
             "provider, not something fixable in its dashboard. Worth a look "
-            "at the request-building code, not just a retry.\n\n"
-            "Reply with anything to try sourcing leads again, or REJECT to "
-            "retire this product."
+            "at the request-building code, not just a retry."
         )
     # A fresh id, not product_id[:8]: product_id is stable across this product's
     # whole life, so it would collide with an earlier, now-resolved escalation
@@ -158,6 +154,8 @@ async def _escalate_lead_sourcing_problem(
         reason=InterruptReason.LEAD_SOURCING_STALLED,
         subject=f"{name[:80]} can't source leads ({new_id()[:8]})",
         detail=detail,
+        headline=headline,
+        reply_hint="Reply anything to retry sourcing leads, or REJECT to retire this product.",
         product_id=product_id,
     )
 

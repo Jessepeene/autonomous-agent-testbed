@@ -337,8 +337,7 @@ async def propose_channel(
             f"URL: {url}\n\n"
             f"Rationale:\n{rationale}\n\n"
             f"Draft content -- post this yourself if you approve, the factory never "
-            f"posts to external platforms automatically:\n\n{draft_content}\n\n"
-            "Reply APPROVE to authorise, or REJECT to decline."
+            f"posts to external platforms automatically:\n\n{draft_content}"
         )
         # Deliberately no task_id/product_id passed to interrupts.request: both
         # route a reply through special-case handling in
@@ -351,6 +350,10 @@ async def propose_channel(
             reason=InterruptReason.CHANNEL_APPROVAL,
             subject=subject,
             detail=detail,
+            headline="\U0001f4e3 Approval needed — new growth channel",
+            reply_hint=(
+                "Reply APPROVE to authorise (you post the draft yourself), or REJECT to decline."
+            ),
         )
         if interrupt_id is not None:
             await repository.set_channel_experiment_interrupt(session, experiment_id, interrupt_id)

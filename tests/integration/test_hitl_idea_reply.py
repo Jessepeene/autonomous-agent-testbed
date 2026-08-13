@@ -97,8 +97,9 @@ async def _make_flagged_idea(session: AsyncSession, name: str) -> tuple[str, str
         session,
         reason=InterruptReason.LEGAL_UNCERTAINTY,
         subject=f"Idea needs legal review: {name}",
-        detail="Confidence: 0.40\nArguable liability, human should decide.\n\n"
-        "Reply APPROVE to allow the build, or REJECT to discard the idea.",
+        detail="Confidence: 0.40\nArguable liability, human should decide.",
+        headline="⚖️ Legal review needed — new idea",
+        reply_hint="Reply APPROVE to let this idea proceed to build, or REJECT to discard it.",
         task_id=task_id,
     )
     assert interrupt_id is not None

@@ -101,6 +101,9 @@ async def _announce_degradations(ctx: FactoryContext, report: PreflightReport) -
                 reason=InterruptReason.MISSING_CREDENTIAL,
                 subject=f"{finding.subject} is not configured",
                 detail=f"{finding.detail}\n\nFix: {finding.remedy}",
+                headline=f"⚙️ Setup needed — {finding.subject}",
+                reply_hint="No reply needed here — set the credential and restart the factory.",
+                needs_reply=False,
             )
 
 

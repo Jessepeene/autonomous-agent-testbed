@@ -92,6 +92,8 @@ async def _domain_requested_interrupt(session: AsyncSession, product_id: str, su
         reason=InterruptReason.DOMAIN_REQUIRED,
         subject=subject,
         detail="Reply with a domain you own, or SKIP.",
+        headline="\U0001f310 Custom domain?",
+        reply_hint="Reply with a domain you own to attach it, or SKIP to keep the Vercel URL.",
         product_id=product_id,
     )
     assert interrupt_id is not None

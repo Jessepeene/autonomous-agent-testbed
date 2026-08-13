@@ -95,9 +95,10 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
         detail=(
             f"{idea.problem_statement}\n\n"
             f"Confidence: {assessment.confidence:.2f}\n"
-            f"{assessment.justification}\n\n"
-            "Reply APPROVE to allow the build, or REJECT to discard the idea."
+            f"{assessment.justification}"
         ),
+        headline="⚖️ Legal review needed — new idea",
+        reply_hint="Reply APPROVE to let this idea proceed to build, or REJECT to discard it.",
         task_id=task.id,
     )
     return f"compliance: idea {idea_id} flagged for human review"

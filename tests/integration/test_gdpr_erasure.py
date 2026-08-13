@@ -314,6 +314,8 @@ async def test_retiring_a_product_redacts_interrupts_linked_directly_and_via_tas
         reason=InterruptReason.LEGAL_UNCERTAINTY,
         subject="failed 3 heal cycles",
         detail="Automated repair did not converge. Contact role: CFO.",
+        headline="Test escalation",
+        reply_hint="Reply with your answer.",
         product_id=product_id,
     )
     assert direct_interrupt_id is not None
@@ -331,6 +333,8 @@ async def test_retiring_a_product_redacts_interrupts_linked_directly_and_via_tas
         reason=InterruptReason.CAMPAIGN_APPROVAL,
         subject="campaign approval needed",
         detail="Sample recipients: Head of Finance at Analytical Engines BV.",
+        headline="Test escalation",
+        reply_hint="Reply with your answer.",
         task_id=task_id,
     )
     assert via_task_interrupt_id is not None
@@ -357,6 +361,8 @@ async def test_retiring_one_product_does_not_redact_a_different_products_interru
         reason=InterruptReason.LEGAL_UNCERTAINTY,
         subject="product b escalation",
         detail="Product B detail must survive.",
+        headline="Test escalation",
+        reply_hint="Reply with your answer.",
         product_id=product_b,
     )
     assert interrupt_b is not None
@@ -379,6 +385,8 @@ async def test_purge_product_pii_is_idempotent(session: AsyncSession) -> None:
         reason=InterruptReason.LEGAL_UNCERTAINTY,
         subject="failed 3 heal cycles",
         detail="Some detail.",
+        headline="Test escalation",
+        reply_hint="Reply with your answer.",
         product_id=product_id,
     )
     assert interrupt_id is not None

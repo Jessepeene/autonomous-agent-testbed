@@ -187,6 +187,8 @@ async def test_a_resume_reply_clears_the_freeze(session: AsyncSession) -> None:
         reason=InterruptReason.DELIVERABILITY_FROZEN,
         subject="Marketing frozen: spam complaint rate exceeded",
         detail="test",
+        headline="\U0001f512 Marketing frozen — sending paused",
+        reply_hint="Reply RESUME to resume sending, or anything else to stay frozen.",
     )
     assert interrupt_id is not None
     await repository.set_marketing_freeze_interrupt(session, freeze.id, interrupt_id)
@@ -212,6 +214,8 @@ async def test_an_ambiguous_reply_stays_frozen_and_reissues_a_fresh_interrupt(
         reason=InterruptReason.DELIVERABILITY_FROZEN,
         subject="Marketing frozen: spam complaint rate exceeded",
         detail="test",
+        headline="\U0001f512 Marketing frozen — sending paused",
+        reply_hint="Reply RESUME to resume sending, or anything else to stay frozen.",
     )
     assert interrupt_id is not None
     await repository.set_marketing_freeze_interrupt(session, freeze.id, interrupt_id)

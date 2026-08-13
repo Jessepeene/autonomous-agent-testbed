@@ -75,11 +75,19 @@ class _ScriptedNotifier:
 
 
 async def _open_interrupt_aged(session: AsyncSession, *, subject: str, age: timedelta) -> str:
+    # headline=subject (rather than some distinct generic label): remind_stale's
+    # per-line text prefers `headline` over `subject` (see hitl/interrupts.py),
+    # and several tests below assert the subject text appears in the reminder --
+    # keeping them identical here keeps that assertion meaningful without
+    # rewriting every test to check headline instead.
     interrupt_id = await repository.open_interrupt(
         session,
         reason=InterruptReason.MISSING_CREDENTIAL,
         subject=subject,
         detail="set it",
+        headline=subject,
+        reply_hint="No reply needed here — set the credential and restart the factory.",
+        needs_reply=False,
     )
     assert interrupt_id is not None
     await session.execute(

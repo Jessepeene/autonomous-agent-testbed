@@ -196,9 +196,11 @@ async def _check_and_trip(session: AsyncSession, settings: Settings) -> None:
         detail=(
             f"{reason}\n\nAll outbound email is paused — SEND_OUTREACH tasks will "
             "keep deferring until this is cleared. This does not self-resolve: "
-            "review the recent campaign content and recipient list, then reply "
-            "RESUME to this message. Any other reply leaves sending frozen."
+            "review the recent campaign content and recipient list before "
+            "deciding to resume."
         ),
+        headline="\U0001f512 Marketing frozen — sending paused",
+        reply_hint="Reply RESUME to resume sending, or anything else to stay frozen.",
     )
     if interrupt_id is not None:
         await repository.set_marketing_freeze_interrupt(session, freeze.id, interrupt_id)
@@ -262,10 +264,9 @@ async def sync_freeze_clearance(session: AsyncSession) -> int:
         session,
         reason=InterruptReason.DELIVERABILITY_FROZEN,
         subject=f"{_SUBJECT} ({new_id()[:8]})",
-        detail=(
-            f"{freeze.reason}\n\nStill frozen — the last reply was not an "
-            "unambiguous RESUME. Reply RESUME to this message to resume sending."
-        ),
+        detail=(f"{freeze.reason}\n\nStill frozen — the last reply was not an unambiguous RESUME."),
+        headline="\U0001f512 Marketing still frozen — last reply was ambiguous",
+        reply_hint="Reply RESUME to resume sending, or anything else to stay frozen.",
     )
     if new_interrupt_id is not None:
         await repository.set_marketing_freeze_interrupt(session, freeze.id, new_interrupt_id)

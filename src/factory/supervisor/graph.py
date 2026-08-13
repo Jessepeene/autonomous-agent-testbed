@@ -155,8 +155,13 @@ async def _run_engine(
                 subject=f"{engine.value} task {task_id} refused by safety classifier",
                 detail=(
                     f"Task {task_id} ({task_kind}) was declined "
-                    f"(category={exc.category}). A human decision is needed on whether "
-                    "this work should proceed."
+                    f"(category={exc.category}). Not retried automatically — a human "
+                    "needs to look at this."
+                ),
+                headline="\U0001f6ab Safety classifier declined a task",
+                reply_hint=(
+                    'Include "retry" in your reply to give this task exactly one more '
+                    "attempt as-is, or reply anything else to just close this out."
                 ),
                 task_id=task_id,
             )
@@ -173,6 +178,17 @@ async def _run_engine(
         async with session_scope(ctx.settings) as session:
             exhausted = await repository.fail_task(session, task_id, f"devops error: {exc}")
             if exhausted:
+                explanation = await interrupts.plain_language_error(
+                    ctx,
+                    str(exc)[:2000],
+                    context=(
+                        f"A {engine.value} task ({task_kind}) failed "
+                        f"{ctx.settings.max_task_attempts} times with what looks like an "
+                        "infrastructure problem (sandbox, host filesystem, or network), "
+                        "not a bug in the generated application code."
+                    ),
+                    task_id=task_id,
+                )
                 await interrupts.request(
                     session,
                     reason=InterruptReason.MISSING_CREDENTIAL,
@@ -180,15 +196,9 @@ async def _run_engine(
                         f"{engine.value} task {task_id} hit a host/environment "
                         "failure, not a code bug"
                     ),
-                    detail=(
-                        f"Task {task_id} ({task_kind}) failed "
-                        f"{ctx.settings.max_task_attempts} times with what looks like an "
-                        f"infrastructure problem rather than a bug in generated code:\n\n"
-                        f"{str(exc)[:2000]}\n\n"
-                        "Rewriting the generated code will not fix this — check the "
-                        "sandbox image, host filesystem permissions, or network "
-                        "reachability, then retry."
-                    ),
+                    detail=explanation,
+                    headline="\U0001f5a5️ Infrastructure problem, not a code bug",
+                    reply_hint="Reply retry once you believe the underlying issue is fixed.",
                     task_id=task_id,
                 )
         log.warning("engine.devops_error", engine=str(engine), task_id=task_id, exhausted=exhausted)
@@ -250,9 +260,11 @@ async def _run_engine(
                 subject="Docker daemon unavailable",
                 detail=(
                     "The Development Engine cannot execute generated code without a "
-                    "sandbox and will not run it on the host. Install Docker and "
-                    "restart the factory."
+                    "sandbox and will not run it on the host."
                 ),
+                headline="\U0001f433 Docker daemon unavailable",
+                reply_hint="No reply needed — install Docker and restart the factory.",
+                needs_reply=False,
                 task_id=task_id,
             )
         return {"task_id": task_id, "error": "sandbox", "note": str(exc)[:500]}
@@ -261,16 +273,22 @@ async def _run_engine(
         async with session_scope(ctx.settings) as session:
             exhausted = await repository.fail_task(session, task_id, repr(exc))
             if exhausted:
+                explanation = await interrupts.plain_language_error(
+                    ctx,
+                    repr(exc)[:2000],
+                    context=(
+                        f"A {engine.value} task ({task_kind}) failed "
+                        f"{ctx.settings.max_task_attempts} times and exhausted its retries."
+                    ),
+                    task_id=task_id,
+                )
                 await interrupts.request(
                     session,
                     reason=InterruptReason.LEGAL_UNCERTAINTY,
                     subject=f"{engine.value} task {task_id} exhausted its retries",
-                    detail=(
-                        f"Task {task_id} ({task_kind}) failed "
-                        f"{ctx.settings.max_task_attempts} times. Last error: {exc!r}\n\n"
-                        "If the underlying cause has been fixed, reply retry to give "
-                        "this task one more attempt."
-                    ),
+                    detail=explanation,
+                    headline="⚠️ Task failed repeatedly",
+                    reply_hint="Reply retry once you believe the underlying cause is addressed.",
                     task_id=task_id,
                 )
         return {"task_id": task_id, "error": repr(exc)[:500], "note": "failed"}
@@ -333,6 +351,12 @@ async def _escalate(state: SupervisorState, *, ctx: FactoryContext) -> Superviso
             reason=InterruptReason.LEGAL_UNCERTAINTY,
             subject=f"Supervisor requested human review: {rationale[:120]}",
             detail=rationale,
+            headline="\U0001f9ed Orchestrator requested human review",
+            reply_hint=(
+                "No fixed action here — this is a general review request, not tied "
+                "to a specific task. Replying just closes it out."
+            ),
+            needs_reply=False,
         )
     return {"note": "escalated"}
 

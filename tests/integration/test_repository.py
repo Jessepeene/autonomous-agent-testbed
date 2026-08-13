@@ -304,16 +304,89 @@ async def test_open_interrupts_collapse_by_subject(session: AsyncSession) -> Non
         reason=InterruptReason.MISSING_CREDENTIAL,
         subject="TELEGRAM_BOT_TOKEN is not configured",
         detail="set it",
+        headline="Test escalation",
+        reply_hint="No reply needed here — set the credential and restart the factory.",
+        needs_reply=False,
     )
     second = await repository.open_interrupt(
         session,
         reason=InterruptReason.MISSING_CREDENTIAL,
         subject="TELEGRAM_BOT_TOKEN is not configured",
         detail="set it",
+        headline="Test escalation",
+        reply_hint="No reply needed here — set the credential and restart the factory.",
+        needs_reply=False,
     )
     assert first is not None
     assert second is None
     assert len(await repository.undelivered_interrupts(session)) == 1
+
+
+async def _product_scoped_interrupt(
+    session: AsyncSession, *, subject: str, product_id: str | None
+) -> str:
+    interrupt_id = await repository.open_interrupt(
+        session,
+        reason=InterruptReason.MISSING_CREDENTIAL,
+        subject=subject,
+        detail="...",
+        headline="Test escalation",
+        reply_hint="Reply with your answer.",
+        product_id=product_id,
+    )
+    assert interrupt_id is not None
+    return interrupt_id
+
+
+async def test_list_open_interrupts_groups_by_product(session: AsyncSession) -> None:
+    """Same-product escalations must read together, not interleaved with
+    unrelated ones -- interrupts are raised in an order that deliberately does
+    not match product grouping, to prove the query itself groups them rather
+    than happening to already be in order."""
+    idea_a = await repository.upsert_idea(session, _scored_idea())
+    idea_b = await repository.upsert_idea(session, _scored_idea())
+    assert idea_a is not None and idea_b is not None
+    product_a = await repository.create_product(session, name="Product A", idea_id=idea_a)
+    product_b = await repository.create_product(session, name="Product B", idea_id=idea_b)
+
+    await _product_scoped_interrupt(session, subject="b-first", product_id=product_b)
+    await _product_scoped_interrupt(session, subject="a-first", product_id=product_a)
+    await _product_scoped_interrupt(session, subject="no-product", product_id=None)
+    await _product_scoped_interrupt(session, subject="b-second", product_id=product_b)
+    await session.flush()
+
+    rows = await repository.list_open_interrupts(session, limit=10)
+
+    assert len(rows) == 4
+    product_ids = [row.product_id for row in rows]
+    # Non-product-scoped rows sort last (NULLS LAST).
+    assert product_ids[-1] is None
+    # Every row for the same product is contiguous -- no other product's (or no
+    # product's) row appears between two rows sharing a product_id.
+    for pid in (product_a, product_b):
+        positions = [i for i, p in enumerate(product_ids) if p == pid]
+        assert positions == list(range(positions[0], positions[0] + len(positions)))
+
+
+async def test_stale_open_interrupts_also_groups_by_product(session: AsyncSession) -> None:
+    idea_a = await repository.upsert_idea(session, _scored_idea())
+    idea_b = await repository.upsert_idea(session, _scored_idea())
+    assert idea_a is not None and idea_b is not None
+    product_a = await repository.create_product(session, name="Product A", idea_id=idea_a)
+    product_b = await repository.create_product(session, name="Product B", idea_id=idea_b)
+
+    await _product_scoped_interrupt(session, subject="b-first", product_id=product_b)
+    await _product_scoped_interrupt(session, subject="a-first", product_id=product_a)
+    await _product_scoped_interrupt(session, subject="b-second", product_id=product_b)
+    await session.flush()
+
+    rows = await repository.stale_open_interrupts(session, older_than=timedelta(seconds=0))
+
+    assert len(rows) == 3
+    product_ids = [row.product_id for row in rows]
+    for pid in (product_a, product_b):
+        positions = [i for i, p in enumerate(product_ids) if p == pid]
+        assert positions == list(range(positions[0], positions[0] + len(positions)))
 
 
 def _scored_idea():

@@ -214,10 +214,14 @@ async def _check_budget(session: AsyncSession, ctx: FactoryContext) -> Orchestra
             f"Aggregate LLM spend over the trailing 24h reached ${spent:.2f}, at or "
             f"above the configured cap of ${cap:.2f}. All generative tasks (Discovery, "
             "Development, Marketing copy, Compliance assessment, and every ephemeral "
-            "agent spawn) are paused until spend falls back under the cap. Nothing "
-            "needs a reply — this clears automatically as older calls age out of the "
+            "agent spawn) are paused until spend falls back under the cap."
+        ),
+        headline="\U0001f4b8 Spend cap reached — all generative work paused",
+        reply_hint=(
+            "No reply needed — clears automatically as older calls age out of the "
             "24h window. Reply only if you want to raise or disable the cap."
         ),
+        needs_reply=False,
     )
     log.warning("orchestrator.budget_paused", spent_usd=spent, cap_usd=cap)
     return _budget_paused(spent, cap)

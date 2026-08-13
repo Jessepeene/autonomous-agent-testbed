@@ -1111,15 +1111,21 @@ async def _heal(
         # own subject-collapse-by-(reason, subject, status) uniqueness otherwise
         # blocks the *second* one from ever reaching 'resolved' -- found live,
         # see DEPLOYMENT_CHECKLIST.md.
+        explanation = await interrupts.plain_language_error(
+            ctx,
+            healing[:2000],
+            context=(
+                f"Automated repair on '{display_name}' did not converge after {attempts} tries."
+            ),
+        )
         await interrupts.request(
             session,
             reason=InterruptReason.HEAL_EXHAUSTED,
             subject=f"{display_name[:80]} needs help ({new_id()[:8]})",
-            detail=(
-                f"Product: {display_name} ({product_id})\n\n"
-                "Automated repair did not converge. The last blocking feedback was:\n\n"
-                f"{healing[:2000]}\n\n"
-                "Reply with guidance, or REJECT to retire this product."
+            detail=explanation,
+            headline="\U0001f527 Repair stuck — needs your input",
+            reply_hint=(
+                "Reply with guidance for one more attempt, or REJECT to retire this product."
             ),
             product_id=product_id,
         )

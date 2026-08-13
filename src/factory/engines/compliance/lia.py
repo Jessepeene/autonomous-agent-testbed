@@ -68,9 +68,10 @@ async def _decision_for(
                 f"Role: {lead.job_title} at {lead.company}\n"
                 f"Source: {lead.source_url}\n"
                 f"Confidence: {assessment.confidence:.2f}\n\n"
-                f"{assessment.justification}\n\n"
-                "Reply APPROVE to permit outreach to this segment, or REJECT to block it."
+                f"{assessment.justification}"
             ),
+            headline="⚖️ Legal review needed — outreach segment",
+            reply_hint="Reply APPROVE to permit outreach to this segment, or REJECT to block it.",
             task_id=task_id,
             product_id=product_id,
         )
@@ -143,9 +144,7 @@ async def evaluate_leads(
             continue
         _, assessment = next(survivor_assessments)
         decisions.append(
-            await _decision_for(
-                session, lead, assessment, task_id=task_id, product_id=product_id
-            )
+            await _decision_for(session, lead, assessment, task_id=task_id, product_id=product_id)
         )
     return decisions
 

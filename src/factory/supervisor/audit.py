@@ -54,6 +54,9 @@ async def check_approved_idea_orphans(session: AsyncSession) -> int:
         reason=InterruptReason.DATA_INTEGRITY,
         subject="Approved idea(s) exist with no product",
         detail=detail,
+        headline="📋 Data integrity notice",
+        reply_hint="No reply needed — informational only, but worth a look when you have time.",
+        needs_reply=False,
     )
     log.warning("audit.approved_idea_orphans", count=len(orphans))
     return len(orphans)

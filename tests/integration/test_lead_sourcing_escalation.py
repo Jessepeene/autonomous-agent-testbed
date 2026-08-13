@@ -163,6 +163,8 @@ async def test_does_not_raise_a_second_escalation_if_one_is_already_open(
         reason=InterruptReason.LEAD_SOURCING_STALLED,
         subject="already asked",
         detail="...",
+        headline="Test escalation",
+        reply_hint="Reply anything to retry sourcing leads, or REJECT to retire this product.",
         product_id=product_id,
     )
     await session.flush()

@@ -480,6 +480,23 @@ class Interrupt(Base):
     reason: Mapped[str] = mapped_column(String(32), nullable=False)
     subject: Mapped[str] = mapped_column(String(200), nullable=False)
     detail: Mapped[str] = mapped_column(Text, nullable=False)
+    #: Emoji + specific category phrase for the Telegram message header, e.g.
+    #: "🔑 Account problem" -- not derivable from `reason` alone (the same reason
+    #: can mean genuinely different things depending on context, e.g.
+    #: LEAD_SOURCING_STALLED covers both a credential problem and a code bug), so
+    #: every raise site supplies its own. Nullable only for historical-row
+    #: safety; every live call site sets it -- see `hitl/formatting.py`.
+    headline: Mapped[str | None] = mapped_column(Text)
+    #: The exact reply instruction shown in the "What to do" section -- kept
+    #: separate from `detail` so the explanation and the instruction never get
+    #: conflated or duplicated (they used to both live in `detail`, with a
+    #: second generic instruction appended by the old `format_message`).
+    reply_hint: Mapped[str | None] = mapped_column(Text)
+    #: Whether a reply actually changes anything for this escalation -- controls
+    #: "Include this tag in your reply" vs. a reference-only "Tag:" in the
+    #: rendered message, so an operator can tell at a glance whether this needs
+    #: action or is just an FYI.
+    needs_reply: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     task_id: Mapped[str | None] = mapped_column(String(32))
     #: Set on interrupts with no task to retry (e.g. heal-cycle exhaustion, which
     #: resets the product to PLANNED instead of leaving one task in place) so a

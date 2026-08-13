@@ -200,6 +200,8 @@ async def test_excludes_a_product_with_an_open_interrupt_already(session: AsyncS
         reason=InterruptReason.LEAD_SOURCING_STALLED,
         subject="already asked",
         detail="...",
+        headline="Test escalation",
+        reply_hint="Reply anything to retry sourcing leads, or REJECT to retire this product.",
         product_id=product_id,
     )
     assert interrupt_id is not None
@@ -313,6 +315,8 @@ async def test_a_product_already_escalated_is_left_alone(
         reason=InterruptReason.LEAD_SOURCING_STALLED,
         subject="already asked",
         detail="...",
+        headline="Test escalation",
+        reply_hint="Reply anything to retry sourcing leads, or REJECT to retire this product.",
         product_id=product_id,
     )
     await session.commit()
@@ -336,6 +340,8 @@ async def test_reject_reply_retires_the_stalled_product(session: AsyncSession) -
         reason=InterruptReason.LEAD_SOURCING_STALLED,
         subject="needs a decision",
         detail="...",
+        headline="Test escalation",
+        reply_hint="Reply anything to retry sourcing leads, or REJECT to retire this product.",
         product_id=product_id,
     )
     assert interrupt_id is not None
@@ -357,6 +363,8 @@ async def test_any_other_reply_queues_a_fresh_harvest_attempt(session: AsyncSess
         reason=InterruptReason.LEAD_SOURCING_STALLED,
         subject="needs a decision",
         detail="...",
+        headline="Test escalation",
+        reply_hint="Reply anything to retry sourcing leads, or REJECT to retire this product.",
         product_id=product_id,
     )
     assert interrupt_id is not None
@@ -394,6 +402,8 @@ async def test_resolving_does_not_disturb_an_unrelated_task(session: AsyncSessio
         reason=InterruptReason.LEAD_SOURCING_STALLED,
         subject="needs a decision",
         detail="...",
+        headline="Test escalation",
+        reply_hint="Reply anything to retry sourcing leads, or REJECT to retire this product.",
         product_id=product_id,
     )
     assert interrupt_id is not None

@@ -171,14 +171,16 @@ class Scheduler:
                         reason=InterruptReason.LEAD_SOURCING_STALLED,
                         subject=f"{product.name[:80]} can't source leads ({new_id()[:8]})",
                         detail=(
-                            f"Product: {product.name} ({product.id})\n\n"
                             "Two lead-sourcing attempts both found nothing for this "
                             "validating product. This usually means a lead-provider "
                             "credential (Hunter/Apollo) is present but being "
                             "rejected, not that it's genuinely missing -- worth "
-                            "checking the provider account directly.\n\n"
-                            "Reply with anything to try sourcing leads again, or "
-                            "REJECT to retire this product."
+                            "checking the provider account directly."
+                        ),
+                        headline="\U0001f511 Account problem — can't source leads",
+                        reply_hint=(
+                            "Reply anything to retry sourcing leads, or REJECT to "
+                            "retire this product."
                         ),
                         product_id=product.id,
                     )

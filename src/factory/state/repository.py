@@ -1388,6 +1388,9 @@ async def open_interrupt(
     reason: InterruptReason,
     subject: str,
     detail: str,
+    headline: str,
+    reply_hint: str,
+    needs_reply: bool = True,
     task_id: str | None = None,
     product_id: str | None = None,
 ) -> str | None:
@@ -1399,6 +1402,10 @@ async def open_interrupt(
     statement would fail with "there is no unique or exclusion constraint
     matching the ON CONFLICT specification" rather than silently doing the
     wrong thing, but it still has to be told explicitly.
+
+    `headline`/`reply_hint` are required, not optional -- see
+    `hitl/formatting.py`'s module docstring for why a fixed per-`reason` label
+    was misleading and every raise site now supplies its own.
     """
     stmt = (
         pg_insert(Interrupt)
@@ -1406,6 +1413,9 @@ async def open_interrupt(
             reason=reason.value,
             subject=subject[:200],
             detail=detail,
+            headline=headline,
+            reply_hint=reply_hint,
+            needs_reply=needs_reply,
             task_id=task_id,
             product_id=product_id,
             status="open",
@@ -1445,12 +1455,14 @@ async def has_open_interrupt_for_product(session: AsyncSession, product_id: str)
 
 
 async def list_open_interrupts(session: AsyncSession, limit: int = 10) -> list[Interrupt]:
-    """Oldest first -- the ones a human has been waiting longest on are the ones
-    `/status` (`hitl/commands.py`) should surface first if the list is capped."""
+    """Grouped by product, oldest first within each group -- same-product
+    escalations read together rather than interleaved with unrelated ones, and
+    the ones a human has been waiting longest on still surface first if the
+    list is capped. Non-product-scoped escalations sort last."""
     stmt = (
         select(Interrupt)
         .where(Interrupt.status == "open")
-        .order_by(Interrupt.created_at.asc())
+        .order_by(Interrupt.product_id.asc().nulls_last(), Interrupt.created_at.asc())
         .limit(limit)
     )
     return list((await session.execute(stmt)).scalars().all())
@@ -1472,6 +1484,8 @@ async def find_open_interrupt_by_tag(session: AsyncSession, tag: str) -> Interru
 
 async def stale_open_interrupts(session: AsyncSession, *, older_than: timedelta) -> list[Interrupt]:
     """Interrupts still waiting on a human past ``older_than`` since they were raised.
+    Grouped by product, oldest first within each group -- same reasoning as
+    `list_open_interrupts`.
 
     Delivery already happened by the time something qualifies here (see
     ``undelivered_interrupts``) — this is for the case the human missed or forgot the
@@ -1481,7 +1495,7 @@ async def stale_open_interrupts(session: AsyncSession, *, older_than: timedelta)
     stmt = (
         select(Interrupt)
         .where(Interrupt.status == "open", Interrupt.created_at < cutoff)
-        .order_by(Interrupt.created_at.asc())
+        .order_by(Interrupt.product_id.asc().nulls_last(), Interrupt.created_at.asc())
     )
     return list((await session.execute(stmt)).scalars().all())
 

@@ -115,6 +115,13 @@ async def test_first_attempt_creates_a_pending_approval_and_raises_an_interrupt(
     assert interrupt is not None
     assert interrupt.reason == "campaign_approval"
     assert interrupt.status == "open"
+    # The reply instruction lives on the interrupt now, not baked into the
+    # brief text itself (see hitl/formatting.py) -- the brief is pure
+    # PII-safe compliance content, the instruction is separate and explicit.
+    assert interrupt.product_id == product_id
+    assert "APPROVE" in (interrupt.reply_hint or "")
+    assert "REJECT" in (interrupt.reply_hint or "")
+    assert interrupt.headline is not None
 
 
 async def test_a_retried_attempt_does_not_duplicate_the_interrupt(session: AsyncSession) -> None:

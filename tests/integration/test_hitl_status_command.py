@@ -94,6 +94,9 @@ async def test_reports_no_active_products_and_the_open_escalations_content(
         reason=InterruptReason.MISSING_CREDENTIAL,
         subject="STRIPE_API_KEY missing",
         detail="set it",
+        headline="⚙️ Setup needed — STRIPE_API_KEY",
+        reply_hint="No reply needed here — set the credential and restart the factory.",
+        needs_reply=False,
     )
     assert interrupt_id is not None
     await session.flush()
@@ -103,8 +106,8 @@ async def test_reports_no_active_products_and_the_open_escalations_content(
     assert "PRODUCTS — 0 active" in report
     assert "ESCALATIONS — 1 open" in report
     assert "issue: STRIPE_API_KEY missing" in report
-    assert "Missing credential" in report  # human label, not the raw "missing_credential"
-    assert f"reply: #{interrupt_id[:8]} <your answer>" in report
+    assert "Setup needed" in report  # the headline, not the raw "missing_credential"
+    assert f"tag: #{interrupt_id[:8]}" in report
     assert "about: (not tied to a specific product)" in report
 
 
@@ -121,6 +124,8 @@ async def test_an_escalations_product_is_named_even_if_it_is_not_in_the_active_l
         reason=InterruptReason.HEAL_EXHAUSTED,
         subject=f"stuck-old-product needs help ({stuck_product_id[:8]})",
         detail="Automated repair did not converge.",
+        headline="\U0001f527 Repair stuck — needs your input",
+        reply_hint="Reply with guidance for one more attempt, or REJECT to retire this product.",
         product_id=stuck_product_id,
     )
     assert interrupt_id is not None
@@ -152,6 +157,8 @@ async def test_an_escalations_product_name_is_never_truncated(session: AsyncSess
         reason=InterruptReason.HEAL_EXHAUSTED,
         subject="needs help",
         detail="Automated repair did not converge.",
+        headline="\U0001f527 Repair stuck — needs your input",
+        reply_hint="Reply with guidance for one more attempt, or REJECT to retire this product.",
         product_id=stuck_product_id,
     )
     assert interrupt_id is not None
@@ -221,6 +228,9 @@ async def test_collect_replies_answers_status_without_resolving_anything(
         reason=InterruptReason.MISSING_CREDENTIAL,
         subject="unrelated escalation",
         detail="set it",
+        headline="Test escalation",
+        reply_hint="No reply needed here — set the credential and restart the factory.",
+        needs_reply=False,
     )
     assert interrupt_id is not None
     await session.flush()
@@ -254,6 +264,8 @@ async def test_issue_detail_shows_the_full_text_status_only_summarises(
             "Automated repair did not converge. The last blocking feedback was:\n\n"
             "The test suite failed (exit 1): ModuleNotFoundError: No module named 'foo'"
         ),
+        headline="\U0001f527 Repair stuck — needs your input",
+        reply_hint="Reply with guidance for one more attempt, or REJECT to retire this product.",
         product_id=product_id,
     )
     assert interrupt_id is not None
@@ -261,10 +273,10 @@ async def test_issue_detail_shows_the_full_text_status_only_summarises(
 
     detail = await build_issue_detail(session, interrupt_id[:8])
 
-    assert "Repair failed repeatedly" in detail
+    assert "Repair stuck" in detail
     assert "issue-detail-product" in detail
     assert "ModuleNotFoundError: No module named 'foo'" in detail
-    assert f"Reply: #{interrupt_id[:8]} <your answer>" in detail
+    assert f"Include this tag in your reply: #{interrupt_id[:8]}" in detail
 
 
 async def test_issue_detail_reports_a_tag_that_matches_nothing_open(
@@ -281,6 +293,9 @@ async def test_issue_detail_does_not_match_a_resolved_interrupt(session: AsyncSe
         reason=InterruptReason.MISSING_CREDENTIAL,
         subject="already handled",
         detail="the real question",
+        headline="Test escalation",
+        reply_hint="No reply needed here — set the credential and restart the factory.",
+        needs_reply=False,
     )
     assert interrupt_id is not None
     await repository.resolve_interrupt(session, interrupt_id, "fixed")
@@ -304,6 +319,8 @@ async def test_issue_detail_reflects_a_redaction_from_a_retired_product(
         reason=InterruptReason.HEAL_EXHAUSTED,
         subject="needs help",
         detail="The real original question, before redaction.",
+        headline="\U0001f527 Repair stuck — needs your input",
+        reply_hint="Reply with guidance for one more attempt, or REJECT to retire this product.",
         product_id=product_id,
     )
     assert interrupt_id is not None
@@ -325,6 +342,9 @@ async def test_collect_replies_answers_issue_without_resolving_it(session: Async
         reason=InterruptReason.MISSING_CREDENTIAL,
         subject="STRIPE_API_KEY missing",
         detail="Set STRIPE_API_KEY in the environment and reply retry.",
+        headline="Test escalation",
+        reply_hint="No reply needed here — set the credential and restart the factory.",
+        needs_reply=False,
     )
     assert interrupt_id is not None
     await session.flush()

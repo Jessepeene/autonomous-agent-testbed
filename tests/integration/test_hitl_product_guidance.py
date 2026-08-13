@@ -90,6 +90,8 @@ async def _heal_exhausted_interrupt(session: AsyncSession, product_id: str, subj
         reason=InterruptReason.LEGAL_UNCERTAINTY,
         subject=subject,
         detail="Automated repair did not converge.",
+        headline="\U0001f527 Repair stuck — needs your input",
+        reply_hint="Reply with guidance for one more attempt, or REJECT to retire this product.",
         product_id=product_id,
     )
     assert interrupt_id is not None

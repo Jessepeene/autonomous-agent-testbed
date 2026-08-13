@@ -22,6 +22,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from factory.hitl.formatting import build_escalation_text, tag_for
 from factory.state import repository
 
 #: Telegram appends "@BotName" to a command in a group chat; a bare "/status"
@@ -33,21 +34,6 @@ STATUS_COMMAND = re.compile(r"^/status(@\w+)?\b", re.IGNORECASE)
 ISSUE_COMMAND = re.compile(r"^/issue(@\w+)?\s+#?([0-9a-f]{8})\b", re.IGNORECASE)
 
 _MAX_PRODUCTS = 10
-
-#: `InterruptReason`'s own values are snake_case wire identifiers, chosen for
-#: being a stable enum, not for being read by a human in a Telegram message --
-#: rendered here instead of the raw value.
-_REASON_LABEL: dict[str, str] = {
-    "missing_credential": "Missing credential",
-    "legal_uncertainty": "Needs legal/compliance review",
-    "budget_exceeded": "Daily spend cap reached",
-    "campaign_approval": "Outreach campaign approval",
-    "deliverability_frozen": "Deliverability frozen (spam complaints)",
-    "channel_approval": "Growth channel approval",
-    "domain_required": "Custom domain needed",
-    "data_integrity": "Data integrity check",
-    "heal_exhausted": "Repair failed repeatedly",
-}
 
 
 async def build_status_report(session: AsyncSession) -> str:
@@ -95,18 +81,20 @@ async def build_status_report(session: AsyncSession) -> str:
     lines.append(f"\nESCALATIONS — {interrupt_total} open")
     if not interrupts:
         lines.append("(none)")
+    # Already grouped by product (`list_open_interrupts` sorts that way) --
+    # entries below preserve that order rather than re-sorting.
     for i, interrupt in enumerate(interrupts, start=1):
         about = "(not tied to a specific product)"
         if interrupt.product_id:
             escalation_product = await repository.get_product(session, interrupt.product_id)
             if escalation_product is not None:
                 about = f"{escalation_product.name} ({escalation_product.status})"
-        reason_label = _REASON_LABEL.get(interrupt.reason, interrupt.reason)
+        headline = interrupt.headline or interrupt.reason
         lines.append(
-            f"\n{i}. {reason_label}\n"
-            f"   about: {about}\n"
+            f"\n{i}. {about}\n"
+            f"   {headline}\n"
             f"   issue: {interrupt.subject}\n"
-            f"   reply: #{interrupt.id[:8]} <your answer>"
+            f"   tag: #{tag_for(interrupt.id)}"
         )
     if interrupt_total > len(interrupts):
         lines.append(f"\n...and {interrupt_total - len(interrupts)} more.")
@@ -118,9 +106,10 @@ async def build_status_report(session: AsyncSession) -> str:
 
 async def build_issue_detail(session: AsyncSession, tag: str) -> str:
     """The full text behind one escalation's short `issue:` line in `/status` --
-    what a human actually needs to answer it, without hunting back through
-    Telegram history for the original push message (which may have scrolled
-    off, or arrived before the human was watching).
+    identical to what was originally pushed to Telegram (`hitl/formatting.py`),
+    so nothing here duplicates that template or drifts from it. Saves hunting
+    back through Telegram history for the original push message (which may
+    have scrolled off, or arrived before the human was watching).
 
     Scoped to *open* interrupts only, same as a tagged reply (`#<tag> <answer>`)
     -- a resolved one has nothing left to act on.
@@ -128,17 +117,4 @@ async def build_issue_detail(session: AsyncSession, tag: str) -> str:
     interrupt = await repository.find_open_interrupt_by_tag(session, tag)
     if interrupt is None:
         return f"No open escalation matches #{tag}. Send /status for the current list."
-
-    about = "(not tied to a specific product)"
-    if interrupt.product_id:
-        product = await repository.get_product(session, interrupt.product_id)
-        if product is not None:
-            about = f"{product.name} ({product.status})"
-    reason_label = _REASON_LABEL.get(interrupt.reason, interrupt.reason)
-
-    return (
-        f"#{tag} — {reason_label}\n"
-        f"about: {about}\n\n"
-        f"{interrupt.detail}\n\n"
-        f"Reply: #{tag} <your answer>"
-    )
+    return await build_escalation_text(session, interrupt)

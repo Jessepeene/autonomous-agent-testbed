@@ -63,10 +63,13 @@ async def ensure_requested(session: AsyncSession, *, product_id: str, product_na
         reason=InterruptReason.DOMAIN_REQUIRED,
         subject=f"Domain for {product_name[:100]} ({product_id[:8]})",
         detail=(
-            f"{product_name} just went live. Reply with a domain you own (e.g. "
-            "example.com) to attach it, or reply SKIP to keep the default Vercel URL. "
-            "This never blocks anything -- the product is already reachable on its "
-            "Vercel subdomain either way."
+            f"{product_name} just went live. This never blocks anything -- the "
+            "product is already reachable on its Vercel subdomain either way."
+        ),
+        headline="\U0001f310 Custom domain?",
+        reply_hint=(
+            "Reply with a domain you own (e.g. example.com) to attach it, "
+            "or SKIP to keep the default Vercel URL."
         ),
         product_id=product_id,
     )

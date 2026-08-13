@@ -64,6 +64,9 @@ async def test_two_separate_occurrences_of_the_same_subject_can_both_resolve(
         reason=InterruptReason.DATA_INTEGRITY,
         subject="Recurring problem, identical subject both times",
         detail="first occurrence",
+        headline="Test escalation",
+        reply_hint="No reply needed — informational only.",
+        needs_reply=False,
     )
     assert first_id is not None
     await repository.resolve_interrupt(session, first_id, "acknowledged")
@@ -76,6 +79,9 @@ async def test_two_separate_occurrences_of_the_same_subject_can_both_resolve(
         reason=InterruptReason.DATA_INTEGRITY,
         subject="Recurring problem, identical subject both times",
         detail="second occurrence, unrelated to the first",
+        headline="Test escalation",
+        reply_hint="No reply needed — informational only.",
+        needs_reply=False,
     )
     assert second_id is not None
     assert second_id != first_id
@@ -95,6 +101,9 @@ async def test_two_open_interrupts_with_the_same_subject_still_collapse_into_one
         reason=InterruptReason.DATA_INTEGRITY,
         subject="Still-open problem",
         detail="first attempt",
+        headline="Test escalation",
+        reply_hint="No reply needed — informational only.",
+        needs_reply=False,
     )
     assert first_id is not None
 
@@ -103,6 +112,9 @@ async def test_two_open_interrupts_with_the_same_subject_still_collapse_into_one
         reason=InterruptReason.DATA_INTEGRITY,
         subject="Still-open problem",
         detail="second attempt while the first is still open",
+        headline="Test escalation",
+        reply_hint="No reply needed — informational only.",
+        needs_reply=False,
     )
 
     assert second_id is None  # collapsed into the first, exactly as before

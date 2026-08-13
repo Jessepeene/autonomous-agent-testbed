@@ -95,6 +95,8 @@ async def test_a_reply_without_retry_only_resolves_the_interrupt(session: AsyncS
         reason=InterruptReason.LEGAL_UNCERTAINTY,
         subject="patch failed",
         detail="fix it",
+        headline="Test escalation",
+        reply_hint="Reply retry once you believe the underlying cause is addressed.",
         task_id=task_id,
     )
     assert interrupt_id is not None
@@ -118,6 +120,8 @@ async def test_a_reply_containing_retry_reopens_the_escalated_task(session: Asyn
         reason=InterruptReason.LEGAL_UNCERTAINTY,
         subject="patch failed again",
         detail="fix it",
+        headline="Test escalation",
+        reply_hint="Reply retry once you believe the underlying cause is addressed.",
         task_id=task_id,
     )
     assert interrupt_id is not None
@@ -144,6 +148,9 @@ async def test_retry_word_on_an_interrupt_with_no_task_id_does_not_crash(
         reason=InterruptReason.MISSING_CREDENTIAL,
         subject="STRIPE_API_KEY is not configured",
         detail="set it",
+        headline="Test escalation",
+        reply_hint="No reply needed here — set the credential and restart the factory.",
+        needs_reply=False,
     )
     assert interrupt_id is not None
     notifier = _ScriptedNotifier([f"#{interrupt_id[:8]} retry"])
@@ -165,6 +172,8 @@ async def test_retry_word_is_case_insensitive_and_matches_as_a_whole_word(
         reason=InterruptReason.LEGAL_UNCERTAINTY,
         subject="patch failed a third time",
         detail="fix it",
+        headline="Test escalation",
+        reply_hint="Reply retry once you believe the underlying cause is addressed.",
         task_id=task_id,
     )
     assert interrupt_id is not None

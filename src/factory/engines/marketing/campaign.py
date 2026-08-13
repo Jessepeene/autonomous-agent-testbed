@@ -73,8 +73,6 @@ def _build_brief(*, product_name: str, product_id: str | None, candidates: list[
         )
     if len(candidates) > len(sample):
         lines.append(f"  ...and {len(candidates) - len(sample)} more.")
-    lines.append("")
-    lines.append("Reply APPROVE to open the SMTP transport for this cohort, or REJECT to block it.")
     return "\n".join(lines)
 
 
@@ -129,7 +127,10 @@ async def ensure_approval(
             reason=InterruptReason.CAMPAIGN_APPROVAL,
             subject=subject,
             detail=brief,
+            headline=f"✅ Approval needed — send to {len(candidates)} leads?",
+            reply_hint="Reply APPROVE to send, or REJECT to block this batch.",
             task_id=task_id,
+            product_id=product_id,
         )
         if interrupt_id is not None:
             await repository.set_campaign_approval_interrupt(session, approval.id, interrupt_id)

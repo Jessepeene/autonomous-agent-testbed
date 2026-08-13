@@ -90,10 +90,15 @@ def test_brief_truncates_the_sample_and_counts_the_rest() -> None:
     assert "3 more" in brief
 
 
-def test_brief_asks_for_an_explicit_approve_or_reject() -> None:
+def test_brief_is_pure_content_with_no_reply_instruction_baked_in() -> None:
+    """The reply instruction ("Reply APPROVE...") used to live inside the brief
+    text itself; it's now a separate `reply_hint` the call site
+    (`campaign.py::ensure_approval`) passes to `interrupts.request` directly
+    (see `tests/integration/test_campaign_approval.py` for that assertion) --
+    the brief is purely the PII-safe compliance content."""
     brief = _build_brief(product_name="X", product_id="prod-1", candidates=[_lead()])
-    assert "APPROVE" in brief
-    assert "REJECT" in brief
+    assert "APPROVE" not in brief
+    assert "REJECT" not in brief
 
 
 def test_recheck_interval_is_a_sane_positive_backoff() -> None:
