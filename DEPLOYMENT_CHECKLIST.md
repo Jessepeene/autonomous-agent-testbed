@@ -2588,3 +2588,101 @@ revision-id length fix caught by verification), transferred via
 `git archive HEAD`, image rebuilt, migration `0017` applied to the live
 database, service restarted. `/health` reports `ok`, all six engines
 enabled, boot log clean.
+
+## A third lead-sourcing path: web-search-driven scraping, ported from a proven reference — 2026-08-13
+
+The Apollo-403 fix above unblocked Hunter but not the actual stuck product:
+you supplied a real, working `HUNTER_API_KEY` (confirmed live against
+`stripe.com`), but Hunter only searches *by company domain*, and the stuck
+product's search plan has none — "freelance bookkeepers" aren't tied to a
+company website the way Apollo's title/keyword search assumed. Neither
+provider can source leads for this product, or any future one shaped like
+it, as things stand.
+
+You'd already solved this for a different product (ValidDraw, construction
+pay-application auditing) and shared that Lead Scout's actual code
+(`reference files/lead_scout.py`, not committed to this repo — it's a
+different product's own file, shared as a reference only). It turned out to
+be real, iterated production code with documented incidents baked in as
+comments, not the "dumb, hardcoded" thing you called it: a domain-matching
+bug that would have emailed a LinkedIn employee ("bfoster@linkedin.com"), a
+company-name dedup bug ("Design Electric, Inc." vs "Design Electric Inc."
+counted as two companies), and 56% of all spend once wasted re-scraping the
+same directory pages repeatedly.
+
+Ported its proven mechanisms rather than redesigning from scratch, replacing
+only what was genuinely specific to that one product's audience:
+
+- **Search backend**: Serper (`google.serper.dev`), matching the reference's
+  own proven choice — new `SERPER_API_KEY` setting, new
+  `src/factory/integrations/serper.py` shared client.
+- **New provider** `WebsiteContactProvider`
+  (`marketing/providers/website.py`): generates search queries, filters
+  results through a ported `NON_EMPLOYER_DOMAINS` blocklist (LinkedIn,
+  Indeed, ZoomInfo, etc. — a job-ad or profile page never carries the
+  employer's own reachable address) and a robots.txt check (genuinely new —
+  Apollo/Hunter call clean APIs, this is the first thing in this codebase
+  that visits arbitrary third-party HTML), fetches the page, and extracts
+  candidates via an LLM. Every extracted name/email/company must pass
+  `_found_in_source()` — literally appear in the scraped text — or the
+  candidate is dropped; this is the real defense against both hallucination
+  and a prompt-injection attempt riding in on scraped page content.
+- **Hunter's role corrected mid-plan**: the reference uses Hunter's *Email
+  Finder* (`GET /v2/email-finder`, ported as `hunter.py::find_email`) only
+  as a fallback when a named lead's page carries no email at all — not an
+  email-verifier call on every scraped address, which is what an earlier
+  draft of this plan assumed before the reference file was actually read.
+  Ported behavior, not the assumption.
+- **Hyper-specific audience targeting** (a question you asked directly): a
+  new `QualificationBrief` (positive criteria + strict exclusions +
+  borderline guidance) generated once per product by an LLM call and cached
+  on `Product.lead_qualification_brief` (migration `0018`) — the same
+  precision ValidDraw's hand-written ICP prompt has, generated instead of
+  hand-written, since this factory has to work across whatever niche
+  Discovery finds next rather than one fixed vertical. Consumed by the
+  provider's query generation, extraction, and borderline-verification
+  steps.
+- **Serper reused beyond lead sourcing** (per your own note that it has
+  other uses): a new general-purpose `web_search` agent tool
+  (`tools/builtin.py`), and a new `"search"` tool category added to both
+  `LEAD_SCOUT` and `CHANNEL_SCOUT` — the latter previously had to guess at
+  platform search URLs via `http_get`; it now gets real search.
+- **Pre-enrichment dedup and cooldown**, both ported: `has_lead_for_company`
+  (normalizes company names — the "Design Electric, Inc." bug's fix) avoids
+  a wasted Hunter Finder call on a company+name already known;
+  `recently_processed_urls` (7-day cooldown) avoids re-scraping the same
+  evergreen directory page on every harvest, the exact thing that burned 56%
+  of the reference's spend.
+
+One correction flagged in the plan itself, not silently resolved: your
+original 4-category list included "job listings & career pages," but the
+reference's own hard-won lesson is the opposite — job boards/recruiter sites
+are in the exclusion blocklist, since a job ad never carries the employer's
+own reachable address. This provider covers "direct company websites" and
+"industry/trade directories" together as one unified search-and-filter
+pipeline, matching what the reference actually does, not the original
+category list.
+
+`WebsiteContactProvider` needs both `SERPER_API_KEY` and `HUNTER_API_KEY` to
+report `available` — deployed with only `HUNTER_API_KEY` live, so it is
+currently a safe no-op, filtered out of `_real_adapters()` exactly like any
+other unconfigured optional provider. `SERPER_API_KEY` still needs to be
+supplied before this does anything.
+
+**Verified**: 984 unit + integration tests green on Linux (scratch
+Postgres), migration `0018` applied cleanly (0001 through head). New
+coverage: the anti-hallucination backstop actually drops a hallucinated/
+injected field, `NON_EMPLOYER_DOMAINS` filtering happens *before* a fetch
+(never scraped, not just never stored), a robots.txt-disallowed page is
+never fetched, confidence gating and the borderline-verification path (both
+directions), pre-enrichment dedup, Serper/Hunter Finder auth/request-error
+propagation, and — the real regression target —
+`build_qualification_brief` generating once and being reused on a second
+call for the same product rather than regenerated (proven against real
+Postgres: only one `QualificationBrief` is ever queued in the fake LLM
+provider across two calls).
+
+**Deployed live**: committed, transferred via `git archive HEAD`, image
+rebuilt, migration `0018` applied to the live database, service restarted.
+`/health` reports `ok`, all six engines enabled, boot log clean. Not yet
+active — waiting on `SERPER_API_KEY`.
