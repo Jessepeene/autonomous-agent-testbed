@@ -73,17 +73,30 @@ def _provider(
     )
 
 
-def _mock_repository(monkeypatch: pytest.MonkeyPatch, *, has_lead: bool = False) -> None:
+def _mock_repository(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    has_lead: bool = False,
+    blocked_domains: set[str] | None = None,
+) -> None:
     async def fake_recently_processed(*args: object, **kwargs: object) -> set[str]:
         return set()
 
     async def fake_has_lead(*args: object, **kwargs: object) -> bool:
         return has_lead
 
+    async def fake_blocked_domains(*args: object, **kwargs: object) -> set[str]:
+        return blocked_domains or set()
+
+    async def fake_record_failure(*args: object, **kwargs: object) -> int:
+        return 1
+
     monkeypatch.setattr(
         website_module.repository, "recently_processed_urls", fake_recently_processed
     )
     monkeypatch.setattr(website_module.repository, "has_lead_for_company", fake_has_lead)
+    monkeypatch.setattr(website_module.repository, "blocked_scrape_domains", fake_blocked_domains)
+    monkeypatch.setattr(website_module.repository, "record_scrape_failure", fake_record_failure)
 
 
 def _mock_serper(monkeypatch: pytest.MonkeyPatch, results: list[SerperResult]) -> None:
@@ -95,9 +108,11 @@ def _mock_serper(monkeypatch: pytest.MonkeyPatch, results: list[SerperResult]) -
     monkeypatch.setattr(website_module.serper, "search", fake_search)
 
 
-def _mock_fetch(monkeypatch: pytest.MonkeyPatch, page_text: str | None) -> None:
-    async def fake_fetch(url: str) -> str | None:
-        return page_text
+def _mock_fetch(
+    monkeypatch: pytest.MonkeyPatch, page_text: str | None, block_reason: str | None = None
+) -> None:
+    async def fake_fetch(url: str) -> tuple[str | None, str | None]:
+        return page_text, block_reason
 
     monkeypatch.setattr(website_module, "_fetch_page_text", fake_fetch)
 
@@ -240,9 +255,9 @@ async def test_a_linkedin_result_is_never_fetched(
     )
     fetch_calls: list[str] = []
 
-    async def fake_fetch(url: str) -> str | None:
+    async def fake_fetch(url: str) -> tuple[str | None, str | None]:
         fetch_calls.append(url)
-        return "should never be reached"
+        return "should never be reached", None
 
     monkeypatch.setattr(website_module, "_fetch_page_text", fake_fetch)
     gemini_fake.register(_QueryList, _QueryList(queries=["bookkeeping contact us"]))
@@ -274,9 +289,9 @@ async def test_a_robots_disallowed_page_is_never_fetched(
     _mock_robots_allowed(monkeypatch, False)
     fetch_calls: list[str] = []
 
-    async def fake_fetch(url: str) -> str | None:
+    async def fake_fetch(url: str) -> tuple[str | None, str | None]:
         fetch_calls.append(url)
-        return "should never be reached"
+        return "should never be reached", None
 
     monkeypatch.setattr(website_module, "_fetch_page_text", fake_fetch)
     gemini_fake.register(_QueryList, _QueryList(queries=["bookkeeping contact us"]))
@@ -286,6 +301,122 @@ async def test_a_robots_disallowed_page_is_never_fetched(
 
     assert result == []
     assert fetch_calls == []
+
+
+# --- the domain no-call list ----------------------------------------------------------
+
+
+async def test_an_already_blocked_domain_is_never_fetched(
+    ctx: FactoryContext, gemini_fake: FakeProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A domain that crossed the failure threshold on an earlier harvest must
+    be skipped before a fetch is even attempted on this one."""
+    _mock_repository(monkeypatch, blocked_domains={"acme-books.test"})
+    _mock_serper(
+        monkeypatch,
+        [SerperResult(title="Our Team", link="https://acme-books.test/team", snippet="...")],
+    )
+    fetch_calls: list[str] = []
+
+    async def fake_fetch(url: str) -> tuple[str | None, str | None]:
+        fetch_calls.append(url)
+        return "should never be reached", None
+
+    monkeypatch.setattr(website_module, "_fetch_page_text", fake_fetch)
+    gemini_fake.register(_QueryList, _QueryList(queries=["bookkeeping contact us"]))
+    provider = _provider(ctx)
+
+    result = await provider.search(_PLAN)
+
+    assert result == []
+    assert fetch_calls == []
+
+
+async def test_a_timeout_records_a_scrape_failure(
+    ctx: FactoryContext, gemini_fake: FakeProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _mock_serper(
+        monkeypatch,
+        [SerperResult(title="Our Team", link="https://acme-books.test/team", snippet="...")],
+    )
+    _mock_fetch(monkeypatch, None, "timeout")
+    _mock_robots_allowed(monkeypatch, True)
+    gemini_fake.register(_QueryList, _QueryList(queries=["bookkeeping contact us"]))
+
+    recorded: list[tuple[str, str]] = []
+
+    async def fake_recently_processed(*args: object, **kwargs: object) -> set[str]:
+        return set()
+
+    async def fake_blocked_domains(*args: object, **kwargs: object) -> set[str]:
+        return set()
+
+    async def fake_record_failure(*args: object, domain: str, reason: str) -> int:
+        recorded.append((domain, reason))
+        return 1
+
+    monkeypatch.setattr(
+        website_module.repository, "recently_processed_urls", fake_recently_processed
+    )
+    monkeypatch.setattr(website_module.repository, "blocked_scrape_domains", fake_blocked_domains)
+    monkeypatch.setattr(website_module.repository, "record_scrape_failure", fake_record_failure)
+    provider = _provider(ctx)
+
+    result = await provider.search(_PLAN)
+
+    assert result == []
+    assert recorded == [("acme-books.test", "timeout")]
+
+
+async def test_a_second_failure_within_one_call_blocks_the_rest_of_that_call(
+    ctx: FactoryContext, gemini_fake: FakeProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once `record_scrape_failure`'s returned count crosses the threshold,
+    a *third* result on the same domain within this same `search()` call must
+    be skipped without a fetch -- the first two still get attempted (there's
+    no way to know a URL will fail before trying it), but by the time the
+    count crosses the threshold, later same-domain results in the same call
+    don't need to keep paying for it."""
+    _mock_serper(
+        monkeypatch,
+        [
+            SerperResult(title="Team", link="https://acme-books.test/team", snippet="..."),
+            SerperResult(title="About", link="https://acme-books.test/about", snippet="..."),
+            SerperResult(title="Staff", link="https://acme-books.test/staff", snippet="..."),
+        ],
+    )
+    gemini_fake.register(_QueryList, _QueryList(queries=["bookkeeping contact us"]))
+
+    fetch_calls: list[str] = []
+
+    async def fake_fetch(url: str) -> tuple[str | None, str | None]:
+        fetch_calls.append(url)
+        return None, "forbidden"
+
+    async def fake_recently_processed(*args: object, **kwargs: object) -> set[str]:
+        return set()
+
+    async def fake_blocked_domains(*args: object, **kwargs: object) -> set[str]:
+        return set()
+
+    async def fake_record_failure(*args: object, domain: str, reason: str) -> int:
+        return len(fetch_calls)  # 1st failure -> 1, 2nd -> 2 (meets threshold)
+
+    monkeypatch.setattr(website_module, "_fetch_page_text", fake_fetch)
+    monkeypatch.setattr(
+        website_module.repository, "recently_processed_urls", fake_recently_processed
+    )
+    monkeypatch.setattr(website_module.repository, "blocked_scrape_domains", fake_blocked_domains)
+    monkeypatch.setattr(website_module.repository, "record_scrape_failure", fake_record_failure)
+    provider = _provider(ctx)
+
+    result = await provider.search(_PLAN)
+
+    assert result == []
+    assert fetch_calls == [
+        "https://acme-books.test/team",
+        "https://acme-books.test/about",
+    ]  # the third URL was skipped once the domain crossed the threshold
 
 
 # --- confidence gating + borderline verification ------------------------------------

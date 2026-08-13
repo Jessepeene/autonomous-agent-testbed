@@ -55,6 +55,11 @@ _RESULTS_PER_QUERY = 8
 _URL_REPROCESS_COOLDOWN_DAYS = 7
 _MIN_CONFIDENCE = 0.55
 _VERIFY_CONFIDENCE_THRESHOLD = 0.75
+#: Consecutive timeout/403 failures before a domain is skipped on sight on a
+#: later harvest, without even attempting a fetch. Observed live: real small-
+#: business and corporate sites resisting requests from this server's
+#: datacenter IP wasted several minutes of one harvest for zero leads.
+_DOMAIN_BLOCK_THRESHOLD = 2
 
 # Platforms/aggregators/directories that host a *profile* but aren't where the
 # person's own mailbox lives. Ported as-is from `reference files/lead_scout.py`'s
@@ -322,21 +327,33 @@ async def _robots_allowed(url: str) -> bool:
     return parser.can_fetch(USER_AGENT, url)
 
 
-async def _fetch_page_text(url: str) -> str | None:
+async def _fetch_page_text(url: str) -> tuple[str | None, str | None]:
+    """Returns ``(page_text, block_reason)``. ``block_reason`` is set only for
+    the failures worth counting toward a domain's no-call-list threshold --
+    timeouts and 403s, both host-level rejections that a retry with the same
+    request will not fix. Observed live: `ConnectTimeout` against a small
+    site and `ReadTimeout` against a large one, both real datacenter-IP
+    resistance, not a bug in how this factory builds the request. Anything
+    else (a 404, a non-HTML content type) is a normal skip, not a rejection,
+    and does not count toward blocking the domain."""
     await _FETCH_LIMITER.wait()
     try:
         async with client() as http_client:
             response = await http_client.get(url, follow_redirects=True)
+    except httpx.TimeoutException:
+        return None, "timeout"
     except httpx.HTTPError as exc:
         log.info("leads.website_fetch_failed", url=url, detail=str(exc)[:200])
-        return None
+        return None, None
+    if response.status_code == 403:
+        return None, "forbidden"
     if response.status_code != 200:
-        return None
+        return None, None
     content_type = response.headers.get("content-type", "")
     if "html" not in content_type and "text" not in content_type:
-        return None
+        return None, None
     text = _strip_html(response.text)
-    return text[:_MAX_PAGE_CHARS] if text.strip() else None
+    return (text[:_MAX_PAGE_CHARS] if text.strip() else None), None
 
 
 class WebsiteContactProvider:
@@ -394,6 +411,9 @@ class WebsiteContactProvider:
 
         cutoff = datetime.now(UTC) - timedelta(days=_URL_REPROCESS_COOLDOWN_DAYS)
         processed = await repository.recently_processed_urls(self._session, since=cutoff)
+        blocked_domains = await repository.blocked_scrape_domains(
+            self._session, threshold=_DOMAIN_BLOCK_THRESHOLD
+        )
 
         candidates: list[LeadCandidate] = []
         for query in queries:
@@ -419,11 +439,20 @@ class WebsiteContactProvider:
                 domain = _domain_from_url(result.link)
                 if domain and not _is_employer_domain(domain):
                     continue
+                if domain and domain in blocked_domains:
+                    log.info("leads.website_domain_blocked", domain=domain)
+                    continue
                 if not await _robots_allowed(result.link):
                     log.info("leads.website_robots_disallowed", url=result.link)
                     continue
 
-                page_text = await _fetch_page_text(result.link)
+                page_text, block_reason = await _fetch_page_text(result.link)
+                if block_reason is not None and domain:
+                    new_count = await repository.record_scrape_failure(
+                        self._session, domain=domain, reason=block_reason
+                    )
+                    if new_count >= _DOMAIN_BLOCK_THRESHOLD:
+                        blocked_domains.add(domain)
                 if not page_text:
                     continue
                 processed.add(result.link)

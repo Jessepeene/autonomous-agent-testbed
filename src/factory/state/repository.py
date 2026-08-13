@@ -38,6 +38,7 @@ from factory.state.orm import (
     Product,
     ProductLock,
     ScoutSignal,
+    ScrapeDomainFailure,
     Task,
     ValidationSignal,
     new_id,
@@ -911,6 +912,38 @@ async def set_lead_qualification_brief(
     await session.execute(
         update(Product).where(Product.id == product_id).values(lead_qualification_brief=brief_json)
     )
+
+
+async def record_scrape_failure(session: AsyncSession, *, domain: str, reason: str) -> int:
+    """First failure for a domain inserts ``failure_count=1``; each later one
+    increments it and refreshes the reason/timestamp. Global, not per-product
+    -- see `ScrapeDomainFailure`'s docstring.
+
+    Returns the count *after* this failure — ``RETURNING`` rather than a
+    second `SELECT`, so a caller deciding whether this exact failure just
+    crossed its blocking threshold doesn't need an extra round trip.
+    """
+    stmt = (
+        pg_insert(ScrapeDomainFailure)
+        .values(domain=domain, failure_count=1, last_reason=reason, last_failed_at=_now())
+        .on_conflict_do_update(
+            index_elements=[ScrapeDomainFailure.domain],
+            set_={
+                "failure_count": ScrapeDomainFailure.failure_count + 1,
+                "last_reason": reason,
+                "last_failed_at": _now(),
+            },
+        )
+        .returning(ScrapeDomainFailure.failure_count)
+    )
+    return int((await session.execute(stmt)).scalar_one())
+
+
+async def blocked_scrape_domains(session: AsyncSession, *, threshold: int) -> set[str]:
+    """Domains whose failure count has crossed ``threshold`` -- skipped before
+    a fetch is even attempted on a later harvest."""
+    stmt = select(ScrapeDomainFailure.domain).where(ScrapeDomainFailure.failure_count >= threshold)
+    return set((await session.execute(stmt)).scalars().all())
 
 
 async def erase_lead(

@@ -631,6 +631,29 @@ class ScoutSignal(Base):
     __table_args__ = (Index("ix_scout_signals_task", "task_id"),)
 
 
+class ScrapeDomainFailure(Base):
+    """A domain the web-search lead provider (`marketing/providers/website.py`)
+    has failed to fetch from -- a running per-domain count, not a per-URL log.
+
+    Global, not per-product: a site blocking a datacenter IP or timing out
+    blocks every product's harvest equally, so one domain's failure history is
+    shared across all of them. Once `failure_count` crosses
+    `WebsiteContactProvider`'s threshold, the domain is skipped before a fetch
+    is even attempted on later harvests -- observed live: repeated
+    `ConnectTimeout`/`ReadTimeout`/403s against the same small set of real
+    sites wasted several minutes of a single harvest for zero leads.
+    """
+
+    __tablename__ = "scrape_domain_failures"
+
+    domain: Mapped[str] = mapped_column(String(255), primary_key=True)
+    failure_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    last_reason: Mapped[str] = mapped_column(String(32), nullable=False)
+    last_failed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 class Memory(Base):
     """A lesson the factory retains across sessions.
 

@@ -1,7 +1,9 @@
 """DB-dependent behavior for the web-search lead provider that unit tests can't
 exercise: `has_lead_for_company`/`recently_processed_urls` (real `leads` table
-queries) and `build_qualification_brief`'s generate-once-then-reuse caching
-(real `Product.lead_qualification_brief` column, migration 0018).
+queries), `build_qualification_brief`'s generate-once-then-reuse caching (real
+`Product.lead_qualification_brief` column, migration 0018), and the
+`record_scrape_failure`/`blocked_scrape_domains` no-call list (real
+`scrape_domain_failures` table, migration 0019).
 
 Needs Postgres:
 
@@ -227,3 +229,39 @@ async def test_qualification_brief_generation_failure_returns_none(
     )
 
     assert result is None
+
+
+# --- the domain no-call list: record_scrape_failure / blocked_scrape_domains ------------
+
+
+async def test_a_domain_is_not_blocked_below_the_threshold(session: AsyncSession) -> None:
+    count = await repository.record_scrape_failure(
+        session, domain="slow-site.test", reason="timeout"
+    )
+    await session.flush()
+
+    assert count == 1
+    assert "slow-site.test" not in await repository.blocked_scrape_domains(session, threshold=2)
+
+
+async def test_a_domain_is_blocked_once_it_crosses_the_threshold(
+    session: AsyncSession,
+) -> None:
+    await repository.record_scrape_failure(session, domain="slow-site.test", reason="timeout")
+    second_count = await repository.record_scrape_failure(
+        session, domain="slow-site.test", reason="forbidden"
+    )
+    await session.flush()
+
+    assert second_count == 2
+    assert "slow-site.test" in await repository.blocked_scrape_domains(session, threshold=2)
+
+
+async def test_failure_counts_are_independent_per_domain(session: AsyncSession) -> None:
+    await repository.record_scrape_failure(session, domain="slow-site.test", reason="timeout")
+    await repository.record_scrape_failure(session, domain="other-site.test", reason="timeout")
+    await session.flush()
+
+    blocked = await repository.blocked_scrape_domains(session, threshold=2)
+
+    assert blocked == set()  # neither domain has reached 2 failures yet
