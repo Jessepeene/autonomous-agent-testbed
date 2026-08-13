@@ -2741,3 +2741,30 @@ independent.
 **Deployed live**: committed, transferred via `git archive HEAD`, image
 rebuilt, migration `0019` applied to the live database, service restarted.
 `/health` reports `ok`, all six engines enabled, boot log clean.
+
+**A second real harvest, immediately after**, confirmed the no-call list works
+live: `quickbooks.intuit.com` timed out twice within the run and a third
+result on that domain was skipped on sight (`leads.website_domain_blocked`),
+without a wasted fetch. Also surfaced a real observability gap while reading
+that run's log: `httpx.TimeoutException`'s subclasses commonly stringify to
+`""`, and the timeout branch logged nothing at all — the run read as an
+unexplained multi-second gap with no record of what failed or why. Fixed by
+logging the exception's class name (`ConnectTimeout`/`ReadTimeout`) instead of
+its empty string, and logging the 403 case explicitly too. Pure logging
+addition, no logic change — verified with local ruff/mypy/the provider's own
+unit suite and deployed directly, skipping the full scratch-Postgres cycle for
+once given the size and risk of the change.
+
+Also surfaced, not yet acted on: a `[SSL: CERTIFICATE_VERIFY_FAILED]` fetch
+failure against a real small-business site. Correctly not counted toward the
+no-call list (neither a timeout nor a 403, per your exact instruction) — most
+likely that site's own broken/expired certificate chain, not a problem on this
+server's end (well-configured HTTPS sites fetched fine in the same diagnostic
+session). No action taken; noting it here in case a pattern emerges later.
+
+This second real run still found zero leads — two real samples now both
+returned nothing from real-world small-business/corporate sites, reinforcing
+[[project-scraping-datacenter-ip-blocking]] rather than looking like one
+unlucky draw. The no-call list and better logging are both working as
+designed; the underlying datacenter-IP resistance is the real remaining
+constraint, and the scraping-proxy fix for that stays deliberately deferred.
