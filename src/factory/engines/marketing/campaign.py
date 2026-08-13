@@ -140,6 +140,16 @@ async def ensure_approval(
                 task_id=task_id,
                 leads=len(candidates),
             )
+        # `_run_engine` runs the whole task inside one `session_scope`, which
+        # rolls back on ANY exception -- including this function's own
+        # `CampaignApprovalPending`, raised deliberately as control flow to defer
+        # the task. Without committing here first, the interrupt and the approval
+        # row just written above would be silently undone every single time this
+        # is hit, so the human is never actually asked: the task would retry
+        # forever, re-raising and re-rolling-back the same request. Found live --
+        # the interrupt's own "hitl.raised" log line fired, but the row never
+        # reached the database.
+        await session.commit()
     raise CampaignApprovalPending(f"campaign for task {task_id} awaits human approval")
 
 

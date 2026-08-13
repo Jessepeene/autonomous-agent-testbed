@@ -240,6 +240,50 @@ async def test_an_ambiguous_reply_fails_closed_to_rejected(session: AsyncSession
         )
 
 
+async def test_the_escalation_survives_being_raised_inside_a_rolled_back_session_scope(
+    session: AsyncSession,
+) -> None:
+    """`_run_engine` (supervisor/graph.py) runs every task inside one `session_scope`,
+    which commits on success and rolls back on ANY exception -- including
+    `CampaignApprovalPending`, raised deliberately as control flow to defer the task,
+    not as a failure. Before the fix, `ensure_approval` never committed before
+    raising, so that rollback silently destroyed the interrupt and approval row it
+    had just written: the escalation's own `hitl.raised` log line fired, but the row
+    never reached the database, and a human was never actually asked -- the task just
+    retried forever, re-raising and re-rolling-back the same doomed write every time.
+    Found live. This reproduces the exact commit-on-success/rollback-on-exception
+    wrapping `session_scope` applies in production."""
+    product_id = await _make_product(session, "Reconciliation Assistant")
+    task_id = await _make_task(session, product_id)
+
+    try:
+        await campaign.ensure_approval(
+            session,
+            product_id=product_id,
+            product_name="Reconciliation Assistant",
+            task_id=task_id,
+            candidates=[_lead()],
+        )
+        pytest.fail("expected CampaignApprovalPending")
+    except campaign.CampaignApprovalPending:
+        await session.rollback()
+
+    from sqlalchemy import select
+
+    from factory.state.orm import CampaignApproval
+
+    approval = (
+        await session.execute(select(CampaignApproval).where(CampaignApproval.task_id == task_id))
+    ).scalar_one()
+    assert approval.status == "pending"
+    assert approval.interrupt_id is not None
+
+    interrupt = await session.get(Interrupt, approval.interrupt_id)
+    assert interrupt is not None
+    assert interrupt.status == "open"
+    assert interrupt.reason == "campaign_approval"
+
+
 async def test_sync_decisions_ignores_still_open_interrupts(session: AsyncSession) -> None:
     product_id = await _make_product(session, "Reconciliation Assistant")
     task_id = await _make_task(session, product_id)
