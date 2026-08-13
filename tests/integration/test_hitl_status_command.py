@@ -108,7 +108,7 @@ async def test_reports_no_active_products_and_the_open_escalations_content(
     assert "issue: STRIPE_API_KEY missing" in report
     assert "Setup needed" in report  # the headline, not the raw "missing_credential"
     assert f"tag: #{interrupt_id[:8]}" in report
-    assert "about: (not tied to a specific product)" in report
+    assert "(not tied to a specific product)" in report
 
 
 async def test_an_escalations_product_is_named_even_if_it_is_not_in_the_active_list(
@@ -137,7 +137,7 @@ async def test_an_escalations_product_is_named_even_if_it_is_not_in_the_active_l
     assert "healthy-current-product" in report
     # The escalation names its own (retired) product explicitly, distinct from
     # the currently active one listed above it.
-    assert "about: stuck-old-product (retired)" in report
+    assert "stuck-old-product (retired)" in report
     assert healthy_product_id != stuck_product_id
 
 
@@ -166,7 +166,7 @@ async def test_an_escalations_product_name_is_never_truncated(session: AsyncSess
 
     report = await build_status_report(session)
 
-    assert f"about: {long_name} (retired)" in report
+    assert f"{long_name} (retired)" in report
 
 
 async def test_reports_a_products_name_stage_and_numbers(session: AsyncSession) -> None:

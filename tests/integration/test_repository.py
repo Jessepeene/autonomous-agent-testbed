@@ -344,7 +344,12 @@ async def test_list_open_interrupts_groups_by_product(session: AsyncSession) -> 
     not match product grouping, to prove the query itself groups them rather
     than happening to already be in order."""
     idea_a = await repository.upsert_idea(session, _scored_idea())
-    idea_b = await repository.upsert_idea(session, _scored_idea())
+    # upsert_idea dedupes on fingerprint(problem_statement, target_niche) --
+    # a second idea needs a genuinely different niche or it collides with the
+    # first and returns None instead of a second row.
+    idea_b = await repository.upsert_idea(
+        session, _scored_idea().model_copy(update={"target_niche": "A different niche entirely"})
+    )
     assert idea_a is not None and idea_b is not None
     product_a = await repository.create_product(session, name="Product A", idea_id=idea_a)
     product_b = await repository.create_product(session, name="Product B", idea_id=idea_b)
@@ -370,7 +375,9 @@ async def test_list_open_interrupts_groups_by_product(session: AsyncSession) -> 
 
 async def test_stale_open_interrupts_also_groups_by_product(session: AsyncSession) -> None:
     idea_a = await repository.upsert_idea(session, _scored_idea())
-    idea_b = await repository.upsert_idea(session, _scored_idea())
+    idea_b = await repository.upsert_idea(
+        session, _scored_idea().model_copy(update={"target_niche": "A different niche entirely"})
+    )
     assert idea_a is not None and idea_b is not None
     product_a = await repository.create_product(session, name="Product A", idea_id=idea_a)
     product_b = await repository.create_product(session, name="Product B", idea_id=idea_b)

@@ -65,13 +65,15 @@ async def _reset_global_engine() -> AsyncIterator[None]:
     await db_module.dispose_engine()
 
 
-def _ctx(*, workspace_root: Path) -> FactoryContext:
+def _ctx(*, workspace_root: Path, gemini: FakeProvider | None = None) -> FactoryContext:
     settings = Settings(
         database_url=DATABASE_URL,
         gemini_api_key="test-key",
         workspace_root=workspace_root,
     )
-    llm = LLMClient(ProviderRegistry({Provider.GEMINI: FakeProvider()}), settings=settings)
+    llm = LLMClient(
+        ProviderRegistry({Provider.GEMINI: gemini or FakeProvider()}), settings=settings
+    )
     return FactoryContext(
         settings=settings,
         llm=llm,
@@ -117,7 +119,18 @@ async def test_two_tasks_that_exhaust_the_same_way_both_get_their_own_interrupt(
     )
     await session.commit()
 
-    ctx = _ctx(workspace_root=tmp_path)
+    # Each exhaustion now calls interrupts.plain_language_error (see
+    # supervisor/graph.py's generic Exception handler) before raising its
+    # escalation -- one queued explanation per _run_engine call below.
+    from factory.hitl.interrupts import _PlainLanguageExplanation
+
+    gemini = FakeProvider()
+    for _ in range(2):
+        gemini.register(
+            _PlainLanguageExplanation,
+            _PlainLanguageExplanation(explanation="The task failed repeatedly."),
+        )
+    ctx = _ctx(workspace_root=tmp_path, gemini=gemini)
     await sup_graph._run_engine({}, ctx=ctx, engine=EngineName.DEVELOPMENT)
     await sup_graph._run_engine({}, ctx=ctx, engine=EngineName.DEVELOPMENT)
 

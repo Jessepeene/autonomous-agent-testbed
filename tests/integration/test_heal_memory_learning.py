@@ -70,7 +70,9 @@ async def _reset_global_engine() -> AsyncIterator[None]:
     get_settings.cache_clear()
 
 
-def _ctx(*, tmp_path: Path, blacklist_path: Path) -> FactoryContext:
+def _ctx(
+    *, tmp_path: Path, blacklist_path: Path, gemini: FakeProvider | None = None
+) -> FactoryContext:
     settings = Settings(
         database_url=DATABASE_URL,
         gemini_api_key="test-key",
@@ -78,7 +80,7 @@ def _ctx(*, tmp_path: Path, blacklist_path: Path) -> FactoryContext:
         blacklist_path=blacklist_path,
         factory_dry_run=True,
     )
-    registry = ProviderRegistry({Provider.GEMINI: FakeProvider(name=Provider.GEMINI)})
+    registry = ProviderRegistry({Provider.GEMINI: gemini or FakeProvider(name=Provider.GEMINI)})
     llm = LLMClient(registry, settings=settings)
     return FactoryContext(
         settings=settings,
@@ -88,6 +90,21 @@ def _ctx(*, tmp_path: Path, blacklist_path: Path) -> FactoryContext:
         enabled_engines={EngineName.DEVELOPMENT},
         worker_id="heal-memory-test",
     )
+
+
+def _explanation_provider(*, count: int = 1) -> FakeProvider:
+    """A `FakeProvider` pre-loaded with `count` plain-language explanations --
+    every heal-budget exhaustion now calls `interrupts.plain_language_error`
+    (see `development/graph.py::_heal`) before raising its escalation."""
+    from factory.hitl.interrupts import _PlainLanguageExplanation
+
+    provider = FakeProvider(name=Provider.GEMINI)
+    for _ in range(count):
+        provider.register(
+            _PlainLanguageExplanation,
+            _PlainLanguageExplanation(explanation="Repair could not converge on this failure."),
+        )
+    return provider
 
 
 async def _make_product(session: AsyncSession, name: str) -> tuple[str, str]:
@@ -172,7 +189,7 @@ async def test_recurring_same_category_reinforces_rather_than_piling_up(
 async def test_exhausting_the_heal_budget_also_writes_an_engine_scoped_memory(
     session: AsyncSession, tmp_path: Path, blacklist_file: Path
 ) -> None:
-    ctx = _ctx(tmp_path=tmp_path, blacklist_path=blacklist_file)
+    ctx = _ctx(tmp_path=tmp_path, blacklist_path=blacklist_file, gemini=_explanation_provider())
     product_id, idea_id = await _make_product(session, "heal-memory-3")
 
     for _ in range(dev_graph.MAX_HEAL_CYCLES):
@@ -208,7 +225,7 @@ async def test_heal_exhaustion_escalation_names_the_product_with_the_right_reaso
     """Regression: this used to read `Product {product_id} failed 3 heal cycles`
     under `LEGAL_UNCERTAINTY` -- a bare hex id and a Telegram `[LEGAL_UNCERTAINTY]`
     prefix on what is a technical repair failure, not a legal question."""
-    ctx = _ctx(tmp_path=tmp_path, blacklist_path=blacklist_file)
+    ctx = _ctx(tmp_path=tmp_path, blacklist_path=blacklist_file, gemini=_explanation_provider())
     product_id, idea_id = await _make_product(session, "heal-memory-name-check")
 
     for _ in range(dev_graph.MAX_HEAL_CYCLES):
@@ -234,7 +251,9 @@ async def test_two_separate_exhaustions_for_the_same_product_do_not_collide(
     subject (`Product {id} failed 3 heal cycles`, no per-instance uniqueness) --
     resolving the first blocked the second from *ever* resolving, permanently,
     via `uq_interrupts_open_subject` -- found live, not caught by any test."""
-    ctx = _ctx(tmp_path=tmp_path, blacklist_path=blacklist_file)
+    ctx = _ctx(
+        tmp_path=tmp_path, blacklist_path=blacklist_file, gemini=_explanation_provider(count=2)
+    )
     product_id, idea_id = await _make_product(session, "heal-memory-collision-check")
 
     for _ in range(dev_graph.MAX_HEAL_CYCLES):
