@@ -8,6 +8,7 @@ and the minimisation boundary for leads.
 from __future__ import annotations
 
 import hashlib
+import re
 import secrets
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
@@ -843,6 +844,73 @@ async def insert_lead(
     )
     await session.execute(stmt)
     return record
+
+
+_COMPANY_SUFFIX_RE = re.compile(r"\b(inc|llc|ltd|corp|corporation|co)\.?\b")
+
+
+def _normalize_company_name(company: str) -> str:
+    """The same real company can be scraped with different punctuation or a
+    different legal suffix on different passes ("Design Electric, Inc." vs
+    "Design Electric Inc.") -- comparing normalized text, not ``==``, avoids
+    treating them as two different companies. Ported from
+    `reference files/lead_scout.py::_normalize_company`, where this exact gap
+    was found in production."""
+    text = company.lower()
+    text = re.sub(r"[.,]", "", text)
+    text = _COMPANY_SUFFIX_RE.sub("", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+async def has_lead_for_company(
+    session: AsyncSession, *, company: str, name: str | None = None
+) -> bool:
+    """Pre-enrichment dedup for the web-search lead provider: avoids spending a
+    Hunter Finder call on a company+name already known, *before* an email is even
+    found -- complementary to (not a replacement for) `insert_lead`'s
+    work_email-based ``ON CONFLICT`` at storage time, which only catches
+    duplicates once an email already exists.
+
+    Fetches every lead's company/name and compares in Python, matching
+    `reference files/lead_scout.py::_already_have`'s own reasoning: the
+    normalization isn't expressible as a simple SQL case-fold, and the leads
+    table is small at this factory's current scale. Revisit with a narrower SQL
+    filter if that stops being true.
+    """
+    target_company = _normalize_company_name(company)
+    stmt = select(Lead.company, Lead.first_name, Lead.last_name)
+    rows = (await session.execute(stmt)).all()
+    matching_names = [
+        f"{first} {last}".strip().lower()
+        for existing_company, first, last in rows
+        if _normalize_company_name(existing_company) == target_company
+    ]
+    if not matching_names:
+        return False
+    if not name:
+        return True
+    return name.strip().lower() in matching_names
+
+
+async def recently_processed_urls(session: AsyncSession, *, since: datetime) -> set[str]:
+    """Source URLs already scraped since ``since`` -- lets the web-search lead
+    provider skip re-scraping the same evergreen directory/team page on every
+    harvest call. Ported from
+    `reference files/lead_scout.py::_recently_processed_urls`; production proof
+    there: two directory URLs alone were independently re-extracted 9 and 2
+    separate times within ~36 hours, accounting for 56% of every lead ever found.
+    """
+    stmt = select(Lead.source_url).where(Lead.scraped_at >= since)
+    return set((await session.execute(stmt)).scalars().all())
+
+
+async def set_lead_qualification_brief(
+    session: AsyncSession, product_id: str, brief_json: str
+) -> None:
+    await session.execute(
+        update(Product).where(Product.id == product_id).values(lead_qualification_brief=brief_json)
+    )
 
 
 async def erase_lead(

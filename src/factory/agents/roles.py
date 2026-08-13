@@ -232,9 +232,13 @@ ROLES: dict[RoleName, AgentRole] = {
             "someone whose data gets processed without a real basis for it.\n"
             "You never see or handle personal contact details: the tools return only "
             "role, company and email domain. Storage and outreach happen elsewhere, "
-            "behind a Legitimate Interest Assessment you do not control.\n" + _SHARED_RULES
+            "behind a Legitimate Interest Assessment you do not control.\n"
+            "web_search is available for general research (e.g. confirming how a "
+            "niche is actually described online) — never use it to look up or "
+            "confirm a specific person's contact details; that stays inside "
+            "find_leads_hunter/find_leads_apollo's compliance boundary.\n" + _SHARED_RULES
         ),
-        tool_categories=("leads",),
+        tool_categories=("leads", "search"),
         task_type=TaskType.ANALYSIS,
         max_steps=6,
     ),
@@ -310,11 +314,12 @@ ROLES: dict[RoleName, AgentRole] = {
             "to understand what it does. Call recent_channel_experiments before you "
             "propose anything — do not re-propose a channel already tried or already "
             "awaiting a decision.\n"
-            "Use http_get against public search endpoints (e.g. Reddit's own "
-            "public search JSON, a forum's search page) to find a specific "
-            "community with real, recent, on-topic discussion — a specific "
-            "subreddit or thread beats a generic guess at where an audience "
-            "might be. Quote what you actually found and its URL.\n"
+            "Use web_search to find a specific community with real, recent, "
+            "on-topic discussion — a specific subreddit or thread beats a generic "
+            "guess at where an audience might be. Follow up with http_get against "
+            "a platform's own public endpoint (e.g. Reddit's public search JSON) "
+            "when you need more than a search snippet shows. Quote what you "
+            "actually found and its URL.\n"
             "Draft content that reads like a genuine community member sharing "
             "something useful, not an advert — communities like this ban "
             "obvious self-promotion, so honest, specific, low-key framing is "
@@ -323,7 +328,7 @@ ROLES: dict[RoleName, AgentRole] = {
             "and the draft. If you found nothing worth proposing, say so plainly "
             "rather than forcing a weak candidate through.\n" + _SHARED_RULES
         ),
-        tool_categories=("http", "growth_read", "channel_scout"),
+        tool_categories=("http", "growth_read", "channel_scout", "search"),
         task_type=TaskType.ANALYSIS,
         max_steps=12,
         mutating=True,

@@ -151,3 +151,64 @@ class HunterProvider:
             retrieved_at=datetime.now(UTC),
             confidence=confidence,
         )
+
+
+_FINDER_ENDPOINT = "https://api.hunter.io/v2/email-finder"
+
+
+async def find_email(
+    first_name: str, last_name: str, domain: str, *, settings: Settings | None = None
+) -> str | None:
+    """Hunter's Email Finder: guess a named person's address at a known domain.
+
+    Used by `providers/website.py` only as a fallback when a named lead's own
+    page carries no email at all — ported from
+    `reference files/lead_scout.py::_enrich_email`'s use of the same endpoint,
+    which is genuinely distinct from `HunterProvider.search()`'s domain-search
+    (that returns *everyone* Hunter knows at a domain; this asks for one specific
+    person and returns a confidence score for that guess).
+
+    Returns `None` (never raises) when the key is absent or the guess scores
+    below `MIN_EMAIL_CONFIDENCE` — only a genuinely rejected key or malformed
+    request raises, matching every other provider call in this codebase.
+    """
+    settings = settings or get_settings()
+    key = settings.secret("HUNTER_API_KEY")
+    if not key:
+        return None
+
+    await _LIMITER.wait()
+    params = {
+        "domain": domain,
+        "first_name": first_name,
+        "last_name": last_name,
+        "api_key": key,
+    }
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        try:
+            response = await client.get(_FINDER_ENDPOINT, params=params)
+        except httpx.HTTPError as exc:
+            log.warning("leads.hunter_finder_failed", domain=domain, detail=str(exc)[:200])
+            return None
+
+    if response.status_code != 200:
+        detail = response.text
+        log.warning(
+            "leads.hunter_finder_rejected", status=response.status_code, detail=detail[:200]
+        )
+        if response.status_code in (401, 403):
+            raise ProviderAuthError("hunter.io", response.status_code, detail)
+        if response.status_code in (400, 422):
+            raise ProviderRequestError("hunter.io", response.status_code, detail)
+        return None
+
+    try:
+        data = response.json().get("data") or {}
+    except ValueError:
+        return None
+
+    email = str(data.get("email") or "").strip().lower()
+    confidence = float(data.get("score") or 0) / 100.0
+    if not usable_person_email(email, confidence):
+        return None
+    return email

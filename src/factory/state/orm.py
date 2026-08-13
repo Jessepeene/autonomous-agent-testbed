@@ -163,6 +163,12 @@ class Product(Base):
     #: has the domain, DNS not yet verified) -> 'verified' (live on the custom
     #: domain). Never regresses once 'verified'.
     domain_status: Mapped[str | None] = mapped_column(String(16))
+    #: A `QualificationBrief` (JSON: positive_criteria/strict_exclusions/
+    #: borderline_guidance), generated once by `leads.py::build_qualification_brief`
+    #: and cached here -- the web-search lead provider's ICP definition doesn't
+    #: change call to call, so it's generated once per product rather than on
+    #: every harvest. NULL until the first harvest that needs it.
+    lead_qualification_brief: Mapped[str | None] = mapped_column(Text)
 
     __table_args__ = (Index("ix_products_status", "status"),)
 

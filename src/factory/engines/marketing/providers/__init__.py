@@ -11,9 +11,11 @@ from factory.engines.marketing.providers.base import (
     ProvenanceKind,
     ProviderAuthError,
     ProviderRequestError,
+    QualificationBrief,
 )
 from factory.engines.marketing.providers.csv_drop import CsvDropProvider
 from factory.engines.marketing.providers.hunter import HunterProvider
+from factory.engines.marketing.providers.website import WebsiteContactProvider
 from factory.settings import Settings, get_settings
 
 __all__ = [
@@ -27,6 +29,8 @@ __all__ = [
     "ProvenanceKind",
     "ProviderAuthError",
     "ProviderRequestError",
+    "QualificationBrief",
+    "WebsiteContactProvider",
     "build_providers",
 ]
 
@@ -43,6 +47,13 @@ def build_providers(settings: Settings | None = None) -> list[LeadProvider]:
     `leads.py::refine_sourcing_strategy`) — an operator can still invoke
     `CsvDropProvider` directly for a personally-vetted list, but it is no longer part
     of the pipeline `ingest()` runs on its own initiative.
+
+    ``WebsiteContactProvider`` is also excluded here: unlike Hunter/Apollo, it needs a
+    `FactoryContext` (for LLM extraction/query-generation), a DB session (for the
+    dedup/cooldown checks), and the product's own summary text — none of which this
+    function has. `leads.py::_real_adapters` constructs it directly, with all three;
+    this function is not on the real pipeline's call path today (only imported by
+    tests), so it stays Hunter/Apollo-only rather than faked with data it doesn't have.
     """
     settings = settings or get_settings()
     candidates: list[LeadProvider] = [HunterProvider(settings), ApolloProvider(settings)]

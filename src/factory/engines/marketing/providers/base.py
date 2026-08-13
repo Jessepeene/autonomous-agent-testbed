@@ -106,6 +106,22 @@ class LeadSearchPlan(Contract):
         return bool(self.job_titles or self.company_domains or self.company_keywords)
 
 
+class QualificationBrief(Contract):
+    """A per-product ICP definition for the web-search lead provider: positive
+    criteria + strict exclusions, generated once per product and cached
+    (`Product.lead_qualification_brief`) rather than regenerated on every harvest.
+
+    This is what makes hyper-specific targeting possible without a human hand-
+    writing it per product — the same precision a founder would write for one
+    fixed audience (see `reference files/lead_scout.py::SYSTEM_INSTRUCTION`'s
+    "STRICT EXCLUSIONS"), generated from the product description instead.
+    """
+
+    positive_criteria: list[str] = Field(min_length=1, max_length=6)
+    strict_exclusions: list[str] = Field(default_factory=list, max_length=6)
+    borderline_guidance: str = Field(min_length=1, max_length=400)
+
+
 class LeadProvider(Protocol):
     name: str
 

@@ -69,6 +69,10 @@ class Settings(BaseSettings):
     apollo_api_key: SecretStr | None = None
     lead_provider_monthly_quota: int = Field(default=500, ge=0)
 
+    # Google-results search API (serper.dev). Backs both the web-search-driven lead
+    # provider and the general-purpose `web_search` agent tool.
+    serper_api_key: SecretStr | None = None
+
     outbound_from_address: str | None = None
     outbound_postal_address: str | None = None
     unsubscribe_base_url: str | None = None

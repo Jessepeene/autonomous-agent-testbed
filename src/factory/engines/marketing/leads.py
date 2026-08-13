@@ -56,11 +56,13 @@ from factory.engines.marketing.providers import (
     LeadSearchPlan,
     ProviderAuthError,
     ProviderRequestError,
+    QualificationBrief,
+    WebsiteContactProvider,
 )
 from factory.learning import prompts as learning_prompts
 from factory.llm.providers.base import LLMError
 from factory.logging import get_logger
-from factory.settings import EngineName, Settings, TaskType
+from factory.settings import EngineName, TaskType
 from factory.state import repository
 from factory.state.orm import Lead
 from factory.state.schemas import LeadRecord
@@ -128,11 +130,102 @@ class IngestReport:
         )
 
 
-def _real_adapters(settings: Settings) -> list[LeadProvider]:
-    """The two credentialed data-provider adapters — never the CSV drop, which is a
-    deliberate manual override an operator invokes directly, not part of what the
-    factory reaches for on its own initiative (see the module docstring)."""
+_QUALIFICATION_BRIEF_SYSTEM = """\
+You turn a product description into precise lead-qualification criteria for a
+web-search-driven contact scraper.
+
+Read the product description and produce:
+- positive_criteria: concrete, checkable statements a real prospect must satisfy
+  (their role, their company's size/structure, tools or workflows they use --
+  anything the description states or clearly implies as a qualifying trait). 2-6
+  items.
+- strict_exclusions: concrete, checkable statements that DISQUALIFY an otherwise-
+  plausible match -- adjacent roles or companies that are NOT the target (a related
+  but different job title, a company that is the wrong size, a company in a clearly
+  different niche). 2-6 items.
+- borderline_guidance: one or two sentences telling a second-pass reviewer how to
+  resolve an ambiguous case -- when in doubt, which way to err.
+
+Be as specific as the product description supports. A vague brief defeats the
+purpose: a missed qualified lead costs far less than contacting the wrong company.\
+"""
+
+
+async def build_qualification_brief(
+    ctx: FactoryContext,
+    session: AsyncSession,
+    *,
+    product_id: str,
+    product_summary: str,
+    task_id: str | None = None,
+) -> QualificationBrief | None:
+    """Generated once per product, cached on `Product.lead_qualification_brief` —
+    the audience definition doesn't change harvest to harvest, unlike search
+    queries, so this is not regenerated on every call. See
+    `0018_lead_qualification_brief.py` for the schema note.
+
+    Returns `None` on any failure to generate (never blocks the harvest —
+    `WebsiteContactProvider` degrades to using `product_summary` alone when no
+    brief is available).
+    """
+    product = await repository.get_product(session, product_id)
+    if product is not None and product.lead_qualification_brief:
+        try:
+            return QualificationBrief.model_validate_json(product.lead_qualification_brief)
+        except ValueError:
+            log.warning("leads.qualification_brief_corrupt", product_id=product_id)
+
+    try:
+        brief = await ctx.llm.parse(
+            QualificationBrief,
+            task_type=TaskType.ANALYSIS,
+            system=_QUALIFICATION_BRIEF_SYSTEM,
+            prompt=f"Product:\n{product_summary}",
+            engine=EngineName.MARKETING,
+            task_id=task_id,
+        )
+    except LLMError as exc:
+        log.warning("leads.qualification_brief_failed", detail=str(exc)[:200])
+        return None
+
+    await repository.set_lead_qualification_brief(session, product_id, brief.model_dump_json())
+    return brief
+
+
+async def _real_adapters(
+    ctx: FactoryContext,
+    session: AsyncSession,
+    *,
+    product_id: str | None,
+    product_summary: str,
+    task_id: str | None,
+) -> list[LeadProvider]:
+    """Every credentialed data-provider adapter that is currently usable — never
+    the CSV drop, which is a deliberate manual override an operator invokes
+    directly, not part of what the factory reaches for on its own initiative (see
+    the module docstring).
+
+    `WebsiteContactProvider` needs a brief before it can be constructed; brief
+    generation is skipped entirely when there's no `product_id` to cache it
+    against (e.g. an ad hoc/test harvest with no real product behind it).
+    """
+    settings = ctx.settings
     candidates: list[LeadProvider] = [HunterProvider(settings), ApolloProvider(settings)]
+
+    brief: QualificationBrief | None = None
+    if product_id is not None:
+        brief = await build_qualification_brief(
+            ctx, session, product_id=product_id, product_summary=product_summary, task_id=task_id
+        )
+    candidates.append(
+        WebsiteContactProvider(
+            ctx,
+            session,
+            product_summary=product_summary,
+            qualification_brief=brief,
+            task_id=task_id,
+        )
+    )
     return [provider for provider in candidates if provider.available]
 
 
@@ -285,7 +378,9 @@ async def ingest(
     )
     report.planned = len(plan.job_titles) + len(plan.company_domains)
 
-    providers = _real_adapters(ctx.settings)
+    providers = await _real_adapters(
+        ctx, session, product_id=product_id, product_summary=product_summary, task_id=task_id
+    )
     if not providers:
         log.info("leads.no_providers")
         return report

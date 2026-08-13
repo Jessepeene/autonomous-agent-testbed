@@ -216,6 +216,36 @@ async def find_leads_apollo(**kwargs: Any) -> dict[str, Any]:
 
 
 @REGISTRY.tool(
+    name="web_search",
+    description=(
+        "Search the web (Google results via Serper) and return title/link/snippet "
+        "for each result. Use for finding company websites, industry directories, "
+        "forum threads, or any other public page relevant to your task — general-"
+        "purpose search, not limited to one platform."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Search query."},
+            "num": {"type": "integer", "description": "Maximum results (1-20)."},
+        },
+        "required": ["query"],
+        "additionalProperties": False,
+    },
+    category="search",
+    required_credential="SERPER_API_KEY",
+)
+async def web_search(query: str, num: int = 10) -> dict[str, Any]:
+    from factory.integrations import serper
+
+    try:
+        results = await serper.search(query, num=max(1, min(num, 20)))
+    except serper.SerperError as exc:
+        return {"error": f"serper returned {exc.status_code}", "results": []}
+    return {"results": [{"title": r.title, "link": r.link, "snippet": r.snippet} for r in results]}
+
+
+@REGISTRY.tool(
     name="github_search_issues",
     description=(
         "Search public GitHub issues for recurring complaints and unmet needs. "

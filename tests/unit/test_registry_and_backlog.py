@@ -144,7 +144,7 @@ def test_builtin_tools_register_cleanly() -> None:
     from factory.tools.registry import REGISTRY
 
     names = {t.name for t in REGISTRY.all()}
-    assert {"http_get", "run_in_sandbox", "github_search_issues"} <= names
+    assert {"http_get", "run_in_sandbox", "github_search_issues", "web_search"} <= names
 
 
 def test_the_tool_registry_is_populated_without_an_explicit_builtin_import() -> None:
