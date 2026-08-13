@@ -2768,3 +2768,100 @@ returned nothing from real-world small-business/corporate sites, reinforcing
 unlucky draw. The no-call list and better logging are both working as
 designed; the underlying datacenter-IP resistance is the real remaining
 constraint, and the scraping-proxy fix for that stays deliberately deferred.
+
+## Telegram escalation redesign: clear structure, honest reply instructions — 2026-08-13
+
+You said the escalation messages were unclear about what they expect you to do
+and the structure was messy. An audit of all 18 `interrupts.request()` call
+sites confirmed why: reply vocabulary was inconsistent (APPROVE/REJECT,
+RESUME, SKIP, "retry," "reply with anything"), 6 sites gave no reply
+instruction at all, and every message ended with a generic
+`"Reply with: #{tag} <your answer>"` footer stacked on top of whatever ad hoc
+sentence was already buried in `detail`.
+
+**New message shape**, agreed after several rounds of concrete before/after
+examples:
+
+```
+📦 {product name}          <- only if product-scoped
+{headline}                  <- emoji + specific category, e.g. "🔑 Account problem"
+
+🔍 The problem:
+{detail}
+
+────────────────
+👉 What to do:
+{reply_hint}
+{"Include this tag in your reply: #tag" if needs_reply else "Tag: #tag"}
+```
+
+**Schema**: migration `0020` adds `headline: Text`, `reply_hint: Text`,
+`needs_reply: Boolean NOT NULL DEFAULT true` to `interrupts` (nullable —
+safe for historical rows). `repository.open_interrupt()` and
+`interrupts.request()` both made `headline`/`reply_hint` **required** kwargs
+(no default) specifically so mypy would catch any of the 18 production call
+sites that forgot them — confirmed zero missed sites.
+
+**Shared template**: new `hitl/formatting.py::build_escalation_text()` is the
+one place the template above is assembled, used by both the push
+(`deliver_pending`) and the `/issue` drill-down (`build_issue_detail`) so they
+can never drift apart. Lives as a dependency-free leaf module specifically to
+avoid a real circular import — `interrupts.py` already imports `commands.py`
+for `/status`/`/issue` dispatch, so `commands.py` can't import back.
+
+**Plain-language rewrite for raw error text**: you pointed out the error
+blocks are unreadable without code access. Of the 18 sites, 3 dump genuinely
+freeform, unpredictable technical text (heal-cycle failures in
+`development/graph.py::_heal`, infra errors and generic task-exhaustion in
+`supervisor/graph.py`) — the rest either carry already-structured data or
+branch on a known cause with a deterministic explanation. Those 3 now call a
+new `interrupts.plain_language_error()`: one cheap Gemini `TaskType.ANALYSIS`
+call that rewrites the raw text into 2-4 plain-English sentences (affected
+area, what's specifically wrong, a plausible root-cause hypothesis) for a
+non-technical operator. Falls back to
+`f"(Technical detail, unedited): {raw_text[:500]}"` on any `LLMError` — an
+escalation must never be blocked by this call failing.
+
+**Product grouping**: you asked for the product name on top and escalations
+sorted per product. `list_open_interrupts`/`stale_open_interrupts` changed
+`ORDER BY` to `product_id ASC NULLS LAST, created_at ASC`; `/status`'s
+escalation entries now lead with the bare product name (or "(not tied to a
+specific product)") instead of a labeled "about:" line, using
+`interrupt.headline` in place of the old `_REASON_LABEL` dict (removed
+entirely — `headline` is strictly more specific, proven by
+`LEAD_SOURCING_STALLED` needing two different headlines, 🔑 vs 🐛, for the
+same `InterruptReason` depending on whether the real cause was a bad
+credential or a request/code bug).
+
+**Honesty pass on `reply_hint`**: 4 sites where a reply genuinely does
+nothing beyond closing the escalation (budget cap, Docker-unavailable, the
+data-integrity audit, the orchestrator's own generic `_escalate`) now say so
+plainly (`needs_reply=False`, "No reply needed"). Sites where only the literal
+word "retry" does anything (checked against `collect_replies()`'s actual
+branches, not assumed) say exactly that instead of implying free text works.
+
+**Verified**: local ruff/format/mypy clean; local unit suite green (the two
+pre-existing Windows path-separator failures in `test_bug_council.py`/
+`test_deploy_env.py` are unrelated and expected to fail here, pass on Linux).
+Scratch-Postgres surfaced 9 failures mypy couldn't catch (mypy doesn't scope
+`tests/`) on the first full run: 4 needed a `FakeProvider` response queued for
+`_PlainLanguageExplanation` wherever a test exercises the heal-exhaustion or
+generic-exception paths (both now make a real LLM call before escalating), 3
+were `/status` assertions still expecting the old "about: " prefix, and 2 were
+this session's own new product-grouping tests reusing a shared idea fixture
+twice and hitting `upsert_idea`'s problem/niche fingerprint dedup instead of
+getting two distinct ideas. Fixed all 9, re-ran, and a 10th surfaced on the
+second pass: a heal-exhaustion test asserted the raw product id was still
+readable inside `detail` — true under the old design (which literally
+embedded `f"Product: {name} ({product_id})"`), no longer true or desired now
+that `detail` is an LLM-authored plain-English explanation. Traceability
+already holds via the interrupt row's own `product_id` column and structured
+logs, so the assertion was updated rather than re-adding the id to
+human-facing text. Third full run: 1003 passed, 0 failed.
+
+**Deployed live**: committed across three commits (the redesign itself, the
+first test-fix round, the heal-exhaustion detail-assertion fix), transferred
+via `git archive HEAD`, image rebuilt, migration `0020` applied to the live
+database, service restarted. `/health` returns 200, boot log clean, all six
+engines enabled. Visual confirmation of the new format in an actual Telegram
+message is still pending — will confirm against the next real escalation.
