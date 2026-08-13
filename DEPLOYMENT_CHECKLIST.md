@@ -2863,5 +2863,73 @@ human-facing text. Third full run: 1003 passed, 0 failed.
 first test-fix round, the heal-exhaustion detail-assertion fix), transferred
 via `git archive HEAD`, image rebuilt, migration `0020` applied to the live
 database, service restarted. `/health` returns 200, boot log clean, all six
-engines enabled. Visual confirmation of the new format in an actual Telegram
-message is still pending — will confirm against the next real escalation.
+engines enabled.
+
+**Visual confirmation, live**: closed out 3 open interrupts (one confirmed
+stale — a heal-exhaustion escalation on a product already retired and
+reseeded; one legal-review flag on an unrelated idea, left untouched; one
+lead-sourcing-stalled retry) to get a clean slate, then re-triggered lead
+sourcing for the still-active bookkeepers product to exercise the pipeline
+end to end. The harvest ran for real (Serper search, page fetches, Hunter
+lookup) and found 0 leads — a 3rd real-world confirmation of
+[[project-scraping-datacenter-ip-blocking]], and, combined with task history
+(6 harvests on this product, 1 on the DevOps product, both always 0 leads),
+proof the block is server-IP-level, not niche-specific. The periodic
+stalled-validation sweep independently re-escalated the same product at
+almost the same moment; its push arrived on Telegram in the new format —
+first live confirmation of this session's redesign, matching the template
+exactly.
+
+## Campaign-approval escalations were being silently destroyed on every raise — 2026-08-13
+
+Manually seeded 3 fake `Lead` rows (`lia_passed=True`, clearly-fake `.test`
+email domains, real `insert_lead` write path) for the bookkeepers product and
+enqueued a `SEND_OUTREACH` task by hand, specifically to exercise the parts of
+the pipeline a real harvest has never once reached (0 leads in 7/7 real
+attempts always stalls before them): campaign approval, outreach composition,
+send. `hitl.raised` logged a `campaign_approval` escalation immediately, as
+expected — but it never showed up in `/status`, never reached Telegram, and
+the DB had no open interrupt at all. The `SEND_OUTREACH` task just sat
+`pending`, silently retrying forever.
+
+**Root cause**: `_run_engine` (`supervisor/graph.py`) runs each task inside one
+`session_scope`, which commits on success and rolls back on *any* exception.
+`campaign.ensure_approval()` writes the `CampaignApproval` row and calls
+`interrupts.request()`, then deliberately raises `CampaignApprovalPending` as
+control flow — not a failure, just "defer this task." That exception
+propagates out through the same `session_scope` it was written in, so the
+whole transaction, interrupt included, gets rolled back every time. The task
+correctly defers (via a separate, freshly-committed session), so it retries
+forever — but every retry re-writes and re-rolls-back the identical doomed
+interrupt. A human was never actually asked. Checked the other three
+defer-by-exception paths (`ValidationCapacityExceeded`, `RepairBlocked`,
+`MarketingFrozen`) — none of them write new state immediately before raising,
+so this was specific to campaign approval, not a wider pattern.
+
+Given "the top-level legal gate: strictly forbidden from opening the SMTP
+transport... without an explicit human APPROVE on file" — this means real
+campaign approval requests have likely never actually worked in this
+deployment's history; nothing had ever exercised that exact code path for
+real until this manual test.
+
+**Fix**: `ensure_approval()` now calls `await session.commit()` right after
+writing the interrupt and linking it to the `CampaignApproval` row, before
+raising `CampaignApprovalPending` — so the rollback that follows has nothing
+left to undo.
+
+**Why no existing test caught this**: every test in
+`test_campaign_approval.py` called `ensure_approval()` directly with a plain
+session and manually committed afterward regardless of the exception —
+nothing like `session_scope`'s actual commit-on-success/rollback-on-exception
+wrapping. New test
+`test_the_escalation_survives_being_raised_inside_a_rolled_back_session_scope`
+reproduces that exact wrapping (catch `CampaignApprovalPending`, roll back,
+then verify against the same session) — fails without the fix, passes with
+it.
+
+**Verified**: local ruff/format/mypy clean, local unit suite green (same two
+pre-existing Windows path-separator failures, unrelated). Scratch-Postgres:
+`test_campaign_approval.py` alone (6/6, including the new regression test),
+then the full suite, 1004 passed. Deployed live: committed, transferred via
+`git archive HEAD`, image rebuilt (no migration needed, no schema change),
+service restarted. `/health` returns 200, boot log clean.
