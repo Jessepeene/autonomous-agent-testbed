@@ -340,12 +340,19 @@ async def _fetch_page_text(url: str) -> tuple[str | None, str | None]:
     try:
         async with client() as http_client:
             response = await http_client.get(url, follow_redirects=True)
-    except httpx.TimeoutException:
+    except httpx.TimeoutException as exc:
+        # httpx's TimeoutException subclasses commonly stringify to "" -- the
+        # exception's own class name is the only reliably informative thing
+        # to log here (observed live: ConnectTimeout and ReadTimeout both
+        # printed empty detail, making a run's log read as an unexplained gap
+        # until the eventual leads.website_domain_blocked line).
+        log.info("leads.website_fetch_timeout", url=url, kind=type(exc).__name__)
         return None, "timeout"
     except httpx.HTTPError as exc:
         log.info("leads.website_fetch_failed", url=url, detail=str(exc)[:200])
         return None, None
     if response.status_code == 403:
+        log.info("leads.website_fetch_forbidden", url=url)
         return None, "forbidden"
     if response.status_code != 200:
         return None, None
