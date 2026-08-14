@@ -155,8 +155,11 @@ async def _churned_subscription(
 async def test_involuntary_and_voluntary_churn_get_distinctly_worded_lessons(
     session: AsyncSession,
 ) -> None:
-    involuntary_product = await _make_product(session, "involuntary-churn-niche")
-    voluntary_product = await _make_product(session, "voluntary-churn-niche")
+    # Deliberately not "involuntary-churn-niche" / "voluntary-churn-niche" --
+    # "involuntary" contains "voluntary" as a literal substring, so an `in`
+    # check for the second niche would also match the first row's content.
+    involuntary_product = await _make_product(session, "card-declined-niche")
+    voluntary_product = await _make_product(session, "canceled-by-choice-niche")
     await _churned_subscription(
         session,
         stripe_subscription_id="sub_involuntary",
@@ -192,8 +195,8 @@ async def test_involuntary_and_voluntary_churn_get_distinctly_worded_lessons(
         .scalars()
         .all()
     )
-    involuntary_lesson = next(m for m in rows if "involuntary-churn-niche" in m.content)
-    voluntary_lesson = next(m for m in rows if "voluntary-churn-niche" in m.content)
+    involuntary_lesson = next(m for m in rows if "card-declined-niche" in m.content)
+    voluntary_lesson = next(m for m in rows if "canceled-by-choice-niche" in m.content)
     assert "involuntarily" in involuntary_lesson.content
     assert "payment failure" in involuntary_lesson.content
     assert "voluntarily" in voluntary_lesson.content
