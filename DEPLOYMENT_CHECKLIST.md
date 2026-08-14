@@ -3158,3 +3158,62 @@ rebuilt, migration `0022` applied to the live database, service restarted.
 real PyPI registry from inside the deployed container: `pydantic`/`requests`
 passed cleanly, a deliberately hallucinated name was caught —
 `totally-hallucinated-pkg-xyz-123 (no such package on PyPI)`.
+
+## Risk-audit hardening, Phase 3: close the Discovery memory loop — 2026-08-14
+
+Found live during the risk audit: `development/graph.py::_evaluate_validation`
+wrote its validation-failure lesson at `product:{id}` scope, then retired the
+product a few lines later — Discovery's own reader scope (`engine:discovery`)
+never overlapped with that, so the single most valuable memory the factory
+produces was write-only. Worse, the pass branch wrote no memory at all, so
+the factory only ever learned from losses, never from what actually worked.
+No migration — this is Discovery/Compliance's own read/write wiring into the
+memory store that already existed (`memory/store.py`), not a schema change.
+
+- `development/graph.py`: both outcomes of `_evaluate_validation` now also
+  file a niche-level lesson at `engine:discovery`, alongside the existing
+  product-scoped one (left untouched).
+- `discovery/graph.py` + `score.py`: every cycle recalls prior
+  `engine:discovery` lessons into the generator's and discriminator's
+  *prompt* — never `system`, which is the tunable value
+  `learning/prompts.py::get_prompt` serves; appending there would corrupt
+  trial attribution for `GENERATOR_SYSTEM`/`DISCRIMINATOR_SYSTEM`. One
+  aggregate lesson (dominant rejection niches and reasons) is written per
+  cycle, not one per rejected idea — `remember()`'s near-duplicate
+  reinforcement keeps recurring patterns from flooding the scope.
+- `compliance/graph.py`: rejected/flagged ideas file a niche lesson at
+  Discovery's scope. `compliance/assessor.py` deliberately does **not** read
+  memory back into `IDEA_SYSTEM_PROMPT` — that would be a de-facto mutation
+  channel into a safety-critical, permanently learning-loop-excluded prompt.
+  It reads structured facts instead, via new
+  `repository.prior_verdicts_for_niche` (lexical similarity match on past
+  idea niches, since `upsert_idea`'s fingerprint dedup already prevents an
+  exact-string repeat from ever existing) — a fact from our own table can't
+  be poisoned by a prior model's prose the way a memory could, and it's
+  framed to the model as evidence, not an auto-reject rule.
+- `learning/maintenance.py`: the mutation-proposing analyst's episode summary
+  now also carries a `recall_block` scoped to the allowlisted key's own
+  engine (new `_engine_for_key` helper), so it sees more than a bare success
+  rate when recommending a prompt/weights revision.
+
+**Verified**: local ruff/mypy clean (same two pre-existing findings noted in
+earlier phases — `UP037` in this same file, `RUF100` in `preflight.py` —
+confirmed unrelated to this change). New `test_discovery_memory_loop.py`
+(2 integration tests: a pre-seeded lesson reaches the prompt, never system,
+byte-identical to the served tunable value; a rejected idea produces a new
+`engine:discovery` lesson the next cycle can read) — `discovery/graph.py`'s
+`build_sources` is monkeypatched to a fake in-memory `Source` so the test
+never makes a real network call (`HackerNewsSource.available` is
+unconditionally `True`, unlike the credential-gated sources). Two new
+integration tests in `test_validation_gate.py` cover the pass/fail write
+scope fix directly. Two new unit tests in `test_supervisor_and_compliance.py`
+assert `IDEA_SYSTEM_PROMPT` reaches the model byte-identical and that
+`factory.memory` is never imported by `compliance/assessor.py` at all — a
+real, enforced check, not just a convention. Three new unit tests for
+`_engine_for_key`. Local unit suite: 785 passed (same two pre-existing
+Windows failures). Scratch-Postgres: full suite, 1057 passed.
+
+**Deployed live**: committed, transferred via `git archive HEAD`, image
+rebuilt (no migration to apply — `alembic upgrade head` confirmed already at
+`0022`), service restarted. `/health` returns 200, boot log clean, all six
+engines enabled.
