@@ -7,6 +7,7 @@ is an observation and ingest surface, not a control plane.
 
 from __future__ import annotations
 
+import hmac
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -69,7 +70,28 @@ async def ready() -> dict[str, Any]:
 
 
 @app.get("/metrics")
-async def metrics_endpoint() -> dict[str, Any]:
+async def metrics_endpoint(
+    authorization: str = Header(default="", alias="Authorization"),
+) -> dict[str, Any]:
+    """Full financial and operational state — spend, balance, task counts.
+
+    Was unauthenticated and publicly reachable. Two independent layers now: the
+    `Caddyfile` 404s this path from the public interface, and this bearer check
+    stands behind it so a proxy misconfiguration cannot silently re-expose it.
+
+    Fails closed when no token is configured: an unset credential means "nobody may
+    read this", never "everybody may". Operators read it over the loopback bind
+    (`127.0.0.1:8000`, see docker-compose.yml) with the token set.
+    """
+    expected = get_settings().secret("METRICS_AUTH_TOKEN")
+    if not expected:
+        raise HTTPException(status_code=503, detail="METRICS_AUTH_TOKEN is not configured")
+    scheme, _, presented = authorization.partition(" ")
+    # compare_digest on both halves: a plain `!=` on the token leaks length and
+    # prefix through timing, and this endpoint is reachable from the container
+    # network even with Caddy refusing it at the edge.
+    if scheme.lower() != "bearer" or not hmac.compare_digest(presented.strip(), expected):
+        raise HTTPException(status_code=401, detail="invalid or missing bearer token")
     async with session_scope() as session:
         snapshot = await metrics.collect(session)
     return snapshot.as_dict()

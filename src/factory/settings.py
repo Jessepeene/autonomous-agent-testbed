@@ -77,6 +77,14 @@ class Settings(BaseSettings):
     outbound_postal_address: str | None = None
     unsubscribe_base_url: str | None = None
 
+    # Bearer token for `GET /metrics`, which exposes the factory's full financial and
+    # operational state. Unset means the endpoint refuses every request (503) rather
+    # than serving openly -- it was previously unauthenticated and publicly reachable.
+    # Degrading, not hard-block: the factory runs fine without metrics being readable
+    # over HTTP, and the Caddyfile already 404s the path from the public interface, so
+    # this is the second of two layers rather than the only one.
+    metrics_auth_token: SecretStr | None = None
+
     # Deliverability API (replaces raw SMTP for cold outreach — see
     # `engines/marketing/email.py`). Raw SMTP from a primary domain has no IP
     # rotation, no warmup, and no bounce/complaint feedback loop; a burst of cold

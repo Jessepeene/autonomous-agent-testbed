@@ -96,6 +96,15 @@ CREDENTIALS: tuple[CredentialSpec, ...] = (
         ),
         engines=(EngineName.MARKETING,),
     ),
+    CredentialSpec(
+        env_var="METRICS_AUTH_TOKEN",
+        severity=Severity.DEGRADES,
+        purpose="Bearer token guarding GET /metrics, which exposes full financial state.",
+        remedy=(
+            "Generate one (`openssl rand -hex 32`) and set METRICS_AUTH_TOKEN. Until "
+            "then /metrics refuses every request with 503 rather than serving openly."
+        ),
+    ),
 )
 
 

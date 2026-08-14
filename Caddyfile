@@ -1,3 +1,18 @@
 {$PUBLIC_DOMAIN} {
-	reverse_proxy factory:8000
+	# /metrics carries the factory's full financial and operational state (see
+	# observability/metrics.py::collect). It was publicly readable by anyone who
+	# guessed the path. Refused here rather than merely authenticated, so a
+	# misconfigured or missing METRICS_AUTH_TOKEN can never expose it either --
+	# the app-side bearer check in api/app.py is the second layer, not the only
+	# one. Operators read it over the loopback bind (127.0.0.1:8000).
+	@internal path /metrics /metrics/*
+	respond @internal 404
+
+	reverse_proxy factory:8000 {
+		# Overwrite, never append: Caddy's default appends the client's own
+		# X-Forwarded-For, so a caller could pin any value it liked and defeat
+		# per-IP rate limiting (api/abuse.py) by sending a fresh header per
+		# request. {remote_host} is the TCP peer, which a client cannot forge.
+		header_up X-Forwarded-For {remote_host}
+	}
 }
