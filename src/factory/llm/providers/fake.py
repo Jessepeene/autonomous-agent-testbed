@@ -55,6 +55,7 @@ class FakeProvider:
                 "model": model,
                 "system": system,
                 "prompt": prompt,
+                "max_tokens": max_tokens,
                 "tools": tools,
                 "cache_prefix": cache_prefix,
             }

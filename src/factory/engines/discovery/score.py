@@ -141,6 +141,20 @@ async def generate_ideas(
     )
 
 
+def _scaled_discriminator_tokens(n: int) -> int:
+    """Output is the binding constraint, same reasoning as
+    `compliance/assessor.py::_scaled_batch_tokens`. `ScoredIdea` is a heavier
+    schema than `LeadAssessment` -- 15 fields per idea including two ~800-char
+    free-text fields (`monetization_hypothesis`, `defensibility_reasoning`) --
+    so the un-scaled 8192-token client default silently truncates mid-object on
+    a real batch: caught live via a 20-idea sample run against production,
+    where it raised `SchemaViolation` at the exact default `discriminate()` had
+    never overridden. `max_tokens` is a ceiling, not a charge, so widening it
+    costs nothing on a chunk whose real output is shorter -- capped at 16_384,
+    the same ceiling `_scaled_batch_tokens` already trusts as safe."""
+    return min(1_536 + 700 * n, 16_384)
+
+
 async def discriminate(
     ctx: FactoryContext,
     batch: IdeaBatch,
@@ -170,6 +184,7 @@ async def discriminate(
         engine=EngineName.DISCOVERY,
         task_id=task_id,
         tunable_parameter_id=tunable_parameter_id,
+        max_tokens=_scaled_discriminator_tokens(len(batch.ideas)),
     )
 
 
