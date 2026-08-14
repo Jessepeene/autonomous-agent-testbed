@@ -14,7 +14,8 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from factory.learning.maintenance import WeightsCandidate
+from factory.learning.maintenance import WeightsCandidate, _engine_for_key
+from factory.settings import EngineName
 
 
 def _weights(**overrides: float) -> dict[str, float]:
@@ -87,3 +88,29 @@ def test_no_change_recommended_skips_the_sum_check() -> None:
         adoption_ease=0.0,
     )
     assert candidate.no_change_recommended is True
+
+
+# --- _engine_for_key: scoping the analyst's memory recall --------------------
+
+
+def test_engine_for_key_extracts_the_engine_from_a_module_path() -> None:
+    assert (
+        _engine_for_key("factory.engines.discovery.score:GENERATOR_SYSTEM") is EngineName.DISCOVERY
+    )
+    assert (
+        _engine_for_key("factory.engines.compliance.assessor:IDEA_SYSTEM_PROMPT")
+        is EngineName.COMPLIANCE
+    )
+
+
+def test_engine_for_key_returns_none_for_a_non_engine_module() -> None:
+    """Not every allowlisted key lives under `factory.engines.*` -- falling back
+    to `None` degrades to global-scope-only recall, never an error."""
+    assert _engine_for_key("factory.learning.maintenance:SOME_KEY") is None
+    assert _engine_for_key("factory.supervisor.orchestrator:SYSTEM_PROMPT") is None
+
+
+def test_engine_for_key_returns_none_for_an_unrecognised_engine_segment() -> None:
+    """A module path shaped like `factory.engines.<x>...` where `<x>` is not one
+    of the fixed `EngineName` values -- must not raise."""
+    assert _engine_for_key("factory.engines.nonexistent.module:KEY") is None

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from factory.llm.providers.base import LLMError
 from factory.logging import get_logger
@@ -26,6 +27,9 @@ from factory.state.schemas import (
     ValidatedIdea,
 )
 from factory.supervisor.context import FactoryContext
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 log = get_logger(__name__)
 
@@ -260,16 +264,38 @@ async def assess_idea(
     ctx: FactoryContext,
     idea: ValidatedIdea,
     *,
+    session: AsyncSession | None = None,
     settings: Settings | None = None,
     task_id: str | None = None,
 ) -> ComplianceAssessment:
     settings = settings or get_settings()
+    # Structured facts from our own tables, not a memory recall: deliberately
+    # not the same mechanism Discovery uses. Injecting model-authored memory
+    # text into this specific prompt would be a de-facto mutation channel into
+    # a safety-critical gate -- exactly what `learning/allowlist.py` permanently
+    # excludes compliance prompts to prevent, by never importing that package
+    # here. A fact read from `ideas` cannot be poisoned by a prior model's
+    # prose the way a memory could, and the model still decides what to do
+    # with it -- more prior rejections in this niche is evidence, not a rule
+    # that auto-rejects; niches change.
+    prior_context = ""
+    if session is not None:
+        from factory.state import repository
+
+        prior = await repository.prior_verdicts_for_niche(session, idea.target_niche)
+        if prior:
+            lines = "\n".join(f"- {niche}: {status}" for niche, status in prior)
+            prior_context = (
+                f"\nPrior verdicts on similar niches (for context only -- judge this "
+                f"idea on its own facts):\n{lines}\n"
+            )
     prompt = (
         "Proposed product:\n"
         f"- problem: {idea.problem_statement}\n"
         f"- target niche: {idea.target_niche}\n"
         f"- monetization: {idea.monetization_hypothesis}\n"
-        f"- evidence source: {idea.source_url}\n\n"
+        f"- evidence source: {idea.source_url}\n"
+        f"{prior_context}\n"
         "Assess whether this may be built and sold."
     )
     try:

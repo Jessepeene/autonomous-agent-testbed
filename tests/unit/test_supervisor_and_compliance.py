@@ -572,6 +572,36 @@ async def test_high_confidence_approval_stays_approved(
     assert result.approved is True
 
 
+# --- idea assessment must never become a memory-mutation channel ------------
+#
+# `assessor.py`'s own comment on `assess_idea` explains why: injecting
+# model-authored memory text into a safety-critical, mutation-excluded prompt
+# would be a de-facto way to mutate it outside `learning/store`'s promotion
+# path. These assert the actual behaviour, not just the comment's claim.
+
+
+async def test_idea_system_prompt_reaches_the_model_byte_identical(
+    ctx: FactoryContext, gemini_fake: FakeProvider
+) -> None:
+    gemini_fake.register(ComplianceAssessment, _idea_assessment(ComplianceStatus.APPROVED, 0.95))
+
+    await assessor.assess_idea(ctx, _IDEA)
+
+    call = gemini_fake.calls[-1]
+    assert call["system"] == assessor.IDEA_SYSTEM_PROMPT
+
+
+def test_compliance_assessor_module_never_imports_memory_store() -> None:
+    """A real, enforced check, not just a convention: `prior_verdicts_for_niche`
+    (structured facts from `ideas`) is the only context this module is allowed
+    to add, so `factory.memory` must never appear in it at all."""
+    import inspect
+
+    source = inspect.getsource(assessor)
+    assert "memory_store" not in source
+    assert "factory.memory" not in source
+
+
 # --- preflight --------------------------------------------------------------
 
 

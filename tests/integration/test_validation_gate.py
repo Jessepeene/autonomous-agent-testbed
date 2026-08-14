@@ -567,6 +567,88 @@ async def test_evaluation_records_a_learning_episode_without_touching_other_keys
     assert landing_successes == 1
 
 
+# --- memory: closing the Discovery loop -----------------------------------------
+#
+# Found live during a risk audit: the validation-failure lesson was written at
+# `product:{id}` scope, then the product is retired -- Discovery's own reader
+# scope (`engine:discovery`) never overlaps with that, so the single most
+# valuable memory the factory produces was write-only. Worse, a *pass* wrote no
+# memory at all, so the factory only ever learned from losses.
+
+
+async def test_a_failed_validation_writes_a_niche_lesson_discovery_can_read(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    from factory.memory import store as memory_store
+    from factory.settings import EngineName as _EngineName
+
+    _idea_id, product_id = await _make_validating_product(session, niche="memory-loop-fail")
+    await _record_sent(session, product_id=product_id, count=20)
+    # 0 signals -- clearly below any positive threshold.
+
+    ctx = _ctx(
+        provider=FakeProvider(name=Provider.GEMINI),
+        workspace_root=tmp_path,
+        validation_min_sample_size=10,
+        validation_min_response_rate=0.05,
+    )
+    await dev_graph.run(ctx, session, _eval_task(product_id))
+
+    # The pre-existing product-scoped memory still exists (untouched behaviour).
+    product_scoped = await memory_store.recall(
+        session, query="validation gate", scopes=[f"product:{product_id}"]
+    )
+    assert any("did not clear the validation gate" in m.content for m in product_scoped)
+
+    # The new one: filed at engine:discovery, recallable through Discovery's own
+    # reader scope, naming the niche -- not the product id, which recall's
+    # lexical matching can't use.
+    discovery_scoped = await memory_store.recall(
+        session,
+        query="memory-loop-fail interest signals",
+        scopes=memory_store.scopes_for(engine=_EngineName.DISCOVERY),
+    )
+    assert any("memory-loop-fail" in m.content for m in discovery_scoped)
+    assert any(m.kind == "failure" for m in discovery_scoped)
+
+
+async def test_a_passed_validation_also_writes_a_discovery_lesson(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """Before this, only losses were ever remembered -- a pass produced nothing
+    at all, so the factory could never recall what actually worked."""
+    from factory.memory import store as memory_store
+    from factory.settings import EngineName as _EngineName
+
+    _idea_id, product_id = await _make_validating_product(session, niche="memory-loop-pass")
+    await _record_sent(session, product_id=product_id, count=20)
+    for i in range(5):
+        await repository.insert_validation_signal(
+            session,
+            product_id=product_id,
+            email=f"interested{i}@example.test",
+            require_confirmation=False,
+        )
+
+    ctx = _ctx(
+        provider=FakeProvider(name=Provider.GEMINI),
+        workspace_root=tmp_path,
+        validation_min_sample_size=10,
+        validation_min_response_rate=0.05,
+    )
+    result = await dev_graph.run(ctx, session, _eval_task(product_id))
+    assert "passed" in result
+
+    discovery_scoped = await memory_store.recall(
+        session,
+        query="memory-loop-pass interest signals",
+        scopes=memory_store.scopes_for(engine=_EngineName.DISCOVERY),
+    )
+    assert any("memory-loop-pass" in m.content for m in discovery_scoped)
+    assert any("Cleared the gate" in m.content for m in discovery_scoped)
+    assert any(m.kind == "lesson" for m in discovery_scoped)
+
+
 # --- /interest endpoint ---------------------------------------------------------
 #
 # httpx.AsyncClient + ASGITransport, not fastapi.testclient.TestClient: TestClient

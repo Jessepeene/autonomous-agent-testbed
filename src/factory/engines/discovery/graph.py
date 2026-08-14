@@ -22,6 +22,7 @@ from factory.engines.discovery.sources.producthunt import ProductHuntSource
 from factory.engines.discovery.sources.reddit import RedditSource
 from factory.learning import prompts as learning_prompts
 from factory.logging import get_logger
+from factory.memory import store as memory_store
 from factory.settings import EngineName, Settings
 from factory.state import repository
 from factory.state.orm import Task
@@ -111,11 +112,34 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
         session, key=_WEIGHTS_KEY, default=ScoredIdea.default_weights()
     )
 
+    # Closing a loop this store's own module docstring names as the motivating
+    # example ("the last three products in this niche all failed compliance for
+    # the same reason, stop proposing them") but never actually closed until
+    # now: what this cycle's own clusters are about is the query, and past
+    # validation/compliance outcomes at engine:discovery scope are what comes
+    # back. Injected into the *prompt*, not `system` -- see generate_ideas'
+    # own comment for why appending to `system` would corrupt trial
+    # attribution for a tunable prompt.
+    cluster_query = " ".join(cluster.summary()[:200] for cluster in clusters[:12])
+    memory_block = await memory_store.recall_block(
+        session, query=cluster_query, scopes=memory_store.scopes_for(engine=EngineName.DISCOVERY)
+    )
+
     batch = await score.generate_ideas(
-        ctx, clusters, system=gen_text, tunable_parameter_id=gen_version, task_id=task.id
+        ctx,
+        clusters,
+        system=gen_text,
+        tunable_parameter_id=gen_version,
+        task_id=task.id,
+        memory_block=memory_block,
     )
     scored = await score.discriminate(
-        ctx, batch, system=disc_text, tunable_parameter_id=disc_version, task_id=task.id
+        ctx,
+        batch,
+        system=disc_text,
+        tunable_parameter_id=disc_version,
+        task_id=task.id,
+        memory_block=memory_block,
     )
     kept = score.survivors(scored, weights)
 
@@ -135,6 +159,29 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
                 detail=detail,
                 task_id=task.id,
             )
+
+    # One aggregate memory per cycle, not one per rejected idea: remember()
+    # reinforces near-duplicates within a scope, so a genuinely recurring
+    # pattern (the same handful of niches, the same rejection reasons)
+    # strengthens across cycles instead of flooding engine:discovery with
+    # near-identical rows -- MAX_MEMORIES_PER_SCOPE stays comfortable.
+    rejected = [idea for idea in scored.ideas if id(idea) not in kept_ids]
+    if rejected:
+        niches = "; ".join(idea.target_niche for idea in rejected[:5])
+        reasons = "; ".join(idea.rejection_reason for idea in rejected[:3] if idea.rejection_reason)
+        content = (
+            f"This cycle rejected {len(rejected)}/{len(scored.ideas)} scored ideas "
+            f"(kept {len(kept)}). Niches: {niches}."
+        )
+        if reasons:
+            content += f" Reasons given: {reasons}"
+        await memory_store.remember(
+            session,
+            content=content,
+            kind=memory_store.MemoryKind.LESSON,
+            scope=memory_store.scope_for(engine=EngineName.DISCOVERY),
+            origin="discovery:run",
+        )
 
     stored = 0
     for idea in kept:

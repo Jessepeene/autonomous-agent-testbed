@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from factory.engines.compliance import assessor
 from factory.hitl import interrupts
 from factory.logging import get_logger
+from factory.memory import store as memory_store
 from factory.settings import EngineName
 from factory.state import repository
 from factory.state.orm import Idea, Task
@@ -71,7 +72,7 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
         created_at=row.created_at,
     )
 
-    assessment = await assessor.assess_idea(ctx, idea, task_id=task.id)
+    assessment = await assessor.assess_idea(ctx, idea, session=session, task_id=task.id)
     log.info(
         "compliance.idea_verdict",
         idea_id=idea_id,
@@ -85,9 +86,13 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
 
     if assessment.status is ComplianceStatus.REJECTED:
         await repository.set_idea_status(session, idea_id, "rejected")
+        await _remember_for_discovery(session, idea, assessment.justification, verdict="rejected")
         return f"compliance: idea {idea_id} rejected — {assessment.justification[:200]}"
 
     await repository.set_idea_status(session, idea_id, "flagged")
+    await _remember_for_discovery(
+        session, idea, assessment.justification, verdict="flagged for human review"
+    )
     await interrupts.request(
         session,
         reason=InterruptReason.LEGAL_UNCERTAINTY,
@@ -102,6 +107,27 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
         task_id=task.id,
     )
     return f"compliance: idea {idea_id} flagged for human review"
+
+
+async def _remember_for_discovery(
+    session: AsyncSession, idea: ValidatedIdea, justification: str, *, verdict: str
+) -> None:
+    """Filed at *Discovery's* scope, not Compliance's -- Discovery is the reader
+    that needs it (see memory/store.py's own module docstring: "the last three
+    products in this niche all failed compliance for the same reason, stop
+    proposing them" -- a loop this closes for the first time). Compliance
+    itself never reads memory back; see assessor.py's structured-facts
+    alternative for why."""
+    await memory_store.remember(
+        session,
+        content=(
+            f"Compliance {verdict} an idea in the niche '{idea.target_niche}': "
+            f"{justification[:300]}"
+        ),
+        kind=memory_store.MemoryKind.FAILURE,
+        scope=memory_store.scope_for(engine=EngineName.DISCOVERY),
+        origin="compliance:run",
+    )
 
 
 async def _create_validation(session: AsyncSession, ctx: FactoryContext, idea_row: Idea) -> str:

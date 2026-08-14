@@ -94,6 +94,7 @@ async def generate_ideas(
     system: str = GENERATOR_SYSTEM,
     tunable_parameter_id: str | None = None,
     task_id: str | None = None,
+    memory_block: str = "",
 ) -> IdeaBatch:
     if not clusters:
         return IdeaBatch(ideas=[])
@@ -103,11 +104,18 @@ async def generate_ideas(
         f"(signals={cluster.size}, engagement={cluster.engagement})\n{cluster.summary()}"
         for index, cluster in enumerate(clusters[:12])
     )
+    # memory_block goes in the *prompt*, never `system`: `system` is the tunable
+    # value this call is served under (see learning/prompts.py::get_prompt), and
+    # appending prior-run context to it would mutate a versioned prompt outside
+    # `learning/store`'s own promotion path, corrupting trial attribution for
+    # GENERATOR_SYSTEM. Prefixed, not appended, so it reads as context before
+    # the actual task rather than an afterthought.
+    prefix = f"{memory_block}\n\n" if memory_block else ""
     return await ctx.llm.parse(
         IdeaBatch,
         task_type=TaskType.DISCOVERY,
         system=system,
-        prompt=f"Signal clusters:\n\n{rendered}\n\nEmit ideas.",
+        prompt=f"{prefix}Signal clusters:\n\n{rendered}\n\nEmit ideas.",
         engine=EngineName.DISCOVERY,
         task_id=task_id,
         tunable_parameter_id=tunable_parameter_id,
@@ -121,6 +129,7 @@ async def discriminate(
     system: str = DISCRIMINATOR_SYSTEM,
     tunable_parameter_id: str | None = None,
     task_id: str | None = None,
+    memory_block: str = "",
 ) -> DiscriminatedIdeas:
     if not batch.ideas:
         return DiscriminatedIdeas(ideas=[])
@@ -132,11 +141,13 @@ async def discriminate(
         f"source_url: {idea.source_url}"
         for index, idea in enumerate(batch.ideas)
     )
+    # Same reasoning as generate_ideas above -- memory in the prompt, never system.
+    prefix = f"{memory_block}\n\n" if memory_block else ""
     return await ctx.llm.parse(
         DiscriminatedIdeas,
         task_type=TaskType.ANALYSIS,
         system=system,
-        prompt=f"Candidate ideas:\n\n{rendered}\n\nScore each one.",
+        prompt=f"{prefix}Candidate ideas:\n\n{rendered}\n\nScore each one.",
         engine=EngineName.DISCOVERY,
         task_id=task_id,
         tunable_parameter_id=tunable_parameter_id,

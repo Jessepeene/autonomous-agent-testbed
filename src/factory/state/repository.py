@@ -502,6 +502,47 @@ async def set_idea_status(session: AsyncSession, idea_id: str, status: str) -> N
     await session.execute(update(Idea).where(Idea.id == idea_id).values(status=status))
 
 
+async def prior_verdicts_for_niche(
+    session: AsyncSession, niche: str, *, limit: int = 5
+) -> list[tuple[str, str]]:
+    """``(target_niche, status)`` pairs for past ideas lexically similar to
+    ``niche`` -- structured facts for the compliance assessor, deliberately
+    NOT a memory recall. Injecting model-authored memory text into
+    `IDEA_SYSTEM_PROMPT` would be a de-facto mutation channel into a
+    safety-critical gate, exactly what `learning/allowlist.py` permanently
+    excludes compliance prompts to prevent; a fact read from this table
+    cannot be poisoned by a prior model's prose the way a memory could.
+
+    An exact niche match is nearly impossible in practice --
+    `upsert_idea`'s fingerprint dedup already prevents a literal repeat from
+    ever becoming a second row -- so this scores every non-pending idea's
+    niche against the query with the same token-overlap function
+    `memory/store.py` and `discovery/cluster.py` already use, rather than
+    inventing a second similarity metric.
+    """
+    from factory.engines.discovery.cluster import jaccard, tokenize
+
+    query_tokens = tokenize(niche)
+    stmt = (
+        select(Idea.target_niche, Idea.status)
+        .where(Idea.status != "pending")
+        .order_by(Idea.created_at.desc())
+        .limit(500)
+    )
+    rows = (await session.execute(stmt)).all()
+    scored = sorted(
+        (
+            (jaccard(query_tokens, tokenize(row.target_niche)), row.target_niche, row.status)
+            for row in rows
+        ),
+        key=lambda entry: entry[0],
+        reverse=True,
+    )
+    return [(niche_text, status) for relevance, niche_text, status in scored if relevance >= 0.2][
+        :limit
+    ]
+
+
 async def pending_ideas(session: AsyncSession, limit: int = 20) -> list[Idea]:
     stmt = (
         select(Idea)

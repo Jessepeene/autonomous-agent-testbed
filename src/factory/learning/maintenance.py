@@ -30,6 +30,7 @@ from factory.learning import store
 from factory.learning.allowlist import MUTABLE_KEYS, default_metric_for
 from factory.llm.providers.base import LLMError
 from factory.logging import get_logger
+from factory.memory import store as memory_store
 from factory.settings import EngineName, TaskType
 from factory.state.orm import Task
 from factory.state.schemas import Contract
@@ -95,9 +96,27 @@ actually make.\
 """
 
 
+def _engine_for_key(key: str) -> EngineName | None:
+    """Best-effort engine name from a ``module.path:ATTRIBUTE`` allowlist key
+    (e.g. ``factory.engines.discovery.score:GENERATOR_SYSTEM`` → ``discovery``),
+    for scoping the recall below. ``None`` for a key this can't parse -- the
+    recall then just falls back to global-scope memories only, never an error."""
+    module_path = key.split(":", 1)[0]
+    parts = module_path.split(".")
+    if len(parts) >= 3 and parts[0] == "factory" and parts[1] == "engines":
+        try:
+            return EngineName(parts[2])
+        except ValueError:
+            return None
+    return None
+
+
 async def _episode_summary(session: AsyncSession, key: str) -> str:
     """Aggregate counts plus a handful of concrete recent failures — bounded and
-    cheap, not the raw episode table."""
+    cheap, not the raw episode table. Also carries whatever accumulated memory
+    this key's own engine has, so the proposing agent sees more than a bare
+    success rate -- a pure autonomy increase, no new gate: the analyst still
+    only ever produces prose, and `insert_candidate` still never promotes it."""
     from factory.learning.store import get_active
 
     active = await get_active(session, key)
@@ -106,12 +125,21 @@ async def _episode_summary(session: AsyncSession, key: str) -> str:
 
     successes, total = await store.episode_counts(session, active.id, limit=200)
     rate = round(successes / total, 3) if total else 0.0
+    # The key itself (a bare module path) has almost no lexical overlap with the
+    # natural-language content memories are written in -- the active value's own
+    # text does, since it's the same vocabulary a real prompt or a set of
+    # weight names would share with a lesson about how well it performed.
+    value_text = active.value.get("text", "") if isinstance(active.value, dict) else ""
+    query = f"{active.target_metric} {value_text}"[:1000]
+    memory_block = await memory_store.recall_block(
+        session, query=query, scopes=memory_store.scopes_for(engine=_engine_for_key(key))
+    )
     return (
         f"Key: {key}\n"
         f"Current version {active.version} (active since {active.promoted_at}).\n"
         f"Current text/value: {active.value}\n"
         f"Recent outcomes (last 200): {successes}/{total} succeeded ({rate:.1%}).\n"
-        f"Target metric: {active.target_metric}."
+        f"Target metric: {active.target_metric}." + (f"\n\n{memory_block}" if memory_block else "")
     )
 
 

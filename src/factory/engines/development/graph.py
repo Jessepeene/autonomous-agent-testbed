@@ -351,6 +351,27 @@ async def _evaluate_validation(ctx: FactoryContext, session: AsyncSession, task:
             task_id=task.id,
         )
 
+    # Written once, regardless of outcome, at Discovery's own scope -- not
+    # product_id's. The product-scoped memory below (failure only) is filed
+    # under `product:{id}`, a scope nothing ever reads again once this product
+    # is retired a few lines later; Discovery reads `engine:discovery`, so a
+    # lesson filed anywhere else is write-only. This is also the only place a
+    # *pass* gets remembered at all -- before this, the factory only ever
+    # learned from validation losses, never from what actually worked.
+    idea = await session.get(Idea, product.idea_id)
+    if idea is not None:
+        await memory_store.remember(
+            session,
+            content=(
+                f"Validation outcome for the niche '{idea.target_niche}': "
+                f"{signals}/{sent} confirmed interest signals ({response_rate:.1%}). "
+                f"{'Cleared' if passed else 'Did not clear'} the gate."
+            ),
+            kind=memory_store.MemoryKind.LESSON if passed else memory_store.MemoryKind.FAILURE,
+            scope=memory_store.scope_for(engine=EngineName.DISCOVERY),
+            origin="development:evaluate_validation",
+        )
+
     if passed:
         await repository.set_product_status(session, product_id, ProductStatus.PLANNED)
         await repository.enqueue_task(
