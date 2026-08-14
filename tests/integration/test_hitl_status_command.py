@@ -174,7 +174,7 @@ async def test_reports_a_products_name_stage_and_numbers(session: AsyncSession) 
     await repository.record_page_view(session, product_id=product_id, path="/")
     await repository.record_page_view(session, product_id=product_id, path="/")
     await repository.insert_validation_signal(
-        session, product_id=product_id, email="a@example.test"
+        session, product_id=product_id, email="a@example.test", require_confirmation=False
     )
     await session.flush()
 

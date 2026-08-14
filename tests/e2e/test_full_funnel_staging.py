@@ -313,7 +313,10 @@ async def test_one_idea_through_the_full_funnel_under_staging(
     await _record_sent_outreach(session, product_id=product_id, count=20)
     for i in range(5):  # 5/20 = 25%, comfortably clears the default 5% bar
         await repository.insert_validation_signal(
-            session, product_id=product_id, email=f"interested{i}@example.test"
+            session,
+            product_id=product_id,
+            email=f"interested{i}@example.test",
+            require_confirmation=False,
         )
     eval_validation = _task(TaskKind.EVALUATE_VALIDATION, product_id=product_id)
     result = await dev_graph.run(ctx, session, eval_validation)
@@ -386,13 +389,21 @@ async def test_one_idea_through_the_full_funnel_under_staging(
         await repository.record_page_view(session, product_id=product_id, path="/", variant="a")
     for i in range(8):
         await repository.insert_validation_signal(
-            session, product_id=product_id, email=f"ab-a-{i}@example.test", variant="a"
+            session,
+            product_id=product_id,
+            email=f"ab-a-{i}@example.test",
+            variant="a",
+            require_confirmation=False,
         )
     for _ in range(200):
         await repository.record_page_view(session, product_id=product_id, path="/", variant="b")
     for i in range(80):
         await repository.insert_validation_signal(
-            session, product_id=product_id, email=f"ab-b-{i}@example.test", variant="b"
+            session,
+            product_id=product_id,
+            email=f"ab-b-{i}@example.test",
+            variant="b",
+            require_confirmation=False,
         )
     eval_ab = Task(
         id=new_id(),

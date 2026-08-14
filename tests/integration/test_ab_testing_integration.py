@@ -218,10 +218,18 @@ async def test_tally_splits_views_and_signals_by_variant(session: AsyncSession) 
     await repository.record_page_view(session, product_id=product_id, path="/", variant="a")
     await repository.record_page_view(session, product_id=product_id, path="/", variant="b")
     await repository.insert_validation_signal(
-        session, product_id=product_id, email="a1@example.test", variant="a"
+        session,
+        product_id=product_id,
+        email="a1@example.test",
+        variant="a",
+        require_confirmation=False,
     )
     await repository.insert_validation_signal(
-        session, product_id=product_id, email="b1@example.test", variant="b"
+        session,
+        product_id=product_id,
+        email="b1@example.test",
+        variant="b",
+        require_confirmation=False,
     )
 
     outcomes = await repository.tally_ab_test_outcomes(session, product_id, since=since)
@@ -325,13 +333,21 @@ async def _seed_outcomes(
         await repository.record_page_view(session, product_id=product_id, path="/", variant="a")
     for i in range(a_signals):
         await repository.insert_validation_signal(
-            session, product_id=product_id, email=f"a{i}@example.test", variant="a"
+            session,
+            product_id=product_id,
+            email=f"a{i}@example.test",
+            variant="a",
+            require_confirmation=False,
         )
     for _ in range(b_views):
         await repository.record_page_view(session, product_id=product_id, path="/", variant="b")
     for i in range(b_signals):
         await repository.insert_validation_signal(
-            session, product_id=product_id, email=f"b{i}@example.test", variant="b"
+            session,
+            product_id=product_id,
+            email=f"b{i}@example.test",
+            variant="b",
+            require_confirmation=False,
         )
 
 

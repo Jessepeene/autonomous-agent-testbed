@@ -337,10 +337,18 @@ async def test_insert_validation_signal_dedups_by_product_and_email(session: Asy
     product_id = await repository.create_product(session, name="Dedup", idea_id=idea_id)
 
     first = await repository.insert_validation_signal(
-        session, product_id=product_id, email="Person@Example.test", message="interested"
+        session,
+        product_id=product_id,
+        email="Person@Example.test",
+        message="interested",
+        require_confirmation=False,
     )
     second = await repository.insert_validation_signal(
-        session, product_id=product_id, email="person@example.test", message="again"
+        session,
+        product_id=product_id,
+        email="person@example.test",
+        message="again",
+        require_confirmation=False,
     )
 
     assert first is not None
@@ -432,7 +440,10 @@ async def test_validation_pass_queues_build_mvp_and_sets_planned(
     await _record_sent(session, product_id=product_id, count=20)
     for i in range(5):  # 5/20 = 25%, comfortably above the default 5% bar
         await repository.insert_validation_signal(
-            session, product_id=product_id, email=f"interested{i}@example.test"
+            session,
+            product_id=product_id,
+            email=f"interested{i}@example.test",
+            require_confirmation=False,
         )
 
     ctx = _ctx(
@@ -534,7 +545,10 @@ async def test_evaluation_records_a_learning_episode_without_touching_other_keys
     )
     await _record_sent(session, product_id=product_id, count=20)
     await repository.insert_validation_signal(
-        session, product_id=product_id, email="interested@example.test"
+        session,
+        product_id=product_id,
+        email="interested@example.test",
+        require_confirmation=False,
     )
 
     ctx = _ctx(
