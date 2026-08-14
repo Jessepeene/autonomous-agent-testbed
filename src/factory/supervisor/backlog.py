@@ -155,6 +155,21 @@ CATALOGUE: tuple[MaintenanceItem, ...] = (
         engine=EngineName.SUPERVISOR,
         cadence_hours=24,
     ),
+    # --- signal-verification hygiene ----------------------------------------------
+    # An unconfirmed validation signal is an unverified claim about a real
+    # person's email, not evidence -- data minimisation, same instinct as
+    # prune-memory above. Deterministic, no LLM call -- handled by a dedicated
+    # branch in `engines/maintenance.py::run()`.
+    MaintenanceItem(
+        slug="expire-unconfirmed-signals",
+        objective=(
+            "Delete validation signals that were never confirmed and have aged past "
+            "the confirmation window, and drop rate-limit windows old enough to no "
+            "longer affect any live decision."
+        ),
+        engine=EngineName.SUPERVISOR,
+        cadence_hours=6,
+    ),
 )
 
 

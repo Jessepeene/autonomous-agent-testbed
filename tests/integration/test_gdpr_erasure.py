@@ -257,6 +257,55 @@ async def test_unsubscribe_endpoint_completes_erasure_end_to_end(
     await verify_engine.dispose()
 
 
+async def test_unsubscribe_endpoint_also_resolves_a_validation_signal_confirmation_token(
+    session: AsyncSession, blacklist_file: Path
+) -> None:
+    """A landing-page visitor who only ever submitted `/interest` (never received
+    outreach) had no self-serve erasure route at all before this: `GET /u/{token}`
+    resolved only `OutreachLog.unsubscribe_token`. Regression coverage for the
+    extension that also tries `ValidationSignal.confirmation_token`."""
+    idea = ScoredIdea(
+        problem_statement="Bookkeepers reconcile invoices by hand every week.",
+        target_niche="unsubscribe-via-validation-signal",
+        source_url="https://example.test/thread",
+        monetization_hypothesis="Bookkeepers pay EUR 49/month per seat.",
+        pain_severity=0.8,
+        willingness_to_pay=0.7,
+        build_feasibility=0.6,
+        adoption_ease=0.8,
+    )
+    idea_id = await repository.upsert_idea(session, idea)
+    assert idea_id is not None
+    product_id = await repository.create_product(
+        session, name="unsubscribe-via-validation-signal", idea_id=idea_id
+    )
+    await repository.insert_validation_signal(
+        session,
+        product_id=product_id,
+        email="never-received-outreach@example.test",
+        require_confirmation=True,
+        confirmation_token="test-confirmation-token-for-erasure",
+    )
+    await session.commit()
+
+    async with await _client(blacklist_path=blacklist_file) as client:
+        response = await client.get("/u/test-confirmation-token-for-erasure")
+    assert response.status_code == 200, response.text
+
+    verify_engine = create_async_engine(DATABASE_URL or "", future=True)
+    verify_maker = async_sessionmaker(verify_engine, expire_on_commit=False)
+    async with verify_maker() as verify_session:
+        from factory.state.orm import ValidationSignal
+
+        remaining = (
+            await verify_session.execute(
+                select(ValidationSignal).where(ValidationSignal.product_id == product_id)
+            )
+        ).scalar_one_or_none()
+        assert remaining is None
+    await verify_engine.dispose()
+
+
 # --- PII retention tied to product lifecycle (retire_product / purge_product_pii) --
 
 

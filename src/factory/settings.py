@@ -148,6 +148,26 @@ class Settings(BaseSettings):
     # -- same reasoning as deliverability_min_sample_size just above.
     validation_min_sample_size: int = Field(default=10, ge=1)
     validation_min_response_rate: float = Field(default=0.05, ge=0.0, le=1.0)
+    # A validation signal only counts once the submitter clicks the emailed
+    # confirmation link -- see api/app.py's /interest and /confirm/{token}.
+    # Proven exploitable live: six unconfirmed emails alone cleared
+    # validation_min_response_rate and carried a product to a real build. Off only
+    # under factory_dry_run, where there is no real inbox to click a link from --
+    # see insert_validation_signal's require_confirmation wiring.
+    validation_require_double_opt_in: bool = True
+    validation_confirmation_ttl_hours: int = Field(default=72, ge=1)
+    # If one submitter IP accounts for more than this share of a product's
+    # confirmed signals (checked once at least 5 have confirmed), the gate refuses
+    # to pass rather than treat concentrated submissions as broad real interest.
+    validation_max_ip_concentration: float = Field(default=0.5, ge=0.0, le=1.0)
+    # HMAC key for hashing a submitter's IP before it's stored (api/abuse.py). Unset
+    # means no IP is ever persisted, not that a reversible hash is -- plain sha256
+    # of an IPv4 address is reversible in seconds (2^32 preimages), so this must be
+    # a real secret, not a convenience toggle.
+    abuse_ip_hash_secret: SecretStr | None = None
+    interest_rate_limit_per_ip_hour: int = Field(default=5, ge=1)
+    interest_rate_limit_per_product_hour: int = Field(default=60, ge=1)
+    analytics_rate_limit_per_ip_hour: int = Field(default=300, ge=1)
     # Separate from marketing/graph.py's steady-state per-tick _OUTREACH_BATCH (15):
     # a validation run needs a batch sized for one real decision, not the ongoing
     # per-tick cap a live product's outreach uses.

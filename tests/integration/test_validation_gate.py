@@ -10,7 +10,7 @@ was deliberately kept separate from.
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -31,10 +31,11 @@ from factory.llm.router import ProviderRegistry
 from factory.sandbox.disabled import DisabledSandbox
 from factory.settings import EngineName, Settings
 from factory.state import repository
-from factory.state.orm import Base, Lead, OutreachLog, Product, Task, new_id
+from factory.state.orm import Base, Interrupt, Lead, OutreachLog, Product, Task, new_id
 from factory.state.schemas import (
     ComplianceAssessment,
     ComplianceStatus,
+    InterruptReason,
     ProductStatus,
     ScoredIdea,
     TaskKind,
@@ -74,6 +75,21 @@ async def _reset_global_engine() -> AsyncIterator[None]:
     from factory.state import db as db_module
 
     await db_module.dispose_engine()
+
+
+@pytest.fixture(autouse=True)
+def _reset_settings_cache() -> Iterator[None]:
+    """`get_settings()` is `lru_cache`d, so the *first* test in this file to hit
+    an HTTP endpoint bakes in whatever `Settings()` that call built -- later
+    `monkeypatch.setenv` calls (FACTORY_DRY_RUN, ABUSE_IP_HASH_SECRET, the rate
+    limits) would silently have no effect on what the endpoint actually reads.
+    Cleared before and after every test so each one starts from a genuinely
+    fresh read of its own env."""
+    from factory.settings import get_settings
+
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 def _ctx(*, provider: FakeProvider, workspace_root: Path, **overrides: object) -> FactoryContext:
@@ -597,3 +613,352 @@ async def test_interest_endpoint_rejects_malformed_email(
         response = await client.post("/interest/some-product-id", json={"email": "not-an-email"})
 
     assert response.status_code == 422
+
+
+# --- signal verification: double opt-in --------------------------------------
+#
+# Regression coverage for a real exploit found live during a risk audit: six
+# unconfirmed email addresses submitted directly to /interest cleared
+# validation_min_response_rate and carried a product all the way through
+# EVALUATE_VALIDATION into a real build. A signal now only counts once its
+# confirmation link is clicked.
+
+
+def _settings_env(monkeypatch: pytest.MonkeyPatch, **overrides: str) -> None:
+    monkeypatch.setenv("DATABASE_URL", DATABASE_URL or "")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    for key, value in overrides.items():
+        monkeypatch.setenv(key, value)
+
+
+async def test_an_unconfirmed_signal_does_not_count_toward_the_gate(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settings_env(monkeypatch, FACTORY_DRY_RUN="0")
+    _, product_id = await _make_validating_product(session, niche="unconfirmed-signal")
+    await session.commit()
+
+    async with await _interest_client() as client:
+        response = await client.post(
+            f"/interest/{product_id}", json={"email": "unconfirmed@example.test"}
+        )
+
+    assert response.status_code == 200
+    # The row exists (dedup must still see it on a repeat submission) but is not
+    # confirmed, so the gate's own tally -- confirmed_only=True by default --
+    # must not count it.
+    assert await repository.tally_validation_signals(session, product_id, confirmed_only=False) == 1
+    assert await repository.tally_validation_signals(session, product_id) == 0
+
+
+async def test_confirming_the_link_makes_the_signal_count(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settings_env(monkeypatch, FACTORY_DRY_RUN="0", UNSUBSCRIBE_BASE_URL="https://example.test")
+    _, product_id = await _make_validating_product(session, niche="confirm-flow")
+    await session.commit()
+
+    async with await _interest_client() as client:
+        await client.post(f"/interest/{product_id}", json={"email": "confirmable@example.test"})
+
+    from sqlalchemy import select
+
+    from factory.state.orm import ValidationSignal
+
+    token = (
+        await session.execute(
+            select(ValidationSignal.confirmation_token).where(
+                ValidationSignal.product_id == product_id
+            )
+        )
+    ).scalar_one()
+    assert token is not None
+
+    async with await _interest_client() as client:
+        confirm_response = await client.get(f"/confirm/{token}")
+
+    assert confirm_response.status_code == 200
+    assert await repository.tally_validation_signals(session, product_id) == 1
+
+
+async def test_confirming_twice_is_a_harmless_no_op(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _settings_env(monkeypatch, FACTORY_DRY_RUN="0", UNSUBSCRIBE_BASE_URL="https://example.test")
+    _, product_id = await _make_validating_product(session, niche="confirm-twice")
+    await session.commit()
+
+    async with await _interest_client() as client:
+        await client.post(f"/interest/{product_id}", json={"email": "twice@example.test"})
+
+    from sqlalchemy import select
+
+    from factory.state.orm import ValidationSignal
+
+    token = (
+        await session.execute(
+            select(ValidationSignal.confirmation_token).where(
+                ValidationSignal.product_id == product_id
+            )
+        )
+    ).scalar_one()
+
+    async with await _interest_client() as client:
+        first = await client.get(f"/confirm/{token}")
+        second = await client.get(f"/confirm/{token}")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert await repository.tally_validation_signals(session, product_id) == 1
+
+
+async def test_an_unknown_confirmation_token_404s(monkeypatch: pytest.MonkeyPatch) -> None:
+    _settings_env(monkeypatch, FACTORY_DRY_RUN="0")
+
+    async with await _interest_client() as client:
+        response = await client.get("/confirm/not-a-real-token")
+
+    assert response.status_code == 404
+
+
+async def test_dry_run_auto_confirms_at_insert_time(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The explicit, documented version of what every other test in this file
+    relies on implicitly (FACTORY_DRY_RUN defaults to True when unset): dry-run
+    must never require a confirmation click that has no real inbox to come
+    from, and the tally must still be a single, honest `confirmed_at IS NOT
+    NULL` query -- no separate dry-run branch on the read side."""
+    _settings_env(monkeypatch, FACTORY_DRY_RUN="1")
+    _, product_id = await _make_validating_product(session, niche="dry-run-auto-confirm")
+    await session.commit()
+
+    async with await _interest_client() as client:
+        response = await client.post(
+            f"/interest/{product_id}", json={"email": "dryrun@example.test"}
+        )
+
+    assert response.status_code == 200
+    assert await repository.tally_validation_signals(session, product_id) == 1
+
+    from sqlalchemy import select
+
+    from factory.state.orm import ValidationSignal
+
+    method = (
+        await session.execute(
+            select(ValidationSignal.confirmation_method).where(
+                ValidationSignal.product_id == product_id
+            )
+        )
+    ).scalar_one()
+    assert method == "dry_run_auto"
+
+
+async def test_a_blacklisted_address_still_gets_recorded_without_crashing(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch, blacklist_file: Path
+) -> None:
+    """The endpoint always calls the real `send_email`, which owns its own
+    fail-closed blacklist gate (see `test_email_blacklist.py`) -- this only
+    proves the wiring doesn't special-case or crash on a suppressed address,
+    not that the gate itself works."""
+    blacklist_file.write_text("blocked@example.test\n")  # noqa: ASYNC240 - instant local write
+    _settings_env(
+        monkeypatch,
+        FACTORY_DRY_RUN="0",
+        UNSUBSCRIBE_BASE_URL="https://example.test",
+        BLACKLIST_PATH=str(blacklist_file),
+    )
+    _, product_id = await _make_validating_product(session, niche="blacklisted-submitter")
+    await session.commit()
+
+    async with await _interest_client() as client:
+        response = await client.post(
+            f"/interest/{product_id}", json={"email": "blocked@example.test"}
+        )
+
+    assert response.status_code == 200
+    assert await repository.tally_validation_signals(session, product_id, confirmed_only=False) == 1
+
+
+# --- signal verification: IP concentration ------------------------------------
+
+
+async def test_concentrated_signals_from_one_ip_refuse_to_pass_and_retire(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """The check that actually kills the exploit this whole phase exists for: a
+    response rate that clears the normal bar is refused anyway once one
+    submitter IP accounts for more than validation_max_ip_concentration of
+    confirmed signals."""
+    _, product_id = await _make_validating_product(session, niche="concentrated-signals")
+    await _record_sent(session, product_id=product_id, count=10)
+    # 6 confirmed signals, all from the same hashed IP -- 6/6 = 100% concentration.
+    for i in range(6):
+        await repository.insert_validation_signal(
+            session,
+            product_id=product_id,
+            email=f"concentrated{i}@example.test",
+            require_confirmation=False,
+            submitter_ip_hash="same-ip-hash",
+        )
+
+    ctx = _ctx(
+        provider=FakeProvider(name=Provider.GEMINI),
+        workspace_root=tmp_path,
+        validation_min_sample_size=10,
+        validation_min_response_rate=0.05,
+        validation_max_ip_concentration=0.5,
+    )
+    result = await dev_graph.run(ctx, session, _eval_task(product_id))
+
+    assert "failed" in result
+    product = await session.get(Product, product_id)
+    assert product is not None
+    assert product.status == ProductStatus.RETIRED.value
+
+    interrupts = (
+        (
+            await session.execute(
+                select(Interrupt).where(Interrupt.reason == InterruptReason.DATA_INTEGRITY.value)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(interrupts) == 1
+    assert interrupts[0].needs_reply is False
+
+
+async def test_signals_spread_across_different_ips_are_not_flagged(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """The guard must not become a blanket veto: five confirmed signals from
+    five different submitters is exactly the broad interest this gate exists
+    to let through."""
+    _, product_id = await _make_validating_product(session, niche="spread-signals")
+    await _record_sent(session, product_id=product_id, count=10)
+    for i in range(5):
+        await repository.insert_validation_signal(
+            session,
+            product_id=product_id,
+            email=f"spread{i}@example.test",
+            require_confirmation=False,
+            submitter_ip_hash=f"ip-hash-{i}",
+        )
+
+    ctx = _ctx(
+        provider=FakeProvider(name=Provider.GEMINI),
+        workspace_root=tmp_path,
+        validation_min_sample_size=10,
+        validation_min_response_rate=0.05,
+        validation_max_ip_concentration=0.5,
+    )
+    result = await dev_graph.run(ctx, session, _eval_task(product_id))
+
+    assert "passed" in result
+    product = await session.get(Product, product_id)
+    assert product is not None
+    assert product.status == ProductStatus.PLANNED.value
+
+    interrupts = (
+        (
+            await session.execute(
+                select(Interrupt).where(Interrupt.reason == InterruptReason.DATA_INTEGRITY.value)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert interrupts == []
+
+
+async def test_unhashed_signals_never_trigger_the_concentration_check(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """When ABUSE_IP_HASH_SECRET is unset, every signal has submitter_ip_hash=None
+    -- rows with no hash must never count toward concentration in either
+    direction, or the check would be either meaningless or a false positive
+    depending on how NULLs happened to group."""
+    _, product_id = await _make_validating_product(session, niche="unhashed-signals")
+    await _record_sent(session, product_id=product_id, count=10)
+    for i in range(6):
+        await repository.insert_validation_signal(
+            session,
+            product_id=product_id,
+            email=f"unhashed{i}@example.test",
+            require_confirmation=False,
+        )
+
+    ctx = _ctx(
+        provider=FakeProvider(name=Provider.GEMINI),
+        workspace_root=tmp_path,
+        validation_min_sample_size=10,
+        validation_min_response_rate=0.05,
+        validation_max_ip_concentration=0.5,
+    )
+    result = await dev_graph.run(ctx, session, _eval_task(product_id))
+
+    assert "passed" in result
+
+
+# --- abuse controls: rate limiting ---------------------------------------------
+
+
+async def test_interest_endpoint_rate_limits_per_ip(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pydantic import SecretStr
+
+    from factory.settings import get_settings
+
+    _settings_env(
+        monkeypatch,
+        FACTORY_DRY_RUN="1",
+        ABUSE_IP_HASH_SECRET="test-secret",
+        INTEREST_RATE_LIMIT_PER_IP_HOUR="2",
+    )
+    settings = get_settings()
+    assert settings.abuse_ip_hash_secret == SecretStr("test-secret")
+    assert settings.interest_rate_limit_per_ip_hour == 2
+
+    headers = {"x-forwarded-for": "198.51.100.42"}
+    async with await _interest_client() as client:
+        first = await client.post(
+            "/interest/does-not-exist", json={"email": "a@example.test"}, headers=headers
+        )
+        second = await client.post(
+            "/interest/does-not-exist", json={"email": "b@example.test"}, headers=headers
+        )
+        third = await client.post(
+            "/interest/does-not-exist", json={"email": "c@example.test"}, headers=headers
+        )
+
+    # The endpoint 404s on an unknown product either way -- the rate limit is a
+    # dependency that runs *before* the route body, so it must trip regardless
+    # of what the request would otherwise have done.
+    assert first.status_code == 404
+    assert second.status_code == 404
+    assert third.status_code == 429
+
+
+async def test_different_ips_are_independent_buckets(monkeypatch: pytest.MonkeyPatch) -> None:
+    _settings_env(
+        monkeypatch,
+        FACTORY_DRY_RUN="1",
+        ABUSE_IP_HASH_SECRET="test-secret",
+        INTEREST_RATE_LIMIT_PER_IP_HOUR="1",
+    )
+
+    async with await _interest_client() as client:
+        first = await client.post(
+            "/interest/does-not-exist",
+            json={"email": "a@example.test"},
+            headers={"x-forwarded-for": "198.51.100.1"},
+        )
+        second = await client.post(
+            "/interest/does-not-exist",
+            json={"email": "b@example.test"},
+            headers={"x-forwarded-for": "198.51.100.2"},
+        )
+
+    assert first.status_code == 404
+    assert second.status_code == 404

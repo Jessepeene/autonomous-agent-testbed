@@ -8,13 +8,15 @@ is an observation and ingest surface, not a control plane.
 from __future__ import annotations
 
 import hmac
+import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
+from factory.api import abuse
 from factory.engines.finance import graph as finance_graph
 from factory.engines.finance.webhooks import SignatureInvalid, process_event, verify
 from factory.engines.marketing import deliverability
@@ -151,10 +153,16 @@ async def mailgun_webhook(request: Request) -> dict[str, Any]:
 
 @app.get("/u/{token}")
 async def unsubscribe(token: str) -> Response:
-    """One-click unsubscribe.
+    """One-click unsubscribe and erasure.
 
     Resolves the token to the address it was issued for and tombstones that address
     into the blacklist, so the suppression outlives the database row.
+
+    Tries an outreach `unsubscribe_token` first, then a validation-signal
+    `confirmation_token` -- the two are unrelated tables, and a landing-page
+    visitor who only ever submitted `/interest` (never received outreach) had no
+    self-serve erasure route at all before this, only `POST /interest` and the
+    confirmation link, neither of which deletes anything.
     """
     from sqlalchemy import select
 
@@ -169,6 +177,8 @@ async def unsubscribe(token: str) -> Response:
         )
         email = (await session.execute(stmt)).scalar_one_or_none()
         if email is None:
+            email = await repository.validation_signal_email_for_token(session, token)
+        if email is None:
             raise HTTPException(status_code=404, detail="unknown unsubscribe token")
         await repository.erase_lead(session, str(email))
         # Same address may also have submitted interest on a validation landing
@@ -179,6 +189,34 @@ async def unsubscribe(token: str) -> Response:
         content=(
             "You have been unsubscribed and your details have been deleted. "
             "This address will not be contacted again."
+        ),
+        media_type="text/plain",
+    )
+
+
+@app.get(
+    "/confirm/{token}",
+    dependencies=[
+        Depends(abuse.rate_limit(scope="confirm", per_ip_setting="interest_rate_limit_per_ip_hour"))
+    ],
+)
+async def confirm_interest(token: str) -> Response:
+    """The double opt-in click. Until this fires, a validation signal is an
+    unverified claim, not evidence -- see `ValidationSignal.confirmed_at` and
+    `_evaluate_validation`'s `tally_validation_signals(confirmed_only=True)`.
+
+    Rate-limited per IP: this is as unauthenticated as `/interest` itself
+    (anyone who guesses or receives a token can hit it), just far less
+    valuable to spam since it can only ever confirm rows that already exist.
+    """
+    async with session_scope() as session:
+        email = await repository.confirm_validation_signal(session, token)
+    if email is None:
+        raise HTTPException(status_code=404, detail="unknown or expired confirmation link")
+    return Response(
+        content=(
+            "Thanks — your interest has been confirmed. If you'd rather not be "
+            f"contacted about this again, visit /u/{token} to have your details deleted."
         ),
         media_type="text/plain",
     )
@@ -198,8 +236,21 @@ class InterestSubmission(BaseModel):
     variant: str | None = Field(default=None, max_length=32)
 
 
-@app.post("/interest/{product_id}")
-async def interest(product_id: str, submission: InterestSubmission) -> dict[str, Any]:
+@app.post(
+    "/interest/{product_id}",
+    dependencies=[
+        Depends(
+            abuse.rate_limit(
+                scope="interest",
+                per_ip_setting="interest_rate_limit_per_ip_hour",
+                per_product_setting="interest_rate_limit_per_product_hour",
+            )
+        )
+    ],
+)
+async def interest(
+    product_id: str, submission: InterestSubmission, request: Request
+) -> dict[str, Any]:
     """Interest capture for a validation-stage landing page.
 
     The first unauthenticated public write endpoint in this factory -- every other
@@ -210,21 +261,61 @@ async def interest(product_id: str, submission: InterestSubmission) -> dict[str,
     (accidental or hostile) can never inflate the count. Always returns success —
     whether the row was new or a duplicate is not information this endpoint should
     leak back to the caller.
+
+    A row only *counts* toward that gate once its confirmation link is clicked
+    (`GET /confirm/{token}`) -- proven necessary live, when six unconfirmed
+    submissions alone cleared the response-rate bar and carried a product to a
+    real build. Skipped only under `factory_dry_run`, where there is no real
+    inbox to click a link from; the row is still recorded, just auto-confirmed
+    at insert time (see `insert_validation_signal`), so the rest of the
+    pipeline never needs a dry-run-aware branch.
     """
-    async with session_scope() as session:
+    settings = get_settings()
+    require_confirmation = (
+        settings.validation_require_double_opt_in and not settings.factory_dry_run
+    )
+    confirmation_token = secrets.token_urlsafe(32) if require_confirmation else None
+    ip_hash = abuse.hash_ip(request, settings)
+
+    async with session_scope(settings) as session:
         product = await repository.get_product(session, product_id)
         if product is None:
             # validation_signals.product_id is a real FK -- a nonexistent id would
             # otherwise 500 on the INSERT rather than giving the caller (or a
             # probing scanner) a clean, unsurprising response.
             raise HTTPException(status_code=404, detail="unknown product")
-        await repository.insert_validation_signal(
+        signal_id = await repository.insert_validation_signal(
             session,
             product_id=product_id,
             email=submission.email,
             message=submission.message,
             variant=submission.variant,
+            require_confirmation=require_confirmation,
+            confirmation_token=confirmation_token,
+            submitter_ip_hash=ip_hash,
         )
+
+    # Only a genuinely new row needs a confirmation email -- a duplicate
+    # submission from an address that already has one either has an unclicked
+    # link outstanding (resending would just create a second live token for
+    # the same row, which the schema doesn't have room for) or is already
+    # confirmed. `send_email` (not raw SMTP) inherits the fail-closed
+    # blacklist gate, so an erased address can never receive one either.
+    if require_confirmation and signal_id is not None and confirmation_token is not None:
+        from factory.engines.marketing.email import send_email
+
+        base = (settings.unsubscribe_base_url or "").rstrip("/")
+        confirm_link = f"{base}/confirm/{confirmation_token}" if base else None
+        if confirm_link:
+            await send_email(
+                to=submission.email,
+                subject="Please confirm your interest",
+                body=(
+                    "Thanks for your interest — please confirm by visiting the link "
+                    f"below. If you didn't request this, you can ignore it.\n\n{confirm_link}"
+                ),
+                settings=settings,
+            )
     return {"received": True}
 
 
@@ -242,7 +333,14 @@ class PageViewSubmission(BaseModel):
     variant: str | None = Field(default=None, max_length=32)
 
 
-@app.post("/analytics/{product_id}")
+@app.post(
+    "/analytics/{product_id}",
+    dependencies=[
+        Depends(
+            abuse.rate_limit(scope="analytics", per_ip_setting="analytics_rate_limit_per_ip_hour")
+        )
+    ],
+)
 async def analytics(product_id: str, submission: PageViewSubmission) -> dict[str, Any]:
     """Page-view beacon for a product's own generated frontend.
 
@@ -253,11 +351,13 @@ async def analytics(product_id: str, submission: PageViewSubmission) -> dict[str
     the query surface that reads it back (see `repository.tally_page_views`,
     used by the growth-analyst role).
 
-    Anonymous by design, unlike `/interest`: no email, no dedup, no identity. A
-    flood of fake views is a data-quality problem for growth decisions, not a
-    privacy or spend-gating one the way a fake interest signal would be — so
-    unlike `/interest`, nothing here needs to be load-bearing against abuse
-    beyond the field-length bounds already enforced by the schema.
+    Anonymous by design, unlike `/interest`: no email, no dedup, no identity,
+    and no spend-gating decision reads this table directly. A rate limit still
+    applies -- fake volume is a data-quality problem for `EVALUATE_AB_TEST` and
+    GROWTH_ANALYST, not a privacy one, but it is still a real input worth
+    capping -- looser than `/interest`'s, and per-IP only (no per-product cap,
+    matching that a genuinely popular page should be free to get a lot of
+    real traffic from a lot of different visitors).
     """
     async with session_scope() as session:
         product = await repository.get_product(session, product_id)

@@ -189,6 +189,20 @@ class ValidationSignal(Base):
     #: Which AB-test arm this visitor was assigned, if a test was running when they
     #: submitted -- NULL outside a test. See `ABTest`.
     variant: Mapped[str | None] = mapped_column(String(32))
+    #: NULL until the submitter clicks the emailed confirmation link -- an
+    #: unconfirmed row is not real evidence of interest. See api/app.py's
+    #: /interest and /confirm/{token}, and repository.tally_validation_signals'
+    #: confirmed_only default.
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    confirmation_token: Mapped[str | None] = mapped_column(String(64))
+    #: 'double_opt_in' | 'dry_run_auto' | 'operator' -- why this row counts, kept
+    #: even after confirmation so an audit can tell a real click from a
+    #: dry-run/manual bypass without cross-referencing anything else.
+    confirmation_method: Mapped[str | None] = mapped_column(String(16))
+    #: HMAC-SHA256 of the submitter's IP, never the IP itself -- see
+    #: Settings.abuse_ip_hash_secret. NULL whenever that secret isn't configured;
+    #: this column existing at all is not a promise every row has one.
+    submitter_ip_hash: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -196,7 +210,34 @@ class ValidationSignal(Base):
     __table_args__ = (
         UniqueConstraint("product_id", "email", name="uq_validation_signals_product_email"),
         Index("ix_validation_signals_product", "product_id"),
+        Index(
+            "ix_validation_signals_confirmation_token",
+            "confirmation_token",
+            unique=True,
+            postgresql_where=(confirmation_token.isnot(None)),
+        ),
     )
+
+
+class RateLimitBucket(Base):
+    """A fixed-window request counter for the two unauthenticated public write
+    endpoints (`/interest`, `/analytics`) -- see `api/abuse.py::hit`.
+
+    One row per (scope, key, window), upserted with `hits = hits + 1` on every
+    request in that window; a request is refused once `hits` exceeds the
+    configured ceiling. Stored in Postgres rather than in-process memory
+    deliberately: this factory can run more than one API worker, and an
+    in-memory counter would let a caller bypass the limit just by landing on a
+    different worker.
+    """
+
+    __tablename__ = "rate_limit_buckets"
+
+    bucket_key: Mapped[str] = mapped_column(String(200), primary_key=True)
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    hits: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    __table_args__ = (Index("ix_rate_limit_buckets_window", "window_start"),)
 
 
 class PageView(Base):

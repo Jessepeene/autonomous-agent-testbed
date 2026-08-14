@@ -77,6 +77,19 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
 
         count = await check_approved_idea_orphans(session)
         return f"supervisor/audit: {count} orphaned approved idea(s) found"
+    if slug == "expire-unconfirmed-signals":
+        from datetime import timedelta
+
+        signals_expired = await repository.expire_unconfirmed_validation_signals(
+            session, older_than=timedelta(hours=ctx.settings.validation_confirmation_ttl_hours)
+        )
+        buckets_purged = await repository.purge_rate_limit_buckets(
+            session, older_than=timedelta(hours=1)
+        )
+        return (
+            f"signals/expire: {signals_expired} unconfirmed signal(s) deleted, "
+            f"{buckets_purged} rate-limit bucket(s) purged"
+        )
 
     objective = str(task.payload.get("objective", "Improve the factory."))
     role = ROLE_BY_SLUG.get(slug, RoleName.ANALYST)

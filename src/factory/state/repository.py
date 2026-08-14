@@ -14,7 +14,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, delete, func, or_, select, text, update
+from sqlalchemy import CursorResult, case, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,6 +37,7 @@ from factory.state.orm import (
     PageView,
     Product,
     ProductLock,
+    RateLimitBucket,
     ScoutSignal,
     ScrapeDomainFailure,
     Task,
@@ -1009,6 +1010,9 @@ async def insert_validation_signal(
     email: str,
     message: str | None = None,
     variant: str | None = None,
+    require_confirmation: bool = True,
+    confirmation_token: str | None = None,
+    submitter_ip_hash: str | None = None,
 ) -> str | None:
     """Record real interest in a product still in its validation stage.
 
@@ -1020,11 +1024,27 @@ async def insert_validation_signal(
     against a currently-running test here, since a stray or late report from a
     test that just concluded is still a real signal worth keeping, just not one
     `tally_ab_test_outcomes` will count once the test's row is no longer `running`.
+
+    ``require_confirmation=False`` auto-confirms the row at insert time
+    (``confirmation_method='dry_run_auto'``) rather than branching the read side
+    on a mode flag -- ``tally_validation_signals`` stays a single, honest query
+    (``confirmed_at IS NOT NULL``) regardless of why a row counts. The caller
+    (the ``/interest`` endpoint) decides ``require_confirmation`` from
+    ``settings.factory_dry_run``, not this function.
     """
+    confirmed_at = None if require_confirmation else _now()
+    method = None if require_confirmation else "dry_run_auto"
     stmt = (
         pg_insert(ValidationSignal)
         .values(
-            product_id=product_id, email=email.strip().lower(), message=message, variant=variant
+            product_id=product_id,
+            email=email.strip().lower(),
+            message=message,
+            variant=variant,
+            confirmed_at=confirmed_at,
+            confirmation_token=confirmation_token if require_confirmation else None,
+            confirmation_method=method,
+            submitter_ip_hash=submitter_ip_hash,
         )
         .on_conflict_do_nothing(
             index_elements=[ValidationSignal.product_id, ValidationSignal.email]
@@ -1035,17 +1055,123 @@ async def insert_validation_signal(
     return str(row) if row is not None else None
 
 
+async def confirm_validation_signal(session: AsyncSession, token: str) -> str | None:
+    """Resolve a double-opt-in confirmation click. Idempotent via ``coalesce``,
+    not a ``WHERE confirmed_at IS NULL`` guard: a second click still matches the
+    row and re-runs the UPDATE, but ``confirmed_at``/``confirmation_method``
+    only ever move from unset to their first-click value, never overwritten on
+    a later click. Same email comes back either way, so a user double-clicking
+    or a mail client prefetching the link can't raise an error.
+
+    Returns the confirmed row's email (for ``/u/{token}`` to also resolve this
+    token as an erasure route -- see ``api/app.py::unsubscribe``), or ``None``
+    if the token is unknown.
+    """
+    stmt = (
+        update(ValidationSignal)
+        .where(ValidationSignal.confirmation_token == token)
+        .values(
+            confirmed_at=func.coalesce(ValidationSignal.confirmed_at, _now()),
+            confirmation_method=case(
+                (ValidationSignal.confirmed_at.is_(None), "double_opt_in"),
+                else_=ValidationSignal.confirmation_method,
+            ),
+        )
+        .returning(ValidationSignal.email)
+    )
+    row = (await session.execute(stmt)).scalar_one_or_none()
+    return str(row) if row is not None else None
+
+
+async def validation_signal_email_for_token(session: AsyncSession, token: str) -> str | None:
+    """Look up the address a confirmation token belongs to, without mutating
+    anything -- used by ``/u/{token}`` erasure, which must resolve the token
+    whether or not it was ever clicked."""
+    stmt = select(ValidationSignal.email).where(ValidationSignal.confirmation_token == token)
+    row = (await session.execute(stmt)).scalar_one_or_none()
+    return str(row) if row is not None else None
+
+
 async def tally_validation_signals(
-    session: AsyncSession, product_id: str, *, variant: str | None = None
+    session: AsyncSession,
+    product_id: str,
+    *,
+    variant: str | None = None,
+    confirmed_only: bool = True,
 ) -> int:
     stmt = (
         select(func.count())
         .select_from(ValidationSignal)
         .where(ValidationSignal.product_id == product_id)
     )
+    if confirmed_only:
+        stmt = stmt.where(ValidationSignal.confirmed_at.isnot(None))
     if variant is not None:
         stmt = stmt.where(ValidationSignal.variant == variant)
     return int((await session.execute(stmt)).scalar_one())
+
+
+async def validation_signal_ip_concentration(
+    session: AsyncSession, product_id: str
+) -> tuple[int, int]:
+    """``(max signals sharing one submitter IP hash, total confirmed signals)``
+    for a product -- what ``_evaluate_validation`` checks before trusting a
+    response rate as broad real interest rather than one submitter clicking
+    through several times.
+
+    Rows with no IP hash (``ABUSE_IP_HASH_SECRET`` unset) never contribute to
+    the concentration count -- an unhashed row is not evidence either way, and
+    counting it would make the check either meaningless or a false positive
+    depending on how NULLs happened to group.
+    """
+    total = await tally_validation_signals(session, product_id)
+    if total == 0:
+        return 0, 0
+    stmt = (
+        select(func.count())
+        .select_from(ValidationSignal)
+        .where(
+            ValidationSignal.product_id == product_id,
+            ValidationSignal.confirmed_at.isnot(None),
+            ValidationSignal.submitter_ip_hash.isnot(None),
+        )
+        .group_by(ValidationSignal.submitter_ip_hash)
+        .order_by(func.count().desc())
+        .limit(1)
+    )
+    max_from_one_ip = (await session.execute(stmt)).scalar_one_or_none()
+    return int(max_from_one_ip or 0), total
+
+
+async def expire_unconfirmed_validation_signals(
+    session: AsyncSession, *, older_than: timedelta
+) -> int:
+    """Hard-delete validation signals that were never confirmed and have aged
+    past the confirmation window -- data minimisation (an unconfirmed row is an
+    unverified claim about a real person's email, not evidence), and it keeps
+    the table from filling with abandoned or hostile submissions that will
+    never count for anything."""
+    cutoff = _now() - older_than
+    result = cast(
+        "CursorResult[Any]",
+        await session.execute(
+            delete(ValidationSignal).where(
+                ValidationSignal.confirmed_at.is_(None), ValidationSignal.created_at < cutoff
+            )
+        ),
+    )
+    return int(result.rowcount or 0)
+
+
+async def purge_rate_limit_buckets(session: AsyncSession, *, older_than: timedelta) -> int:
+    """Drop rate-limit windows old enough that they can no longer affect any
+    live decision -- pure housekeeping, the table is otherwise unbounded."""
+    cutoff = _now() - older_than
+    result = cast(
+        "CursorResult[Any]",
+        await session.execute(delete(RateLimitBucket).where(RateLimitBucket.window_start < cutoff)),
+    )
+    return int(result.rowcount or 0)
 
 
 async def record_page_view(

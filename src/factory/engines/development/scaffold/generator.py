@@ -120,7 +120,9 @@ clear visual hierarchy, real (not lorem-ipsum) and specific copy, professional a
 credible styling, and a mobile-responsive layout.
 - An interest-capture form (email, and an optional short message) that POSTs as JSON \
 to the exact interest URL given below. On success, replace the form with a short \
-thank-you message. On failure, show an error and leave the form intact so the visitor \
+message telling the visitor to check their email and click the confirmation link to \
+finish registering their interest -- submitting the form is not the final step, the \
+confirmation is. On failure, show an error and leave the form intact so the visitor \
 can retry.
 - An analytics beacon: a small inline script that runs on page load and POSTs JSON \
 {"path": ..., "referrer": ...} to the exact analytics URL given below. \

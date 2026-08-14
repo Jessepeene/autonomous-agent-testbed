@@ -285,6 +285,40 @@ async def _evaluate_validation(ctx: FactoryContext, session: AsyncSession, task:
         and response_rate >= ctx.settings.validation_min_response_rate
     )
 
+    # A response rate this gate would otherwise trust as broad real interest can
+    # still be one submitter clicking through several times -- proven live, see
+    # DEPLOYMENT_CHECKLIST.md's signal-verification entry. Checked only once
+    # there's enough confirmed volume for concentration to mean anything; five
+    # confirmed signals from five different people is exactly what this gate
+    # exists to let through, not something to second-guess.
+    if passed:
+        max_from_one_ip, confirmed_total = await repository.validation_signal_ip_concentration(
+            session, product_id
+        )
+        if (
+            confirmed_total >= 5
+            and max_from_one_ip / confirmed_total > ctx.settings.validation_max_ip_concentration
+        ):
+            passed = False
+            await interrupts.request(
+                session,
+                reason=InterruptReason.DATA_INTEGRITY,
+                subject=f"{product.name[:80]} validation looks concentrated, not broad",
+                detail=(
+                    f"{max_from_one_ip} of {confirmed_total} confirmed interest signals for "
+                    f"'{product.name}' came from the same submitter IP -- "
+                    f"{max_from_one_ip / confirmed_total:.0%}, above the "
+                    f"{ctx.settings.validation_max_ip_concentration:.0%} bar this gate treats as "
+                    "broad real interest. The raw response rate cleared the normal threshold, "
+                    "but this does not look like independent demand, so the product was "
+                    "retired rather than built."
+                ),
+                headline="📋 Validation signals look concentrated",
+                reply_hint="No reply needed — informational. The product has already been retired.",
+                needs_reply=False,
+                product_id=product_id,
+            )
+
     if product.landing_page_prompt_version:
         await learning_prompts.record_outcome(
             session,
