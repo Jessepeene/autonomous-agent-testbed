@@ -183,8 +183,13 @@ async def test_a_products_first_live_deploy_requests_a_domain(
     (tmp_path / "ws-first" / "app").mkdir()
     (tmp_path / "ws-first" / "app" / "index.html").write_text(
         "<html><head><title>t</title>"
-        '<meta name="description" content="d"></head><body>hi</body></html>',
+        '<meta name="description" content="d"></head><body>hi'
+        f'<script>fetch("https://example.test/analytics/{product_id}")</script>'
+        '<a href="privacy.html">Privacy</a></body></html>',
         encoding="utf-8",
+    )
+    (tmp_path / "ws-first" / "app" / "privacy.html").write_text(
+        "<html><body>We collect an email address.</body></html>", encoding="utf-8"
     )
     (tmp_path / "ws-first" / "sitemap.xml").write_text("<urlset></urlset>", encoding="utf-8")
     (tmp_path / "ws-first" / "robots.txt").write_text("User-agent: *\n", encoding="utf-8")
@@ -252,13 +257,18 @@ async def test_a_redeploy_of_an_already_asked_product_never_asks_again(
     (tmp_path / "ws-redeploy" / "app").mkdir()
     (tmp_path / "ws-redeploy" / "app" / "index.html").write_text(
         "<html><head><title>t</title>"
-        '<meta name="description" content="d"></head><body>hi</body></html>',
+        '<meta name="description" content="d"></head><body>hi'
+        f'<script>fetch("https://example.test/analytics/{product_id}")</script>'
+        '<a href="privacy.html">Privacy</a></body></html>',
         encoding="utf-8",
+    )
+    (tmp_path / "ws-redeploy" / "app" / "privacy.html").write_text(
+        "<html><body>We collect an email address.</body></html>", encoding="utf-8"
     )
     (tmp_path / "ws-redeploy" / "sitemap.xml").write_text("<urlset></urlset>", encoding="utf-8")
     (tmp_path / "ws-redeploy" / "robots.txt").write_text("User-agent: *\n", encoding="utf-8")
 
-    await dev_graph._verify_and_ship(
+    result = await dev_graph._verify_and_ship(
         ctx,
         session,
         product_id=product_id,
@@ -267,6 +277,12 @@ async def test_a_redeploy_of_an_already_asked_product_never_asks_again(
         test_command="pytest",
         idea_id=product.idea_id,
     )
+
+    # Must actually reach a real, successful redeploy -- otherwise the interrupt
+    # count below would read 0 for the wrong reason (a healed build also raises
+    # no DOMAIN_REQUIRED interrupt, which would make this test pass even if the
+    # redeploy itself were broken).
+    assert "approved and deployed" in result
 
     count = (
         await session.execute(
