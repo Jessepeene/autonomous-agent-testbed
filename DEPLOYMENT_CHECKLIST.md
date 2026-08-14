@@ -3110,3 +3110,51 @@ correctly auto-confirmed at insert time with a real IP hash attached
 schedule — the 6th `/interest` request from this session's testing against
 the same IP (including two earlier probe requests) returned 429, the rest
 200/404 as expected.
+
+## Risk-audit hardening, Phase 2: deterministic PyPI check ahead of every install — 2026-08-14
+
+`requirements.txt` is now checked against the real PyPI registry — both that
+every named package actually exists, and that it wasn't registered
+suspiciously recently — before `pip install` ever runs. Bug Council's own
+dependency reviewer already asks a model to flag "packages that are
+abandoned or typosquat a popular name," but that's a judgement call, not a
+verified fact; a hallucinated name plausible enough for the generator to
+write can be plausible enough for the reviewer grading it to wave through.
+
+Positioned specifically *before* install, not just before Bug Council:
+Council convenes only after a build has already installed cleanly and passed
+its tests, so it never actually sees a package that failed to install — a
+hallucinated name today just fails the install with a generic
+`dependency_failure` and the whole build regenerates from scratch. Catching
+it here, before any network call the sandbox itself would make, keeps it a
+one-line, surgically-repairable edit to `requirements.txt` instead —
+`dependency_not_on_pypi` is the one `dependency_*` heal category now in
+`SURGICAL_CATEGORIES`, since the diagnosis re-runs in-process (real network,
+not the repair sandbox's, which has none) rather than needing a retry the
+surgeon has no way to attempt.
+
+A 404 from PyPI is definitive (fails closed); a transport failure fails
+open, same posture as `website.py`'s robots.txt fetch — a PyPI outage must
+never block every build in flight, and the install step itself is the real
+backstop if a name really is bad. Results are cached per package name for 7
+days (`pypi_package_checks`) — existence and registration date are facts
+about the package, not about any one build.
+
+**Verified**: local ruff/mypy clean. 16 new unit tests (`test_dependency_precheck.py`)
+— PEP 503 normalization, every requirements.txt line shape (comments,
+`-r`/`-e`/option lines, direct URLs, VCS refs, local paths, extras/markers),
+a real-old-package pass, a nonexistent-package flag, a freshly-registered
+flag (the actual slopsquatting scenario), fail-open on transport failure,
+cache hit skips the network call, an expired cache entry refreshes, the
+settings kill switch, and the empty-requirements short circuit. Plus a
+regression guard in `test_surgical_repair.py` asserting
+`dependency_not_on_pypi` is surgical and the other two `dependency_*`
+categories are not. Local unit suite: 780 passed (same two pre-existing
+Windows failures). Scratch-Postgres: full suite, 1048 passed.
+
+**Deployed live**: committed, transferred via `git archive HEAD`, image
+rebuilt, migration `0022` applied to the live database, service restarted.
+`/health` returns 200. Confirmed live with a real (unmocked) call against the
+real PyPI registry from inside the deployed container: `pydantic`/`requests`
+passed cleanly, a deliberately hallucinated name was caught —
+`totally-hallucinated-pkg-xyz-123 (no such package on PyPI)`.
