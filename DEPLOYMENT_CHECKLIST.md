@@ -2989,3 +2989,50 @@ Marketing claimed the stuck `SEND_OUTREACH` task, composed real per-lead
 copy for the 3 seeded test leads, and correctly stopped at the dry-run gate
 (3 attempted, 0 sent, 3 suppressed) — then Discovery and Compliance each
 picked up their own real backlog on the following ticks.
+
+## Risk-audit hardening, Phase 0: the public `/metrics` leak — 2026-08-14
+
+Two research papers (autonomous-agent failure modes; micro-SaaS death causes)
+were audited against this codebase — full report at
+https://claude.ai/code/artifact/6c863cf7-4557-4c41-ac32-7b6b60d525c0. 11
+partial-or-gap items came back; a phased plan to close all of them (while
+explicitly preserving the factory's autonomy, self-learning, and free-form
+judgment — no new rigid rules where a learnable weight or a model judgment
+already does the job) is under execution now. Phase 0 is the first deploy.
+
+Research for the plan itself surfaced a live issue the audit had missed:
+`GET /metrics` — the factory's full financial and operational state, spend,
+balance, reinvestment pool, task counts — was both unauthenticated *and*
+publicly reachable through Caddy. Anyone who found the path could read it.
+
+**Fix, two independent layers**: the `Caddyfile` now refuses `/metrics`
+outright at the edge (`respond 404`), and the app itself requires a bearer
+token behind that, so a future Caddyfile edit or proxy misconfiguration can't
+silently re-expose the endpoint on its own. Fails closed — an unset
+`METRICS_AUTH_TOKEN` means the endpoint refuses every request with 503, never
+serves openly. Token comparison uses `hmac.compare_digest` on both scheme and
+value, since the endpoint stays reachable from the container network even
+with Caddy blocking the public path.
+
+Also fixed in the same Caddyfile edit, ahead of Phase 1's rate limiter which
+depends on it: `X-Forwarded-For` is now overwritten with `{remote_host}`
+rather than appended. Caddy's default appends, which would let a caller pin
+any value it likes and defeat per-IP rate limiting by sending a fresh header
+on every request.
+
+**Verified**: local ruff/mypy clean on the changed files (two pre-existing
+ruff findings in unrelated files, confirmed identical on clean HEAD, left
+untouched). 6 new tests (`test_metrics_auth.py`) — unset/missing/wrong/
+wrong-scheme/correct token, plus a guard that `/health` stays unauthenticated
+for the deploy pipeline and uptime monitoring. Local unit suite: 1012 passed
+(same two pre-existing Windows path-separator failures). Scratch-Postgres:
+full suite, 1012 passed.
+
+**Deployed live**: committed, transferred via `git archive HEAD`, image
+rebuilt (no migration — no schema change), Caddy and factory both recreated
+to pick up the new Caddyfile and image. Production token generated directly
+on the server via `openssl rand -hex 32` (never passed through the assistant
+session), `.env` backed up first per the existing convention. Confirmed from
+the server itself: public `/metrics` → 404, public `/health` → 200 (proxy
+config, real HTTP), loopback `/metrics` with the correct bearer token → 200,
+loopback `/metrics` with no token → 401.
