@@ -3217,3 +3217,103 @@ Windows failures). Scratch-Postgres: full suite, 1057 passed.
 rebuilt (no migration to apply — `alembic upgrade head` confirmed already at
 `0022`), service restarted. `/health` returns 200, boot log clean, all six
 engines enabled.
+
+## Risk-audit hardening, Phase 4: defensibility scoring dimension — 2026-08-14
+
+`ScoredIdea` gains a fifth weighted dimension, `defensibility` (0.18 of the
+weight), plus two informational, ungated enums — `platform_dependency` and
+`replacement_mode`. The prior scoring contract rewarded a thin, easily-cloned
+API wrapper the same as a defensible product: `build_feasibility`'s
+instructions literally asked for "no proprietary data," which favors exactly
+the AI-wrapper failure mode this dimension exists to catch instead.
+
+External research on this phase was reviewed and independently fact-checked
+before building: the schema-complexity and enum-collapse concerns were real
+and adopted (see below); a proposed Fisher's-exact-test power critique for
+the trial evaluator checked out numerically (simulated independently: 28.06%
+power vs. the report's claimed 28.37%, for a 30%→15% survival-rate halving at
+n=30) but was kept out of this phase's scope — it's a change to
+`learning/trials.py`'s shared evaluator serving all six allowlisted keys, not
+something specific to scoring weights, and deserves its own verification pass
+against real score-variance data rather than being folded into an unrelated
+migration.
+
+**Schema**: `defensibility_reasoning: str` (defaulted `""`) placed immediately
+before `defensibility: float` (defaulted `0.0`) — auto-regressive generation
+is strictly left-to-right, so forcing the model to commit its reasoning to
+the context window before the constrained numeric token reduces the risk of
+"enum collapse" (a forced classification defaulting to a safe average under
+structured decoding). `SCORE_DIMENSIONS: ClassVar[tuple[str, ...]]` is now
+the single source of truth `weighted_score` loops over, replacing a hardcoded
+4-term sum. New default weights (pain .25, WTP .25, adoption .20, feasibility
+.12, defensibility .18) still sum to exactly 1.0, keeping the fixed
+`SCORE_THRESHOLD = 0.55` calibrated. `platform_dependency`/`replacement_mode`
+are recorded but never gated or weighted this phase, deliberately — a kill
+rule before anyone has seen the real distribution of values would be the
+rigid rule-following this whole hardening effort exists to avoid.
+
+**Migration `0023_idea_defensibility`**: `ideas` gains all seven
+per-dimension columns (today only the blended `score` survives — this makes
+a future weights change backtestable against real historical ideas, which
+was previously impossible). The live `SCORING_WEIGHTS` row is replaced
+outright if it's still the untouched code default, otherwise every existing
+weight is scaled by 0.82 and `defensibility` inserted at exactly 0.18 —
+preserving whatever relative priorities the learning loop had already
+discovered while returning the vector to a 1.0 sum. `DISCRIMINATOR_SYSTEM` is
+replaced if untouched, otherwise the new instructions are appended rather
+than overwriting tuned prose. Any in-flight `trial`/`candidate` row for
+either key is retired (never deleted) — episodes collected under the old
+4-dimension contract are statistically uninterpretable against the new one.
+The `active` row itself is never retired, even when rewritten in place.
+**Confirmed on the real production database before this deploy's service
+restart**: both rows were still on version 1 (never mutated by the learning
+loop yet), so both took the clean replace branch — verified directly via
+`psql` that the live `SCORING_WEIGHTS` value now sums to 1.0 across all five
+keys and `DISCRIMINATOR_SYSTEM`'s text matches the new prompt exactly.
+
+**Guardrails**: `learning/prompts.py::get_scoring_weights` now falls back to
+the code default (never raises) if a served row's dimension set doesn't
+match — a stale row can no longer silently zero out `defensibility` for
+every idea via `weighted_score`'s `weights.get(dim, 0.0)`. New
+`supervisor/audit.py::check_scoring_contract_drift`, wired into the existing
+`audit-snapshot-integrity` maintenance item, raises a Telegram-visible
+interrupt on the same mismatch instead of leaving it silent forever.
+`WeightsCandidate` (the learning loop's own weight-proposal schema) gained a
+`defensibility` field — it very nearly stayed at four fields while
+`ScoredIdea` moved to five, which is exactly the kind of half-done dimension
+change a new parity test now guards against.
+
+**Pre-merge requirement, satisfied**: a live, unmocked `discriminate()` call
+against real Gemini (model `gemini-pro-latest`), run from the server using
+the production API key — every existing test mocks the client, which is
+exactly why a prior schema-size outage on this same array went undetected
+until production (see this file's own earlier entry, `:249-266`). The
+15-field schema (up from 12) completed in 28.9s with no error. Both scored
+ideas came back with substantive, specific `defensibility_reasoning` text
+("heavily dependent on fragmented third-party TMS platforms that often lack
+modern APIs" / "Competitors cannot easily migrate this trust") rather than a
+generic default — direct evidence the reasoning-before-score field ordering
+is doing its job, not just theoretically sound.
+
+**Verified**: local ruff/mypy clean (same two pre-existing, unrelated
+findings noted in every earlier phase). New `test_idea_defensibility_migration.py`
+(13 tests) loads the migration file directly via `importlib` (its module name
+starts with a digit, so it can't be `import`ed normally) and tests the
+rewrite logic in isolation — critically, asserts the migration's embedded
+copy of the new `DISCRIMINATOR_SYSTEM` text is byte-identical to the real
+code constant, and that the rescale math preserves both the sum-to-one
+contract and the learning loop's relative weight ratios. `test_scored_idea_weights.py`
+rewritten for the 5-dimension reality (every hardcoded arithmetic assertion
+depended on the old 4-term sum). `test_learning_maintenance.py` gained the
+`WeightsCandidate`↔`SCORE_DIMENSIONS` parity test plus updated call sites.
+New integration coverage in `test_learning_store.py` (the dimension-mismatch
+fallback), `test_snapshot_audit.py` (`check_scoring_contract_drift`, healthy/
+drifted/no-duplicate-interrupt), and `test_repository.py` (`upsert_idea`
+persists the per-dimension columns, and leaves them at their defaults for a
+pre-Phase-4-shaped idea). Local unit suite: 806 passed (same two pre-existing
+Windows failures). Scratch-Postgres: full suite, 1086 passed.
+
+**Deployed live**: committed, transferred via `git archive HEAD`, image
+rebuilt, migration `0023` applied to the live database (confirmed via direct
+`psql` inspection, see above), service restarted. `/health` returns 200,
+boot log clean, all six engines enabled.
