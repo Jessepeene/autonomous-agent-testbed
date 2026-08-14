@@ -3036,3 +3036,77 @@ session), `.env` backed up first per the existing convention. Confirmed from
 the server itself: public `/metrics` → 404, public `/health` → 200 (proxy
 config, real HTTP), loopback `/metrics` with the correct bearer token → 200,
 loopback `/metrics` with no token → 401.
+
+## Risk-audit hardening, Phase 1: double opt-in and abuse controls on validation signals — 2026-08-14
+
+The single load-bearing gap from the risk audit — the same one demonstrated
+live earlier this session, six unconfirmed emails carrying a product through
+`EVALUATE_VALIDATION` into a real build. `POST /interest/{product_id}` now
+mints a confirmation token; a signal only counts toward the gate once
+`GET /confirm/{token}` is clicked. `tally_validation_signals` stayed a single
+query (`confirmed_at IS NOT NULL`) rather than growing a dry-run branch — a
+row is auto-confirmed *at insert time* (`confirmation_method='dry_run_auto'`)
+under `FACTORY_DRY_RUN`, since there's no real inbox to click a link from in
+that mode.
+
+**Second, independent guard**: even a fully-confirmed response rate can still
+be one submitter clicking through several times. `_evaluate_validation` now
+checks IP concentration (once ≥5 confirmed signals exist) and refuses to pass
+— raising `InterruptReason.DATA_INTEGRITY` and retiring the product — if one
+submitter IP accounts for more than `validation_max_ip_concentration` (50%
+default) of them. IPs are never stored raw: HMAC-SHA256 keyed on a configured
+secret, or not recorded at all if the secret is unset — fail toward less
+data, never a reversible hash (plain `sha256(ip)` is reversible in seconds
+for an IPv4 address).
+
+**Both unauthenticated public write endpoints are now rate-limited** —
+`/interest` per-IP and per-product, `/analytics` per-IP only (a popular page
+should be free to get real traffic from many real visitors). Backed by a new
+`rate_limit_buckets` table (Postgres, not in-process memory — this factory
+can run more than one API worker) via a fixed-window upsert mirroring
+`record_scrape_failure`'s idiom. Implemented as a FastAPI *dependency*, not
+middleware, specifically so the signed Stripe/Mailgun webhooks — trusted
+callers — are never subject to the same throttle built for anonymous traffic.
+
+**A real, separate erasure gap closed as a side effect**: `GET /u/{token}`
+previously resolved only `OutreachLog.unsubscribe_token` — a landing-page
+visitor who submitted `/interest` but never received outreach had no
+self-serve erasure route at all. It now also resolves a validation-signal
+confirmation token.
+
+**Fixed 6 pre-existing tests** broken by `insert_validation_signal` now
+defaulting to `require_confirmation=True`: the validation gate's own tests,
+AB-test outcome tallying (which reads through the same
+`tally_validation_signals` — a good side effect, AB test winners are now
+equally protected from unconfirmed signals), a growth-tool read, and
+`/status`'s signal count. Each needed an explicit `require_confirmation=False`
+since their intent was testing threshold logic, not the confirmation flow
+itself.
+
+**Verified**: local ruff/mypy clean. 7 new unit tests (`test_abuse_controls.py`,
+pure `hash_ip` — deterministic, secret-dependent, unset-secret-means-no-hash).
+Extensive new integration coverage in `test_validation_gate.py`: unconfirmed
+signals don't count, confirming flips the tally, double-confirm is a harmless
+no-op, dry-run auto-confirms at insert time, a blacklisted address doesn't
+crash the flow, the IP-concentration refusal fires and doesn't false-positive
+on genuinely spread signals or on unhashed rows, and the rate limiter both
+trips and correctly treats different IPs as independent buckets. Extended
+`test_gdpr_erasure.py` for the new erasure route. Local unit suite: 763
+passed (same two pre-existing Windows failures). Scratch-Postgres: first run
+surfaced the 6 pre-existing test breakages above; fixed, re-ran clean —
+1031 passed.
+
+**Deployed live**: committed across two commits (the feature, then the test
+fixes), transferred via `git archive HEAD`, image rebuilt, migration `0021`
+applied to the live database, `ABUSE_IP_HASH_SECRET` generated directly on
+the server via `openssl rand -hex 32` (`.env` backed up first), service
+restarted. `/health` returns 200.
+
+**Confirmed live, immediately**: the new `expire-unconfirmed-signals`
+maintenance item was already picked up and ran clean on the very first tick
+after restart. A real interest submission to the live validating product
+correctly auto-confirmed at insert time with a real IP hash attached
+(`FACTORY_DRY_RUN` is still on). The rate limiter tripped exactly on
+schedule — the 6th `/interest` request from this session's testing against
+the same IP (including two earlier probe requests) returned 429, the rest
+200/404 as expected.
