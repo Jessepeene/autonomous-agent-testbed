@@ -361,6 +361,19 @@ def test_guided_patches_carry_the_category_that_routes_them() -> None:
     assert "guided" in dev_graph.SURGICAL_CATEGORIES
 
 
+def test_dependency_not_on_pypi_is_surgical_but_the_other_two_are_not() -> None:
+    """`dependency_not_on_pypi` is the one `dependency_*` category that IS
+    surgically repairable -- the diagnosis re-runs in-process (real PyPI, no
+    sandbox network needed), unlike `dependency_timeout`/`dependency_failure`,
+    which need the repair agent's own sandbox to actually retry an install it
+    has no network to attempt. Getting this wrong either way is expensive: too
+    narrow forces full regeneration for a one-line requirements.txt fix; too
+    wide sends a real infra failure to an agent that cannot possibly fix it."""
+    assert "dependency_not_on_pypi" in dev_graph.SURGICAL_CATEGORIES
+    assert "dependency_timeout" not in dev_graph.SURGICAL_CATEGORIES
+    assert "dependency_failure" not in dev_graph.SURGICAL_CATEGORIES
+
+
 # --- the workspace tools ---------------------------------------------------------
 
 

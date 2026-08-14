@@ -37,6 +37,7 @@ from factory.state.orm import (
     PageView,
     Product,
     ProductLock,
+    PypiPackageCheck,
     RateLimitBucket,
     ScoutSignal,
     ScrapeDomainFailure,
@@ -945,6 +946,27 @@ async def blocked_scrape_domains(session: AsyncSession, *, threshold: int) -> se
     a fetch is even attempted on a later harvest."""
     stmt = select(ScrapeDomainFailure.domain).where(ScrapeDomainFailure.failure_count >= threshold)
     return set((await session.execute(stmt)).scalars().all())
+
+
+async def get_pypi_package_check(session: AsyncSession, name: str) -> PypiPackageCheck | None:
+    return await session.get(PypiPackageCheck, name)
+
+
+async def upsert_pypi_package_check(
+    session: AsyncSession, *, name: str, exists: bool, first_release_at: datetime | None
+) -> None:
+    """Record (or refresh) a cached PyPI existence/age verdict. ``ON CONFLICT``
+    updates in place rather than inserting a second row -- ``checked_at``'s
+    ``onupdate=func.now()`` then does the TTL bookkeeping for free."""
+    stmt = (
+        pg_insert(PypiPackageCheck)
+        .values(name=name, exists=exists, first_release_at=first_release_at)
+        .on_conflict_do_update(
+            index_elements=[PypiPackageCheck.name],
+            set_={"exists": exists, "first_release_at": first_release_at},
+        )
+    )
+    await session.execute(stmt)
 
 
 async def erase_lead(

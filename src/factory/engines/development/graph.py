@@ -18,7 +18,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from factory.agents.roles import RoleName
 from factory.agents.spawner import SpawnRequest, spawn
-from factory.engines.development import ab_testing, bug_council, domain, repair, seo
+from factory.engines.development import (
+    ab_testing,
+    bug_council,
+    dependencies,
+    domain,
+    repair,
+    seo,
+)
 from factory.engines.development import deploy as deploy_module
 from factory.engines.development.scaffold.generator import (
     LANDING_PAGE_SYSTEM,
@@ -33,7 +40,12 @@ from factory.learning import prompts as learning_prompts
 from factory.logging import get_logger
 from factory.memory import store as memory_store
 from factory.observability import costs
-from factory.sandbox.runner import DevOpsError, SandboxUnavailable, is_devops_error
+from factory.sandbox.runner import (
+    DevOpsError,
+    SandboxUnavailable,
+    is_devops_error,
+    resolve_workspace,
+)
 from factory.settings import EngineName
 from factory.state import repository
 from factory.state.orm import ABTest, Idea, Product, Task, new_id
@@ -63,12 +75,23 @@ MAX_HEAL_CYCLES = 3
 #: from an organic-discoverability pass -- not a failure at all, but the same
 #: "small, targeted, in-place edit" shape. Routed to SEO_OPTIMIZER instead of
 #: WORKSPACE_SURGEON -- see `_patch_surgically`.
+#: `dependency_not_on_pypi`: the one `dependency_*` category that *is* surgically
+#: repairable, unlike the two below it. The edit is "delete or replace one line in
+#: requirements.txt" -- no network needed to make it, only to have *diagnosed* it,
+#: and that diagnosis (`dependencies.unresolvable_requirements`) re-runs in-process
+#: on the next attempt rather than in the sandbox, exactly like `seo_incomplete`, so
+#: the surgeon is never editing blind to a check it can't re-ask. A wrong
+#: replacement simply heals again, bounded by `MAX_HEAL_CYCLES`.
 #:
-#: Everything else is deliberately absent. `dependency_*` cannot be fixed by an agent
-#: whose sandbox has no network; `deploy_failure` is not a workspace bug at all;
-#: `council_rejection:*` is plausible future work but the agent cannot re-run the
-#: Council, so it would be editing blind to the only opinion that decides the outcome.
-SURGICAL_CATEGORIES = frozenset({"test_failure", "guided", "seo_incomplete", "growth_seo"})
+#: Everything else is deliberately absent. `dependency_timeout`/`dependency_failure`
+#: cannot be fixed by an agent whose sandbox has no network -- an install that
+#: failed for a *real* package needs to actually retry the install, not guess at an
+#: edit; `deploy_failure` is not a workspace bug at all; `council_rejection:*` is
+#: plausible future work but the agent cannot re-run the Council, so it would be
+#: editing blind to the only opinion that decides the outcome.
+SURGICAL_CATEGORIES = frozenset(
+    {"test_failure", "guided", "seo_incomplete", "growth_seo", "dependency_not_on_pypi"}
+)
 
 
 async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
@@ -878,6 +901,29 @@ async def _verify_and_ship(
     is_validation: bool = False,
 ) -> str:
     await repository.set_product_status(session, product_id, ProductStatus.REVIEWING)
+
+    # Cheapest, earliest check, same reasoning as the SEO gate below: this runs
+    # in-process against the real PyPI registry -- not in the sandbox, which has
+    # no network at all before the install step turns it on -- so a hallucinated
+    # or suspiciously-fresh package name is caught before ever paying for the
+    # install attempt, let alone three Opus reviewers. See dependencies.py's
+    # module docstring for why this specifically runs before install, not after.
+    requirements_path = resolve_workspace(workspace, ctx.settings) / "requirements.txt"
+    if requirements_path.exists():
+        unresolvable = await dependencies.unresolvable_requirements(
+            session, requirements_path.read_text(encoding="utf-8"), ctx.settings
+        )
+        if unresolvable:
+            return await _heal(
+                ctx,
+                session,
+                product_id,
+                "requirements.txt names one or more packages that could not be "
+                "verified against the real PyPI registry:\n"
+                + "\n".join(f"- {item}" for item in unresolvable),
+                idea_id,
+                category="dependency_not_on_pypi",
+            )
 
     # Network is explicitly enabled for this one step — dependency installation
     # cannot succeed against `--network none`, the sandbox's otherwise-correct

@@ -168,6 +168,15 @@ class Settings(BaseSettings):
     interest_rate_limit_per_ip_hour: int = Field(default=5, ge=1)
     interest_rate_limit_per_product_hour: int = Field(default=60, ge=1)
     analytics_rate_limit_per_ip_hour: int = Field(default=300, ge=1)
+    # Deterministic slopsquatting defense (engines/development/dependencies.py): a
+    # package name a generated product's requirements.txt names must actually
+    # exist on PyPI, and -- since a hallucinated name that happens to collide with
+    # a real, recently-registered typosquat is exactly the attack -- must not have
+    # been registered suspiciously recently either. Off switch exists because this
+    # calls out to a real third-party API on every build; a PyPI outage already
+    # fails open (see unresolvable_requirements), this is the harder kill switch.
+    pypi_check_enabled: bool = True
+    pypi_min_package_age_days: int = Field(default=90, ge=0)
     # Separate from marketing/graph.py's steady-state per-tick _OUTREACH_BATCH (15):
     # a validation run needs a batch sized for one real decision, not the ongoing
     # per-tick cap a live product's outreach uses.

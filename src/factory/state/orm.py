@@ -712,6 +712,28 @@ class ScrapeDomainFailure(Base):
     )
 
 
+class PypiPackageCheck(Base):
+    """A cached verdict on whether a PyPI package name is real -- the deterministic
+    defense against slopsquatting (see `engines/development/dependencies.py`).
+
+    Global, not per-product, same reasoning as `ScrapeDomainFailure`: a package's
+    existence and registration date are facts about the package, not about any one
+    product's build. TTL'd via `checked_at`, not permanent -- a package name that
+    genuinely doesn't exist yet today may be registered for real next month, and a
+    cached "doesn't exist" must not block that forever.
+    """
+
+    __tablename__ = "pypi_package_checks"
+
+    #: PEP 503 normalized (lowercase, runs of -_. collapsed to a single -).
+    name: Mapped[str] = mapped_column(String(255), primary_key=True)
+    exists: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    first_release_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    checked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+
 class Memory(Base):
     """A lesson the factory retains across sessions.
 
