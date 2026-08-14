@@ -98,6 +98,12 @@ class FactorySnapshot:
     open_interrupts: int
     spend_limit_cents: int
     dry_run: bool
+    #: Product ids with at least one subscription (voluntary or involuntary)
+    #: churned in the last 30 days -- a real autonomy increase, not just a
+    #: number to graph: before this, the Orchestrator had no way to see a
+    #: product bleeding customers, so it could never choose to act on one.
+    #: See `repository.churning_products`.
+    churning_products: list[str]
 
     @property
     def dev_at_capacity(self) -> bool:
@@ -167,6 +173,7 @@ def fingerprint(snapshot: FactorySnapshot) -> str:
         f"pending_ideas={_bucket(snapshot.pending_ideas)}",
         f"interrupts={_bucket(snapshot.open_interrupts)}",
         f"spend={_log_bucket_cents(snapshot.spend_limit_cents)}",
+        f"churn={_bucket(len(snapshot.churning_products))}",
     ]
     return "|".join(parts)
 

@@ -528,6 +528,14 @@ class LedgerEntry(Base):
     reinvest_pool_cents: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
     product_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("products.id"))
+    #: Plain columns, not foreign keys -- Stripe webhook delivery order across
+    #: *different* event types is not guaranteed, so a revenue event (this row)
+    #: can arrive before the corresponding `customer.subscription.created` event
+    #: has been processed. A FK would reject real money on a benign race; these
+    #: are populated when available and left NULL otherwise, exactly like
+    #: `product_id` above already is.
+    stripe_subscription_id: Mapped[str | None] = mapped_column(String(255))
+    stripe_customer_id: Mapped[str | None] = mapped_column(String(255))
     memo: Mapped[str | None] = mapped_column(String(500))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -539,6 +547,120 @@ class LedgerEntry(Base):
         CheckConstraint("reinvest_pool_cents >= 0", name="reinvest_pool_non_negative"),
         Index("ix_ledger_created", "created_at"),
         Index("ix_ledger_product", "product_id"),
+    )
+
+
+class Customer(Base):
+    """An opaque Stripe customer -- deliberately no email, no name.
+
+    Mirrors `Lead`'s own minimisation stance (see its docstring): MRR and churn
+    math need only the Stripe customer id, and the actual personal data stays
+    inside Stripe, which is where GDPR erasure for that person already has to
+    happen regardless of anything this factory does. One less place personal
+    data can leak from.
+    """
+
+    __tablename__ = "customers"
+
+    id: Mapped[str] = _pk()
+    stripe_customer_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    #: Nullable, matching `LedgerEntry.product_id` -- attribution may not be
+    #: available (no `subscription_data.metadata.product_id` contract exists yet
+    #: for generated products; this table is ready for the moment one does),
+    #: and that must never block recording the underlying fact of the customer.
+    product_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("products.id"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("stripe_customer_id", name="uq_customers_stripe_customer_id"),
+        Index("ix_customers_product", "product_id"),
+    )
+
+
+class Subscription(Base):
+    """One Stripe subscription's current state -- upserted on every
+    `customer.subscription.*` event, never touched by `append_ledger`.
+
+    `churn_kind`/`churned_at` are set exclusively by the `customer.subscription.
+    deleted` handler (`finance/webhooks.py`) -- never by `.updated`, which merely
+    reflects `cancel_at_period_end=true` when a customer schedules a future
+    cancellation Stripe still allows them to reverse before the period ends.
+    """
+
+    __tablename__ = "subscriptions"
+
+    id: Mapped[str] = _pk()
+    stripe_subscription_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    customer_id: Mapped[str] = mapped_column(String(32), ForeignKey("customers.id"), nullable=False)
+    product_id: Mapped[str | None] = mapped_column(String(32), ForeignKey("products.id"))
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    price_cents: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cancel_at_period_end: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    current_period_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: NULL until the subscription actually ends -- see the class docstring for
+    #: exactly which event is allowed to set these.
+    churn_kind: Mapped[str | None] = mapped_column(String(16))
+    churned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: Set once `finance/churn.py::write_churn_lessons` has written this churn's
+    #: memory -- the dedup marker that stops the same churn being remembered
+    #: again on every future `review-churn` tick (`remember()`'s own near-duplicate
+    #: reinforcement would otherwise just keep bumping the same row's hit count
+    #: forever, which is harmless but pointless work every 24h indefinitely).
+    memory_written_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint("stripe_subscription_id", name="uq_subscriptions_stripe_subscription_id"),
+        CheckConstraint(
+            "churn_kind IN ('voluntary','involuntary') OR churn_kind IS NULL",
+            name="subscriptions_churn_kind_valid",
+        ),
+        Index("ix_subscriptions_customer", "customer_id"),
+        Index("ix_subscriptions_product", "product_id"),
+        Index("ix_subscriptions_status", "status"),
+        Index("ix_subscriptions_unremembered_churn", "churn_kind", "memory_written_at"),
+    )
+
+
+class DunningEvent(Base):
+    """One at-risk invoice's recovery sequence -- one row per Stripe invoice
+    (Stripe fires multiple `invoice.payment_failed` retries for the *same*
+    invoice; those upsert this same row rather than each creating a new one),
+    closed by whichever comes first: `invoice.paid` (recovered) or the
+    subscription reaching a terminal state (unrecovered) -- see
+    `finance/webhooks.py` for both close paths, so a customer who never
+    resolves a failed payment does not leave this row open forever.
+    """
+
+    __tablename__ = "dunning_events"
+
+    id: Mapped[str] = _pk()
+    stripe_invoice_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    subscription_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("subscriptions.id"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="open")
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    opened_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_reason: Mapped[str | None] = mapped_column(String(64))
+
+    __table_args__ = (
+        UniqueConstraint("stripe_invoice_id", name="uq_dunning_events_stripe_invoice_id"),
+        CheckConstraint(
+            "status IN ('open','recovered','terminal')", name="dunning_events_status_valid"
+        ),
+        Index("ix_dunning_events_subscription", "subscription_id"),
+        Index("ix_dunning_events_open", "subscription_id", "status"),
     )
 
 

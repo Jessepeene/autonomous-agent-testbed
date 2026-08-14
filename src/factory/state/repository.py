@@ -25,6 +25,8 @@ from factory.state.orm import (
     ABTest,
     CampaignApproval,
     ChannelExperiment,
+    Customer,
+    DunningEvent,
     EntityVerdictRow,
     HealAttempt,
     Idea,
@@ -41,6 +43,7 @@ from factory.state.orm import (
     RateLimitBucket,
     ScoutSignal,
     ScrapeDomainFailure,
+    Subscription,
     Task,
     ValidationSignal,
     new_id,
@@ -599,6 +602,19 @@ async def set_product_status(
 
 async def get_product(session: AsyncSession, product_id: str) -> Product | None:
     return await session.get(Product, product_id)
+
+
+async def get_niche_for_product(session: AsyncSession, product_id: str) -> str | None:
+    """`Product.idea_id -> Idea.target_niche` -- the one piece of context
+    `finance/churn.py::write_churn_lessons` needs to file a memory at
+    Discovery's own scope: a niche name, not a product id, which `recall`'s
+    lexical matching could never use."""
+    stmt = (
+        select(Idea.target_niche)
+        .join(Product, Product.idea_id == Idea.id)
+        .where(Product.id == product_id)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def get_product_by_workspace(session: AsyncSession, workspace: str) -> Product | None:
@@ -1544,6 +1560,8 @@ async def append_ledger(
     amount_cents: int,
     reinvest_delta_cents: int = 0,
     product_id: str | None = None,
+    stripe_subscription_id: str | None = None,
+    stripe_customer_id: str | None = None,
     memo: str | None = None,
     currency: str = "USD",
 ) -> bool:
@@ -1583,12 +1601,243 @@ async def append_ledger(
             reinvest_pool_cents=new_pool,
             currency=currency,
             product_id=product_id,
+            stripe_subscription_id=stripe_subscription_id,
+            stripe_customer_id=stripe_customer_id,
             memo=memo,
         )
         .on_conflict_do_nothing(index_elements=[LedgerEntry.external_event_id])
         .returning(LedgerEntry.id)
     )
     return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+
+# --------------------------------------------------------------------- subscriptions
+#
+# None of these functions may ever call append_ledger -- subscription lifecycle
+# events move no money (see finance/webhooks.py's own module docstring); the
+# real transactions (invoice.paid etc.) are already handled by the revenue path
+# above. Enforced as an asserted test invariant, not just this comment -- see
+# test_subscription_lifecycle.py.
+
+
+async def upsert_customer(
+    session: AsyncSession, *, stripe_customer_id: str, product_id: str | None = None
+) -> str:
+    """Idempotent on the Stripe customer id -- a customer only ever needs to be
+    created once, lazily, on whichever subscription event happens to arrive
+    first (Stripe guarantees the Customer object itself already exists by the
+    time any Subscription references it, unlike webhook *delivery* order across
+    different event types)."""
+    stmt = (
+        pg_insert(Customer)
+        .values(stripe_customer_id=stripe_customer_id, product_id=product_id)
+        .on_conflict_do_nothing(index_elements=[Customer.stripe_customer_id])
+        .returning(Customer.id)
+    )
+    row = (await session.execute(stmt)).scalar_one_or_none()
+    if row is not None:
+        return str(row)
+    existing = (
+        await session.execute(
+            select(Customer.id).where(Customer.stripe_customer_id == stripe_customer_id)
+        )
+    ).scalar_one()
+    return str(existing)
+
+
+async def get_subscription_by_stripe_id(
+    session: AsyncSession, stripe_subscription_id: str
+) -> Subscription | None:
+    stmt = select(Subscription).where(Subscription.stripe_subscription_id == stripe_subscription_id)
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def upsert_subscription(
+    session: AsyncSession,
+    *,
+    stripe_subscription_id: str,
+    customer_id: str,
+    product_id: str | None,
+    status: str,
+    price_cents: int,
+    cancel_at_period_end: bool,
+    current_period_end: datetime | None,
+) -> str:
+    """`customer.subscription.created` and `.updated` both land here -- never
+    touches `churn_kind`/`churned_at`, which only `mark_subscription_churned`
+    may set. `.updated` refreshing `price_cents`/`status` on every delivery is
+    deliberate, not incidental: without it, a plan change or any other update
+    reason would leave `mrr_cents` silently stale."""
+    stmt = (
+        pg_insert(Subscription)
+        .values(
+            stripe_subscription_id=stripe_subscription_id,
+            customer_id=customer_id,
+            product_id=product_id,
+            status=status,
+            price_cents=price_cents,
+            cancel_at_period_end=cancel_at_period_end,
+            current_period_end=current_period_end,
+        )
+        .on_conflict_do_update(
+            index_elements=[Subscription.stripe_subscription_id],
+            set_={
+                "status": status,
+                "price_cents": price_cents,
+                "cancel_at_period_end": cancel_at_period_end,
+                "current_period_end": current_period_end,
+                "updated_at": func.now(),
+            },
+        )
+        .returning(Subscription.id)
+    )
+    return str((await session.execute(stmt)).scalar_one())
+
+
+async def mark_subscription_churned(
+    session: AsyncSession, *, stripe_subscription_id: str, status: str, churn_kind: str
+) -> None:
+    """The only function allowed to set `churn_kind`/`churned_at` -- called
+    exclusively from the `customer.subscription.deleted` handler, never from
+    `.updated` (which only ever means `cancel_at_period_end` was toggled, a
+    still-reversible scheduled cancellation, not an actual churn event yet)."""
+    await session.execute(
+        update(Subscription)
+        .where(Subscription.stripe_subscription_id == stripe_subscription_id)
+        .values(status=status, churn_kind=churn_kind, churned_at=func.now())
+    )
+
+
+async def open_or_bump_dunning(
+    session: AsyncSession, *, stripe_invoice_id: str, subscription_id: str
+) -> None:
+    """`invoice.payment_failed` fires once per Stripe retry attempt for the
+    *same* invoice -- upserts the same row, incrementing `attempt_count`,
+    rather than creating a new row per delivery."""
+    stmt = (
+        pg_insert(DunningEvent)
+        .values(
+            stripe_invoice_id=stripe_invoice_id,
+            subscription_id=subscription_id,
+            status="open",
+            attempt_count=1,
+        )
+        .on_conflict_do_update(
+            index_elements=[DunningEvent.stripe_invoice_id],
+            set_={"attempt_count": DunningEvent.attempt_count + 1},
+        )
+    )
+    await session.execute(stmt)
+
+
+async def close_dunning_by_invoice(
+    session: AsyncSession, *, stripe_invoice_id: str, reason: str
+) -> bool:
+    """Closes this invoice's own dunning row on recovery (`invoice.paid`).
+    Returns whether an open row was actually found -- most paid invoices never
+    failed at all, so "nothing to close" is the routine case, not an error."""
+    result = cast(
+        "CursorResult[Any]",
+        await session.execute(
+            update(DunningEvent)
+            .where(
+                DunningEvent.stripe_invoice_id == stripe_invoice_id,
+                DunningEvent.status == "open",
+            )
+            .values(status="recovered", closed_at=func.now(), closed_reason=reason)
+        ),
+    )
+    return result.rowcount > 0
+
+
+async def close_open_dunning_for_subscription(
+    session: AsyncSession, *, subscription_id: str, reason: str
+) -> int:
+    """Closes any still-open dunning row(s) for a subscription that just
+    reached a terminal state -- the zombie-row fix: without this, a customer
+    who never recovers never fires `invoice.paid`, and the row would otherwise
+    leak open forever."""
+    result = cast(
+        "CursorResult[Any]",
+        await session.execute(
+            update(DunningEvent)
+            .where(DunningEvent.subscription_id == subscription_id, DunningEvent.status == "open")
+            .values(status="terminal", closed_at=func.now(), closed_reason=reason)
+        ),
+    )
+    return result.rowcount
+
+
+async def mrr_cents(session: AsyncSession) -> int:
+    stmt = select(func.coalesce(func.sum(Subscription.price_cents), 0)).where(
+        Subscription.status == "active"
+    )
+    return int((await session.execute(stmt)).scalar_one())
+
+
+async def active_subscription_count(session: AsyncSession) -> int:
+    stmt = select(func.count()).select_from(Subscription).where(Subscription.status == "active")
+    return int((await session.execute(stmt)).scalar_one())
+
+
+async def churn_counts_since(session: AsyncSession, *, since: datetime) -> tuple[int, int]:
+    """``(voluntary, involuntary)`` churn counts since ``since`` -- returned
+    together since every caller that wants one plausibly wants both."""
+    stmt = (
+        select(Subscription.churn_kind, func.count())
+        .where(Subscription.churned_at.is_not(None), Subscription.churned_at >= since)
+        .group_by(Subscription.churn_kind)
+    )
+    counts = {kind: int(count) for kind, count in (await session.execute(stmt)).all()}
+    return counts.get("voluntary", 0), counts.get("involuntary", 0)
+
+
+async def churn_rate(session: AsyncSession, *, since: datetime) -> float:
+    """A simplified approximation, not a textbook cohort-based calculation: of
+    every subscription active right now plus everyone who churned in the
+    window, what fraction churned. `ideas`' own per-dimension columns (Phase 4)
+    and this metric share the same honest limitation -- good enough at the
+    volumes this factory will plausibly see for a long time, not a promise of
+    statistical rigor."""
+    voluntary, involuntary = await churn_counts_since(session, since=since)
+    churned = voluntary + involuntary
+    active = await active_subscription_count(session)
+    denominator = active + churned
+    return round(churned / denominator, 4) if denominator else 0.0
+
+
+async def churning_products(session: AsyncSession, *, since: datetime) -> list[str]:
+    """Distinct product ids with at least one churned subscription (either
+    kind) since ``since`` -- feeds ``FactorySnapshot.churning_products``, the
+    Orchestrator's own "something is bleeding customers" sense."""
+    stmt = (
+        select(Subscription.product_id)
+        .where(
+            Subscription.product_id.is_not(None),
+            Subscription.churned_at.is_not(None),
+            Subscription.churned_at >= since,
+        )
+        .distinct()
+    )
+    return [str(pid) for pid in (await session.execute(stmt)).scalars().all()]
+
+
+async def unremembered_churned_subscriptions(session: AsyncSession) -> list[Subscription]:
+    """Churned subscriptions `finance/churn.py::write_churn_lessons` has not
+    yet written a memory for -- see `Subscription.memory_written_at`'s own
+    comment for why this is a one-shot marker, not a rolling time window."""
+    stmt = select(Subscription).where(
+        Subscription.churn_kind.is_not(None), Subscription.memory_written_at.is_(None)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def mark_churn_memory_written(session: AsyncSession, subscription_id: str) -> None:
+    await session.execute(
+        update(Subscription)
+        .where(Subscription.id == subscription_id)
+        .values(memory_written_at=func.now())
+    )
 
 
 # --------------------------------------------------------------------- interrupts

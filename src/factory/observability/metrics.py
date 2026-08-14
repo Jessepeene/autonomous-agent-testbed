@@ -7,6 +7,7 @@ the /metrics endpoint and the maintenance agent.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
@@ -28,6 +29,15 @@ class FactoryMetrics:
     balance_cents: int = 0
     reinvest_pool_cents: int = 0
     llm_spend_usd_24h: float = 0.0
+    mrr_cents: int = 0
+    active_subscriptions: int = 0
+    #: 30-day trailing window, matching `churning_products`' own window in
+    #: `orchestrator.py::build_snapshot` -- see `repository.churn_rate`'s own
+    #: docstring for why this is a simplified approximation, not a cohort-based
+    #: calculation.
+    churn_rate_30d: float = 0.0
+    involuntary_churn_30d: int = 0
+    voluntary_churn_30d: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -58,6 +68,9 @@ async def collect(session: AsyncSession) -> FactoryMetrics:
         ).scalar_one()
     )
 
+    since_30d = datetime.now(UTC) - timedelta(days=30)
+    voluntary_30d, involuntary_30d = await repository.churn_counts_since(session, since=since_30d)
+
     return FactoryMetrics(
         tasks_by_status=await _counts(session, Task.status, Task),
         products_by_status=await _counts(session, Product.status, Product),
@@ -77,4 +90,9 @@ async def collect(session: AsyncSession) -> FactoryMetrics:
         balance_cents=balance,
         reinvest_pool_cents=pool,
         llm_spend_usd_24h=await total_usd(session),
+        mrr_cents=await repository.mrr_cents(session),
+        active_subscriptions=await repository.active_subscription_count(session),
+        churn_rate_30d=await repository.churn_rate(session, since=since_30d),
+        involuntary_churn_30d=involuntary_30d,
+        voluntary_churn_30d=voluntary_30d,
     )

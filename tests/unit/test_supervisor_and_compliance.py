@@ -47,6 +47,7 @@ def _snapshot(**overrides: Any) -> orchestrator.FactorySnapshot:
         "open_interrupts": 0,
         "spend_limit_cents": 0,
         "dry_run": True,
+        "churning_products": [],
     }
     base.update(overrides)
     return orchestrator.FactorySnapshot(**base)

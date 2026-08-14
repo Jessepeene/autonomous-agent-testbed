@@ -160,6 +160,21 @@ CATALOGUE: tuple[MaintenanceItem, ...] = (
     # person's email, not evidence -- data minimisation, same instinct as
     # prune-memory above. Deterministic, no LLM call -- handled by a dedicated
     # branch in `engines/maintenance.py::run()`.
+    # --- subscription churn -------------------------------------------------------
+    # Deterministic memory-writing plus a GROWTH_ANALYST spawn, both handled by a
+    # dedicated branch in `engines/maintenance.py::run()` -- see
+    # `finance/churn.py`. Deliberately not triggered from the webhook handler that
+    # first learns of a churn; see that module's own docstring for why.
+    MaintenanceItem(
+        slug="review-churn",
+        objective=(
+            "Write a niche-level lesson for any subscription churn not yet recorded, "
+            "then have the growth analyst review any product that has lost a customer "
+            "recently and act if the data justifies it."
+        ),
+        engine=EngineName.FINANCE,
+        cadence_hours=24,
+    ),
     MaintenanceItem(
         slug="expire-unconfirmed-signals",
         objective=(

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -150,6 +150,9 @@ async def build_snapshot(session: AsyncSession, ctx: FactoryContext) -> FactoryS
         open_interrupts=open_interrupts,
         spend_limit_cents=await budget.get_spend_limit(session),
         dry_run=ctx.dry_run,
+        churning_products=await repository.churning_products(
+            session, since=datetime.now(UTC) - timedelta(days=30)
+        ),
     )
 
 

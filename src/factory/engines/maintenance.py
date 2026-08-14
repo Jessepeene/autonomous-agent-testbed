@@ -84,6 +84,10 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
             f"supervisor/audit: {count} orphaned approved idea(s) found, "
             f"scoring contract drift: {drift}"
         )
+    if slug == "review-churn":
+        from factory.engines.finance.churn import review_churn
+
+        return await review_churn(ctx, session, task)
     if slug == "expire-unconfirmed-signals":
         from datetime import timedelta
 

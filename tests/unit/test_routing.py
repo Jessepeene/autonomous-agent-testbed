@@ -35,6 +35,7 @@ def _snapshot(**overrides: Any) -> routing.FactorySnapshot:
         "open_interrupts": 0,
         "spend_limit_cents": 0,
         "dry_run": True,
+        "churning_products": [],
     }
     base.update(overrides)
     return routing.FactorySnapshot(**base)
@@ -64,6 +65,15 @@ def test_process_lifetime_constants_are_excluded_from_the_fingerprint() -> None:
 def test_dev_capacity_headroom_is_reflected_in_the_fingerprint() -> None:
     a = _snapshot(active_dev_products=0, max_concurrent_builds=2)
     b = _snapshot(active_dev_products=1, max_concurrent_builds=2)
+    assert routing.fingerprint(a) != routing.fingerprint(b)
+
+
+def test_new_churn_is_reflected_in_the_fingerprint() -> None:
+    """A product starting to churn is exactly the kind of decision-relevant
+    change that should end a repeat streak and prompt fresh deliberation --
+    see churning_products' own comment on FactorySnapshot."""
+    a = _snapshot(churning_products=[])
+    b = _snapshot(churning_products=["prod-1"])
     assert routing.fingerprint(a) != routing.fingerprint(b)
 
 
