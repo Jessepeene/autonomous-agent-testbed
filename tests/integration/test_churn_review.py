@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from factory.engines.finance.churn import review_churn, write_churn_lessons
@@ -28,7 +29,7 @@ from factory.memory import store as memory_store
 from factory.sandbox.disabled import DisabledSandbox
 from factory.settings import EngineName, Settings
 from factory.state import repository
-from factory.state.orm import Base, Task, new_id
+from factory.state.orm import Base, Memory, Task, new_id
 from factory.state.schemas import ScoredIdea, TaskKind, TaskStatus
 from factory.supervisor.context import FactoryContext
 
@@ -174,21 +175,25 @@ async def test_involuntary_and_voluntary_churn_get_distinctly_worded_lessons(
     await session.commit()
 
     assert written == 2
-    scopes = memory_store.scopes_for(engine=EngineName.DISCOVERY)
-    # Query on the exact niche string, not generic words -- tokenize()'s regex
-    # includes hyphens within a token, so "involuntary-churn-niche" is one
-    # distinctive token, giving an unambiguous match regardless of how the
-    # surrounding prose happens to be worded.
-    involuntary_recalled = await memory_store.recall(
-        session, query="involuntary-churn-niche", scopes=scopes
+    # Query the Memory table directly rather than through memory_store.recall():
+    # recall()'s lexical relevance score is a Jaccard *ratio* over the whole
+    # content, so a single matching token (even a distinctive hyphenated one)
+    # against ~35 other tokens in a full sentence can land below
+    # MIN_RELEVANCE even though the token is genuinely present -- recall()'s
+    # threshold is tuned for "is this plausibly relevant to a real query", not
+    # "assert this exact content was written", which is what this test needs.
+    scope = memory_store.scope_for(engine=EngineName.DISCOVERY)
+    rows = (
+        (
+            await session.execute(
+                select(Memory).where(Memory.scope == scope, Memory.superseded_at.is_(None))
+            )
+        )
+        .scalars()
+        .all()
     )
-    voluntary_recalled = await memory_store.recall(
-        session, query="voluntary-churn-niche", scopes=scopes
-    )
-    involuntary_lesson = next(
-        m for m in involuntary_recalled if "involuntary-churn-niche" in m.content
-    )
-    voluntary_lesson = next(m for m in voluntary_recalled if "voluntary-churn-niche" in m.content)
+    involuntary_lesson = next(m for m in rows if "involuntary-churn-niche" in m.content)
+    voluntary_lesson = next(m for m in rows if "voluntary-churn-niche" in m.content)
     assert "involuntarily" in involuntary_lesson.content
     assert "payment failure" in involuntary_lesson.content
     assert "voluntarily" in voluntary_lesson.content
