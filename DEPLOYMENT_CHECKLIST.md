@@ -2933,3 +2933,59 @@ pre-existing Windows path-separator failures, unrelated). Scratch-Postgres:
 then the full suite, 1004 passed. Deployed live: committed, transferred via
 `git archive HEAD`, image rebuilt (no migration needed, no schema change),
 service restarted. `/health` returns 200, boot log clean.
+
+**Live, end to end**: with the campaign approval now actually reaching
+Telegram, replied APPROVE. `sync_decisions()` picked it up correctly. The
+`SEND_OUTREACH` task's own 1-hour recheck interval was manually shortened
+(`not_before` cleared directly in the DB, test-only) twice during this session
+purely to observe the outcome sooner — no application logic changed for that.
+
+## The orchestrator kept routing to Development on a queue it had already emptied — 2026-08-14
+
+Watching the live factory move (no new harvests, just observing the natural
+tick loop) surfaced a second real bug: 20 consecutive ticks over 5 minutes, on
+every single one the Supervisor's LLM consultation decided "route to
+development — an approved idea is waiting to be built," and on every single
+one, nothing actually started. Meanwhile Discovery had 3 real pending tasks
+and Marketing had the outreach send from the campaign-approval test above,
+both sitting untouched.
+
+**Root cause**: `approved_ideas_waiting` (`orchestrator.py::build_snapshot`)
+counts products whose status isn't `retired` or `live` — and `VALIDATING`
+(landing page live, gathering signals, no MVP code yet by design) is
+deliberately included in that count, per `test_orchestrator_snapshot.py`'s
+own `test_a_product_still_in_progress_counts_as_waiting`. That's not the bug;
+it's intentional. The actual gap was one layer up, in `decide()`
+(`supervisor/graph.py` calls this every tick): once the model was consulted,
+its `ROUTE` decision was returned as-is, with no check against the snapshot's
+own `pending_by_engine` counts — so the model could confidently route to
+Development while `pending_by_engine['development']` was provably `0`, and
+nothing would catch it. Once the identical stuck state persisted long enough,
+`deliberation_reason`'s own "stalled" trigger kept re-consulting the model
+every tick to try to break the loop — but re-asking cannot fix a
+*consistently* wrong judgement, only a genuinely undecided one, so it just
+repeated the same wrong answer instead.
+
+**Fix**: after a model consultation, `decide()` now rejects a `ROUTE` to an
+engine with zero pending tasks and falls back to the deterministic priority
+order instead — emptiness is a fact the model cannot be right or wrong about.
+Two new tests: a route to an eligible-but-empty engine is rejected in favor
+of the deterministic answer, and a route to an engine that genuinely has
+queued work still passes through unchanged (the guard must not become a
+blanket veto on every model judgement call).
+
+**Verified**: local ruff/format/mypy clean, local unit suite green (1006
+including two new tests; same two pre-existing Windows failures, unrelated).
+Scratch-Postgres: full suite, 1006 passed. Deployed live: committed,
+transferred via `git archive HEAD`, image rebuilt (no migration needed),
+service restarted. `/health` returns 200.
+
+**Confirmed live, immediately**: the very first tick after restart proposed
+the exact same bad route ("An approved idea is waiting to be built... routing
+to development"), and this time the new guard caught it
+(`orchestrator.route_to_empty_engine`) and fell back to Marketing, which had
+real queued work. The full chain moved for the first time in this session:
+Marketing claimed the stuck `SEND_OUTREACH` task, composed real per-lead
+copy for the 3 seeded test leads, and correctly stopped at the dry-run gate
+(3 attempted, 0 sent, 3 suppressed) — then Discovery and Compliance each
+picked up their own real backlog on the following ticks.
