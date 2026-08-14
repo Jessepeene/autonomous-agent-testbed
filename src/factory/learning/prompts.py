@@ -14,6 +14,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from factory.learning import store
 from factory.learning.allowlist import default_metric_for
+from factory.logging import get_logger
+
+log = get_logger(__name__)
 
 
 async def get_prompt(session: AsyncSession, *, key: str, default: str) -> tuple[str, str]:
@@ -37,10 +40,30 @@ async def get_scoring_weights(
     session: AsyncSession, *, key: str, default: dict[str, float]
 ) -> tuple[dict[str, float], str]:
     """Returns ``(weights, tunable_parameter_id)`` — the trial version if one is
-    currently running for this key, otherwise the active version."""
+    currently running for this key, otherwise the active version.
+
+    Guards against a served row whose dimension set doesn't match ``default``'s —
+    e.g. a schema change (new scoring dimension) shipped without its migration ever
+    running against this database. Falls back to the code default rather than
+    raising: a dimension-mismatched weights dict would silently zero out every
+    dimension `weighted_score` can't find (``dict.get(dim, 0.0)``), corrupting every
+    score computed from it, and Discovery must degrade, never crash, on a contract
+    mismatch it didn't cause. See `supervisor.audit.check_scoring_contract_drift`
+    for the alert this same mismatch also raises.
+    """
     row = await store.get_serving(session, key)
     if row is not None:
-        return {str(k): float(v) for k, v in row.value.items()}, row.id
+        served = {str(k): float(v) for k, v in row.value.items()}
+        if set(served) != set(default):
+            log.error(
+                "learning.scoring_weights_contract_drift",
+                key=key,
+                tunable_parameter_id=row.id,
+                served_dimensions=sorted(served),
+                expected_dimensions=sorted(default),
+            )
+            return dict(default), row.id
+        return served, row.id
     version_id = await store.bootstrap_active(
         session,
         kind="SCORING_WEIGHTS",

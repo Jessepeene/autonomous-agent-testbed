@@ -78,6 +78,74 @@ async def test_a_second_read_returns_the_stored_value_not_the_default(
     assert text == "original"
 
 
+# --- get_scoring_weights: dimension-mismatch guardrail (Phase 4) -------------------
+#
+# Added when ScoredIdea gained a 5th weighted dimension (defensibility):
+# `learning/prompts.py::get_prompt`/`get_scoring_weights` serve whatever's in
+# tunable_parameters with no re-sync path, so a database that still has an old
+# 4-key SCORING_WEIGHTS row (from before 0023_idea_defensibility rewrote it, or a
+# database that migration was somehow never run against) must not silently serve
+# those stale weights forever -- `weighted_score`'s `weights.get(dim, 0.0)` would
+# zero out defensibility for every idea without anyone deciding that.
+
+_WEIGHTS_KEY = "factory.engines.discovery.score:SCORING_WEIGHTS"
+
+
+async def test_get_scoring_weights_serves_a_matching_row_unchanged(
+    session: AsyncSession,
+) -> None:
+    from factory.learning.prompts import get_scoring_weights
+    from factory.state.schemas import ScoredIdea
+
+    default = ScoredIdea.default_weights()
+    await store.bootstrap_active(
+        session,
+        kind="SCORING_WEIGHTS",
+        key=_WEIGHTS_KEY,
+        value=default,
+        created_by="bootstrap",
+        target_metric="idea_survival_rate",
+    )
+    await session.commit()
+
+    weights, _ = await get_scoring_weights(session, key=_WEIGHTS_KEY, default=default)
+
+    assert weights == default
+
+
+async def test_get_scoring_weights_falls_back_on_a_dimension_mismatch(
+    session: AsyncSession,
+) -> None:
+    """A row bootstrapped before defensibility existed -- exactly what a database
+    would still have if 0023_idea_defensibility's rewrite were somehow skipped."""
+    from factory.learning.prompts import get_scoring_weights
+    from factory.state.schemas import ScoredIdea
+
+    old_default = {
+        "pain_severity": 0.3,
+        "willingness_to_pay": 0.3,
+        "adoption_ease": 0.25,
+        "build_feasibility": 0.15,
+    }
+    await store.bootstrap_active(
+        session,
+        kind="SCORING_WEIGHTS",
+        key=_WEIGHTS_KEY,
+        value=old_default,
+        created_by="bootstrap",
+        target_metric="idea_survival_rate",
+    )
+    await session.commit()
+
+    new_default = ScoredIdea.default_weights()
+    weights, tunable_parameter_id = await get_scoring_weights(
+        session, key=_WEIGHTS_KEY, default=new_default
+    )
+
+    assert weights == new_default  # the code default, not the stale served row
+    assert tunable_parameter_id is not None  # still identifies the drifted row
+
+
 async def test_concurrent_bootstrap_creates_only_one_row(session: AsyncSession) -> None:
     """Simulates the race directly at the store level: two bootstrap attempts for the
     same key, the second must observe the first's row rather than erroring or

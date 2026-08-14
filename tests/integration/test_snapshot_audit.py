@@ -35,7 +35,7 @@ from factory.settings import EngineName, Settings
 from factory.state import repository
 from factory.state.orm import Base, Interrupt, Task, new_id
 from factory.state.schemas import InterruptReason, ScoredIdea, TaskKind, TaskStatus
-from factory.supervisor.audit import check_approved_idea_orphans
+from factory.supervisor.audit import check_approved_idea_orphans, check_scoring_contract_drift
 from factory.supervisor.context import FactoryContext
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -162,6 +162,88 @@ async def test_check_does_not_duplicate_an_already_open_interrupt(
     assert len(interrupts) == 1  # ...but only one open interrupt exists
 
 
+# --- supervisor/audit.py::check_scoring_contract_drift (Phase 4) -----------------
+
+_WEIGHTS_KEY = "factory.engines.discovery.score:SCORING_WEIGHTS"
+
+
+async def test_scoring_check_is_healthy_when_never_bootstrapped(session: AsyncSession) -> None:
+    """No SCORING_WEIGHTS row at all yet -- nothing has drifted from anything."""
+    assert await check_scoring_contract_drift(session) is False
+    assert (await session.execute(select(Interrupt))).scalars().all() == []
+
+
+async def test_scoring_check_is_healthy_when_dimensions_match(session: AsyncSession) -> None:
+    from factory.learning import store as learning_store
+
+    await learning_store.bootstrap_active(
+        session,
+        kind="SCORING_WEIGHTS",
+        key=_WEIGHTS_KEY,
+        value=ScoredIdea.default_weights(),
+        created_by="bootstrap",
+        target_metric="idea_survival_rate",
+    )
+    await session.flush()
+
+    assert await check_scoring_contract_drift(session) is False
+    assert (await session.execute(select(Interrupt))).scalars().all() == []
+
+
+async def test_scoring_check_flags_a_dimension_mismatch(session: AsyncSession) -> None:
+    """The exact scenario this check exists for: a row that predates the
+    defensibility dimension, still being served."""
+    from factory.learning import store as learning_store
+
+    old_default = {
+        "pain_severity": 0.3,
+        "willingness_to_pay": 0.3,
+        "adoption_ease": 0.25,
+        "build_feasibility": 0.15,
+    }
+    await learning_store.bootstrap_active(
+        session,
+        kind="SCORING_WEIGHTS",
+        key=_WEIGHTS_KEY,
+        value=old_default,
+        created_by="bootstrap",
+        target_metric="idea_survival_rate",
+    )
+    await session.flush()
+
+    drifted = await check_scoring_contract_drift(session)
+
+    assert drifted is True
+    interrupts = (await session.execute(select(Interrupt))).scalars().all()
+    assert len(interrupts) == 1
+    assert interrupts[0].reason == InterruptReason.DATA_INTEGRITY.value
+    assert "defensibility" in interrupts[0].detail
+
+
+async def test_scoring_check_does_not_duplicate_an_already_open_interrupt(
+    session: AsyncSession,
+) -> None:
+    from factory.learning import store as learning_store
+
+    await learning_store.bootstrap_active(
+        session,
+        kind="SCORING_WEIGHTS",
+        key=_WEIGHTS_KEY,
+        value={"pain_severity": 1.0},
+        created_by="bootstrap",
+        target_metric="idea_survival_rate",
+    )
+    await session.flush()
+
+    first = await check_scoring_contract_drift(session)
+    second = await check_scoring_contract_drift(session)
+
+    assert first is True
+    assert second is True
+    interrupts = (await session.execute(select(Interrupt))).scalars().all()
+    assert len(interrupts) == 1
+
+
 # --- engines/maintenance.py dispatch -------------------------------------------------
 
 
@@ -204,3 +286,4 @@ async def test_maintenance_run_dispatches_the_slug_without_any_llm_call(
     summary = await run_maintenance(_ctx(workspace_root=tmp_path), session, _maintenance_task())
 
     assert "1 orphaned approved idea" in summary
+    assert "scoring contract drift: False" in summary  # no SCORING_WEIGHTS row seeded here

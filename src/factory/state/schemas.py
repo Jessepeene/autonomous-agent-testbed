@@ -203,17 +203,57 @@ class IdeaBatch(Contract):
     ideas: list[GeneratedIdea] = Field(default_factory=list, max_length=25)
 
 
+class PlatformDependency(StrEnum):
+    """How much the idea's core function depends on one third-party platform --
+    informational only in Phase 4, never gated or weighted. Surfaced so the
+    distribution can be observed for a cycle before anyone hard-codes a rule
+    about it; `unknown` represents "the evidence genuinely doesn't say", never
+    a forced guess."""
+
+    UNKNOWN = "unknown"
+    NONE = "none"
+    OPTIONAL = "optional"
+    REQUIRED = "required"
+
+
+class ReplacementMode(StrEnum):
+    """Whether the idea displaces an existing tool/process, sits alongside one,
+    or only observes -- informational only, same reasoning as
+    `PlatformDependency` above."""
+
+    UNKNOWN = "unknown"
+    REPLACES = "replaces"
+    AUGMENTS = "augments"
+    OBSERVES = "observes"
+
+
 class ScoredIdea(Contract):
     #: The historical fixed weights, kept as the default for `.score` so every
     #: existing caller that never heard of the learning loop keeps behaving exactly
     #: as before. `discovery/graph.py` is the only caller that fetches tuned weights
-    #: and calls `weighted_score()` directly instead.
+    #: and calls `weighted_score()` directly instead. Sums to 1.0 -- `SCORE_THRESHOLD`
+    #: (`discovery/score.py`) is a bare constant calibrated against that, not derived
+    #: from the weights, so a vector that doesn't sum to 1.0 silently changes what the
+    #: threshold means.
     _DEFAULT_WEIGHTS: ClassVar[dict[str, float]] = {
-        "pain_severity": 0.3,
-        "willingness_to_pay": 0.3,
-        "adoption_ease": 0.25,
-        "build_feasibility": 0.15,
+        "pain_severity": 0.25,
+        "willingness_to_pay": 0.25,
+        "adoption_ease": 0.20,
+        "build_feasibility": 0.12,
+        "defensibility": 0.18,
     }
+
+    #: Single source of truth for which fields are weighted-scored, in what order
+    #: they're summed. `weighted_score` loops over this instead of a hardcoded sum
+    #: so a future dimension change touches one place, not three (the field list,
+    #: the prompt, and the formula used to silently drift apart before this).
+    SCORE_DIMENSIONS: ClassVar[tuple[str, ...]] = (
+        "pain_severity",
+        "willingness_to_pay",
+        "build_feasibility",
+        "adoption_ease",
+        "defensibility",
+    )
 
     problem_statement: str = Field(min_length=20, max_length=800)
     target_niche: str = Field(min_length=3, max_length=200)
@@ -228,9 +268,29 @@ class ScoredIdea(Contract):
     #: culture, compliance sign-off, or low tech adoption makes a self-serve sale
     #: implausible regardless of how strong the other three scores are (construction,
     #: healthcare, and government are common low-scoring examples). Required, not
-    #: defaulted, like the other three score dimensions: it needs the discriminator
-    #: to actually reason about it for every idea, not silently skip it.
+    #: defaulted, like the other three original score dimensions: it needs the
+    #: discriminator to actually reason about it for every idea, not silently skip it.
     adoption_ease: Annotated[float, Field(ge=0.0, le=1.0)]
+    #: Placed immediately before `defensibility` so the model commits its reasoning
+    #: to the context window (proprietary data, workflow lock-in, switching cost)
+    #: before the constrained numeric token -- auto-regressive generation is
+    #: strictly left-to-right, so a bare float with no preceding justification is
+    #: more likely to collapse to a safe average under constrained decoding.
+    #: Defaulted, like `defensibility` itself, for the same reason: a stale served
+    #: prompt that doesn't ask for it must not turn into a hard schema failure.
+    defensibility_reasoning: str = Field(default="", max_length=800)
+    #: The 5th weighted dimension. Defaulted (unlike `adoption_ease` above) rather
+    #: than required: `learning/prompts.py::get_prompt` serves whatever's in the DB
+    #: with no re-sync path, so a stale served prompt that never asks for this field
+    #: would otherwise throw `SchemaViolation` on every discriminate() call --
+    #: Discovery dies silently. Defaulted, a stale prompt just degrades every idea's
+    #: defensibility to 0.0, which fails safe (almost nothing clears the threshold)
+    #: instead of failing hard.
+    defensibility: Annotated[float, Field(ge=0.0, le=1.0)] = 0.0
+    #: Informational, never gated or weighted -- see `PlatformDependency`/
+    #: `ReplacementMode`'s own docstrings for why.
+    platform_dependency: PlatformDependency = PlatformDependency.UNKNOWN
+    replacement_mode: ReplacementMode = ReplacementMode.UNKNOWN
     rejection_reason: str | None = None
     #: Self-serve / PLG constraint inputs (see `discovery.score.passes_plg_constraint`).
     #: Defaulted rather than required so every existing caller that predates this
@@ -250,10 +310,7 @@ class ScoredIdea(Contract):
 
     def weighted_score(self, weights: dict[str, float]) -> float:
         return round(
-            (self.pain_severity * weights.get("pain_severity", 0.0))
-            + (self.willingness_to_pay * weights.get("willingness_to_pay", 0.0))
-            + (self.build_feasibility * weights.get("build_feasibility", 0.0))
-            + (self.adoption_ease * weights.get("adoption_ease", 0.0)),
+            sum(float(getattr(self, dim)) * weights.get(dim, 0.0) for dim in self.SCORE_DIMENSIONS),
             4,
         )
 

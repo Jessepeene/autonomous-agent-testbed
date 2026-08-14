@@ -259,6 +259,68 @@ async def test_upsert_idea_defaults_evidence_count_to_zero(session: AsyncSession
     assert validated.evidence_count == 0
 
 
+async def test_upsert_idea_persists_the_per_dimension_score_breakdown(
+    session: AsyncSession,
+) -> None:
+    """Phase 4: `ideas` gained per-dimension columns behind the blended `score`
+    specifically so a future weights change can be backtested against real
+    historical ideas -- this is the write side of that, and the read-back
+    confirms `upsert_idea` doesn't silently drop the new fields the way it would
+    have if the new columns existed but nothing wrote to them."""
+    from factory.state.orm import Idea
+    from factory.state.schemas import PlatformDependency, ReplacementMode, ScoredIdea
+
+    idea = ScoredIdea(
+        problem_statement="Bookkeepers reconcile invoices by hand every single week.",
+        target_niche="Bookkeepers at small Dutch accounting firms (defensibility case)",
+        source_url="https://example.test/thread",
+        monetization_hypothesis="EUR 49/month per seat, bought after the first close.",
+        pain_severity=0.8,
+        willingness_to_pay=0.7,
+        build_feasibility=0.6,
+        adoption_ease=0.8,
+        defensibility_reasoning="Accumulates reconciliation history per client over time.",
+        defensibility=0.65,
+        platform_dependency=PlatformDependency.OPTIONAL,
+        replacement_mode=ReplacementMode.REPLACES,
+    )
+
+    idea_id = await repository.upsert_idea(session, idea, score=idea.score)
+    assert idea_id is not None
+    await session.flush()
+
+    row = await session.get(Idea, idea_id)
+
+    assert row is not None
+    assert row.pain_severity == 0.8
+    assert row.willingness_to_pay == 0.7
+    assert row.build_feasibility == 0.6
+    assert row.adoption_ease == 0.8
+    assert row.defensibility == 0.65
+    assert row.platform_dependency == "optional"
+    assert row.replacement_mode == "replaces"
+
+
+async def test_upsert_idea_leaves_per_dimension_columns_null_for_a_defaulted_idea(
+    session: AsyncSession,
+) -> None:
+    """A `ScoredIdea` built without ever hearing about defensibility (every
+    pre-Phase-4 test and caller) must still upsert cleanly -- the columns just
+    hold whatever the defaulted field values are, not garbage or a crash."""
+    from factory.state.orm import Idea
+
+    idea_id = await repository.upsert_idea(session, _scored_idea())
+    assert idea_id is not None
+    await session.flush()
+
+    row = await session.get(Idea, idea_id)
+
+    assert row is not None
+    assert row.defensibility == 0.0
+    assert row.platform_dependency == "unknown"
+    assert row.replacement_mode == "unknown"
+
+
 async def test_lead_insert_drops_extraneous_fields(session: AsyncSession) -> None:
     record = await repository.insert_lead(
         session,

@@ -468,6 +468,18 @@ async def upsert_idea(
             evidence_count=evidence_count,
             fingerprint=key,
             status="pending",
+            # Per-dimension breakdown behind `score` -- see the columns' own
+            # comments in state/orm.py for why this enables backtesting future
+            # weight changes. `.value` on the two enum fields, never the member
+            # itself: the column is a plain string, matching every other status
+            # column in this schema.
+            pain_severity=idea.pain_severity,
+            willingness_to_pay=idea.willingness_to_pay,
+            build_feasibility=idea.build_feasibility,
+            adoption_ease=idea.adoption_ease,
+            defensibility=idea.defensibility,
+            platform_dependency=idea.platform_dependency.value,
+            replacement_mode=idea.replacement_mode.value,
         )
         .on_conflict_do_nothing(index_elements=[Idea.fingerprint])
         .returning(Idea.id)

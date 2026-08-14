@@ -51,11 +51,19 @@ class PromptCandidate(Contract):
 
 
 class WeightsCandidate(Contract):
+    #: Field names here must exactly match `ScoredIdea.SCORE_DIMENSIONS` -- see
+    #: `tests/unit/test_learning_maintenance.py`'s parity test. This class can't
+    #: import `SCORE_DIMENSIONS` and generate its fields dynamically (Pydantic
+    #: needs them declared, and dynamic field generation would make every future
+    #: dimension change silently untyped instead of a one-line addition here); the
+    #: parity test exists precisely so the next dimension addition can't add it to
+    #: `ScoredIdea` and forget it here, the way this one very nearly did.
     no_change_recommended: bool
     pain_severity: Annotated[float, Field(ge=0.0, le=1.0)]
     willingness_to_pay: Annotated[float, Field(ge=0.0, le=1.0)]
     build_feasibility: Annotated[float, Field(ge=0.0, le=1.0)]
     adoption_ease: Annotated[float, Field(ge=0.0, le=1.0)]
+    defensibility: Annotated[float, Field(ge=0.0, le=1.0)]
     rationale: str = Field(min_length=20, max_length=1000)
 
     @model_validator(mode="after")
@@ -63,10 +71,10 @@ class WeightsCandidate(Contract):
         """`ScoredIdea.weighted_score` is a plain weighted sum with no normalisation
         by the weights' own total, and `SCORE_THRESHOLD` (0.55) is a fixed constant
         calibrated against weights that sum to 1.0 -- bounding each weight to [0,1]
-        independently is not enough. A proposal like {0.5, 0.5, 0.5, 0.5} (sum 2.0)
-        would roughly double every idea's score, pushing survival rate toward 100%
-        without SCORE_THRESHOLD ever changing, and the resulting trial would look
-        like a clear, statistically significant win with no way for the loop to
+        independently is not enough. A proposal like {0.5, 0.5, 0.5, 0.5, 0.5} (sum
+        2.5) would roughly double every idea's score, pushing survival rate toward
+        100% without SCORE_THRESHOLD ever changing, and the resulting trial would
+        look like a clear, statistically significant win with no way for the loop to
         self-correct once confirmed. Skipped entirely (not renormalised) when it
         recommends no change, since the numeric fields are unused defaults then.
         """
@@ -77,6 +85,7 @@ class WeightsCandidate(Contract):
             + self.willingness_to_pay
             + self.build_feasibility
             + self.adoption_ease
+            + self.defensibility
         )
         if abs(total - 1.0) > 0.02:
             raise ValueError(
@@ -190,6 +199,7 @@ async def propose_mutations(ctx: FactoryContext, session: AsyncSession, task: Ta
                     "willingness_to_pay": weights_candidate.willingness_to_pay,
                     "build_feasibility": weights_candidate.build_feasibility,
                     "adoption_ease": weights_candidate.adoption_ease,
+                    "defensibility": weights_candidate.defensibility,
                 }
             else:
                 prompt_candidate = await ctx.llm.parse(

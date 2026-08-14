@@ -106,6 +106,22 @@ class Idea(Base):
     evidence_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: Per-dimension breakdown behind the blended `score` above -- added in
+    #: 0023_idea_defensibility so a future weights change can be backtested against
+    #: real historical ideas instead of only the single number that survived every
+    #: weight vector that ever scored it. Nullable: every idea scored before this
+    #: migration has no per-dimension data at all, and backfilling it would mean
+    #: fabricating numbers no discriminator call ever actually produced.
+    pain_severity: Mapped[float | None] = mapped_column(Float)
+    willingness_to_pay: Mapped[float | None] = mapped_column(Float)
+    build_feasibility: Mapped[float | None] = mapped_column(Float)
+    adoption_ease: Mapped[float | None] = mapped_column(Float)
+    defensibility: Mapped[float | None] = mapped_column(Float)
+    #: Informational only -- see `schemas.PlatformDependency`/`ReplacementMode`.
+    #: Plain strings (matching `status` above), not a native Postgres enum, so a
+    #: future member addition is a Python-side change only.
+    platform_dependency: Mapped[str | None] = mapped_column(String(16))
+    replacement_mode: Mapped[str | None] = mapped_column(String(16))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -113,6 +129,16 @@ class Idea(Base):
     __table_args__ = (
         UniqueConstraint("fingerprint", name="uq_ideas_fingerprint"),
         Index("ix_ideas_queue", "status", "score"),
+        CheckConstraint(
+            "platform_dependency IN ('unknown','none','optional','required') "
+            "OR platform_dependency IS NULL",
+            name="ideas_platform_dependency_valid",
+        ),
+        CheckConstraint(
+            "replacement_mode IN ('unknown','replaces','augments','observes') "
+            "OR replacement_mode IS NULL",
+            name="ideas_replacement_mode_valid",
+        ),
     )
 
 

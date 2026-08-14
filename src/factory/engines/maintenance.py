@@ -73,10 +73,17 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
         count = await remind_stale(session, ctx.notifier, older_than=threshold)
         return f"hitl/remind: {count} stale interrupt(s) reminded"
     if slug == "audit-snapshot-integrity":
-        from factory.supervisor.audit import check_approved_idea_orphans
+        from factory.supervisor.audit import (
+            check_approved_idea_orphans,
+            check_scoring_contract_drift,
+        )
 
         count = await check_approved_idea_orphans(session)
-        return f"supervisor/audit: {count} orphaned approved idea(s) found"
+        drift = await check_scoring_contract_drift(session)
+        return (
+            f"supervisor/audit: {count} orphaned approved idea(s) found, "
+            f"scoring contract drift: {drift}"
+        )
     if slug == "expire-unconfirmed-signals":
         from datetime import timedelta
 

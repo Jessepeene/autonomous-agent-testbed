@@ -20,9 +20,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from factory.hitl import interrupts
 from factory.logging import get_logger
 from factory.state import repository
-from factory.state.schemas import InterruptReason
+from factory.state.schemas import InterruptReason, ScoredIdea
 
 log = get_logger(__name__)
+
+#: Same literal as `discovery/graph.py`/`discovery/score.py`'s own copy -- this
+#: codebase's convention is each module holds its own copy of an allowlist key
+#: string rather than importing another module's private constant across engines.
+_SCORING_WEIGHTS_KEY = "factory.engines.discovery.score:SCORING_WEIGHTS"
 
 
 async def check_approved_idea_orphans(session: AsyncSession) -> int:
@@ -60,3 +65,48 @@ async def check_approved_idea_orphans(session: AsyncSession) -> int:
     )
     log.warning("audit.approved_idea_orphans", count=len(orphans))
     return len(orphans)
+
+
+async def check_scoring_contract_drift(session: AsyncSession) -> bool:
+    """Raise one interrupt if the ``SCORING_WEIGHTS`` row currently serving
+    Discovery doesn't carry every dimension ``ScoredIdea.weighted_score`` expects.
+
+    ``learning/prompts.py::get_scoring_weights`` already guards this at read time
+    by silently falling back to the code default -- correct, since Discovery must
+    degrade rather than crash on a contract mismatch it didn't cause, but silent
+    by design. That silence is exactly what let a stale served prompt turn into an
+    undetected outage the last time this codebase's own risk audit found one. This
+    is the other half of that fix: the same check, surfaced to a human instead of
+    only ever swallowed.
+    """
+    from factory.learning import store as learning_store
+
+    row = await learning_store.get_serving(session, _SCORING_WEIGHTS_KEY)
+    if row is None:
+        return False  # never bootstrapped yet -- nothing to have drifted from
+
+    served = set(row.value)
+    expected = set(ScoredIdea.SCORE_DIMENSIONS)
+    if served == expected:
+        return False
+
+    detail = (
+        f"The tunable_parameters row currently serving SCORING_WEIGHTS "
+        f"(id={row.id}, status={row.status}) has dimensions {sorted(served)}, but "
+        f"ScoredIdea.SCORE_DIMENSIONS expects {sorted(expected)}.\n\n"
+        "get_scoring_weights() is already falling back to the code default so "
+        "Discovery keeps running, but every idea is being scored against defaults "
+        "rather than whatever this row actually holds -- likely a migration that "
+        "was meant to rewrite this row never ran against this database."
+    )
+    await interrupts.request(
+        session,
+        reason=InterruptReason.DATA_INTEGRITY,
+        subject="SCORING_WEIGHTS dimension mismatch",
+        detail=detail,
+        headline="⚖️ Scoring weights contract drift",
+        reply_hint="No reply needed — informational only, but worth investigating.",
+        needs_reply=False,
+    )
+    log.warning("audit.scoring_contract_drift", tunable_parameter_id=row.id)
+    return True
