@@ -3428,3 +3428,107 @@ pre-existing-test fixes surfaced by scratch-Postgres), transferred via
 `git archive HEAD`, image rebuilt, migration `0024` applied to the live
 database, service restarted. `/health` returns 200, boot log clean, all six
 engines enabled.
+
+## Risk-audit hardening, Phase 6: subscriptions, dunning, and churn — 2026-08-14
+
+Nothing downstream of Stripe ever recognized a subscription as distinct from
+a one-time payment — no MRR, no churn signal, no way for the factory to
+notice a product bleeding customers. Inert until a real recurring sale
+exists (no generated product creates a Stripe Subscription yet — Phase 5
+only wired up a one-time Checkout amount), but the ingestion side is ready
+the moment one does, without another migration in the critical path then.
+
+**External feedback was reviewed across three rounds before building**, each
+adjusted rather than accepted or rejected wholesale:
+- *Round 1*: confirmed the FK-avoidance and append_ledger-invariant-as-test
+  points were already the plan; adopted the `churn_kind`-only-on-`.deleted`
+  refinement and the `.updated`-must-refresh-price nuance, both genuine gaps
+  in the original design's precision, not just restatements of it.
+- *Round 2* (webhook latency): the recommended fix (keep the webhook handler
+  DB-state-only, defer the memory write to the maintenance tick) was
+  adopted, but not for the reason given — `memory_store.remember` is lexical,
+  no LLM call, no vector index (confirmed by re-reading Phase 3's own module
+  docstring), nowhere near a real timeout risk. Adopted instead because
+  every other handler in `finance/webhooks.py` already keeps to that same
+  narrow lane, and introducing the first-ever memory write inside an HTTP
+  handler would be a real architectural departure independent of today's
+  actual latency.
+- *Round 3* (Discovery feedback loop): pushed back on "discard involuntary
+  churn as noise" — a meaningful share of involuntary churn is voluntary
+  churn in disguise (a disengaged customer who never bothers updating a
+  failed card), the factory's niche-level sample sizes are too small to
+  cleanly separate the two anyway, and unilaterally deciding in code what
+  Discovery gets to see would contradict the same "evidence, not an
+  auto-reject" principle already built into Compliance's own memory design
+  (Phase 3c). Adopted instead: both churn kinds write a memory, distinctly
+  worded so the model does the weighing.
+- Adopted outright, no pushback: the zombie-dunning-row fix (a subscription
+  that never recovers and is eventually deleted must still close its open
+  dunning row, not leak it forever).
+
+**Schema (`0025_subscriptions`)**: `customers`/`subscriptions`/
+`dunning_events`, plus `stripe_subscription_id`/`stripe_customer_id` as
+plain nullable columns on `ledger` (not FKs — Stripe webhook delivery order
+across different event types is not guaranteed, and a FK would reject real
+money on a benign race, same reasoning `ledger.product_id` already
+established). `customers`/`subscriptions` store no personal data, mirroring
+`Lead`'s own minimisation stance — MRR/churn math needs only the Stripe ids,
+and the actual PII stays inside Stripe, where GDPR erasure for that person
+already has to happen regardless.
+
+**`finance/webhooks.py`**: `customer.subscription.created/updated/deleted`
+and `invoice.payment_failed` handled as pure state notifications — none of
+them ever call `append_ledger`. `churn_kind` is set exclusively on the
+terminal `.deleted` event, reading `cancellation_details.reason` — never on
+`.updated`, which only means `cancel_at_period_end` was toggled, a
+still-reversible scheduled cancellation Stripe allows a customer to reverse
+before the period ends. `.updated` refreshes `price_cents`/`status` on every
+delivery so `mrr_cents` never silently drifts from reality. Dunning rows
+close on recovery (`invoice.paid`) or on the subscription reaching a
+terminal state (the zombie-row fix) — a customer who never recovers would
+otherwise leak an open row forever.
+
+**`finance/churn.py`**: writes a niche-level Discovery memory for churn,
+deliberately deferred out of the webhook handler's request/response cycle
+(see Round 2 above). New `review-churn` maintenance item (24h cadence)
+spawns the existing `GROWTH_ANALYST` role once per currently-churning
+product — no new role, no new tool, just a churn-motivated reason to look
+with the same agent that already reviews traffic/AB-test state.
+
+**Metrics/autonomy surfacing**: `FactoryMetrics` gains `mrr_cents`,
+`active_subscriptions`, `churn_rate_30d`, `involuntary_churn_30d`,
+`voluntary_churn_30d`. `FactorySnapshot` gains `churning_products`, also
+folded into the routing fingerprint — a product starting to churn is exactly
+the kind of decision-relevant change that should end a repeat streak and
+prompt fresh deliberation, the same reasoning already applied to
+`open_interrupts`/`approved_ideas_waiting`. Before this, the Orchestrator
+had no way to see a product bleeding customers, so it could never choose to
+act on one.
+
+**Verified**: local ruff/mypy clean (same pre-existing, unrelated findings
+noted in every earlier phase). New `test_subscription_lifecycle.py` (18
+tests) covers created/updated/deleted correctness, the `cancel_at_period_end`
+-vs-actual-churn distinction, dunning open/bump/recover/zombie-close, MRR/
+churn metrics, and — the most important test in the phase — an executed
+invariant asserting `append_ledger` is never called for any subscription or
+dunning event (monkeypatched to raise if it is, run across every event
+type). New `test_churn_review.py` (5 tests) covers both churn kinds getting
+distinctly-worded lessons, unattributed churn being skipped-but-marked, the
+`memory_written_at` dedup, and `review_churn` spawning `GROWTH_ANALYST`
+exactly once per churning product. Two real bugs were caught only against
+real Postgres, not locally: a `recall()` Jaccard-relevance false negative
+(a single matching token against a ~35-token sentence can land below
+`MIN_RELEVANCE` even though the token is genuinely present — fixed by
+asserting against the `Memory` table directly instead of through the fuzzy
+lexical-recall heuristic, which was never the right tool for that
+assertion) and a substring collision in the test's own niche names
+(`"involuntary-..."` literally contains `"voluntary-..."`, so the `in` check
+for one matched the other's row). Local unit suite: 840 passed (same two
+pre-existing Windows failures). Scratch-Postgres: full suite, 1144 passed.
+
+**Deployed live**: committed across three commits (the feature, then two
+scratch-Postgres-only test fixes), transferred via `git archive HEAD`, image
+rebuilt, migration `0025` applied to the live database, service restarted.
+`/health` returns 200, boot log clean, all six engines enabled — and the new
+`review-churn` maintenance item was already picked up and enqueued on the
+very first tick after restart.
