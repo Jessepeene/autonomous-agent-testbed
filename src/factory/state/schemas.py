@@ -329,6 +329,12 @@ class ValidatedIdea(BaseModel):
     monetization_hypothesis: str
     score: float
     evidence_count: int = 0
+    #: The discriminator's own self-serve price target (`ScoredIdea.self_serve_price_usd`),
+    #: carried through so codegen can actually charge it instead of the pitch and the
+    #: real Checkout amount silently disagreeing. Defaulted, matching every other
+    #: field the discriminator produces -- an idea scored before this field existed
+    #: has no opinion, not a fabricated one.
+    self_serve_price_usd: float = 0.0
     created_at: datetime | None = None
 
 

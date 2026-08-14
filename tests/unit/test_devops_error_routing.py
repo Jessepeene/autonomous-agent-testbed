@@ -146,7 +146,18 @@ def _no_real_db(monkeypatch: pytest.MonkeyPatch) -> None:
     ) -> None:
         return None
 
+    @dataclass(slots=True)
+    class _FakeIdeaRow:
+        self_serve_price_usd: float = 49.0
+
+    async def fake_get_idea(session: object, idea_id: str) -> _FakeIdeaRow:
+        # Only reached for a real (non-validation) build that got past the
+        # contract gate, right before deploy -- see _verify_and_ship's price
+        # lookup.
+        return _FakeIdeaRow()
+
     monkeypatch.setattr(repository, "set_product_status", fake_set_product_status)
+    monkeypatch.setattr(repository, "get_idea", fake_get_idea)
 
 
 async def test_a_devops_install_failure_raises_devopserror_not_heal(
@@ -315,7 +326,15 @@ async def test_install_and_test_are_separate_containers_that_do_not_share_state(
     assert result == "healed"
     install_call, test_call = sandbox.calls[0], sandbox.calls[1]
     assert "--target=/workspace/.deps" in str(install_call["command"])
-    assert test_call["env"] == {"PYTHONPATH": "/workspace/.deps"}
+    # PRODUCT_ID/STRIPE_API_KEY/PRODUCT_PRICE_CENTS: dummy values so a generated
+    # test that exercises the request path doesn't crash on KeyError -- see
+    # _verify_and_ship's own comment at this env= call.
+    assert test_call["env"] == {
+        "PYTHONPATH": "/workspace/.deps",
+        "PRODUCT_ID": "test-product-id",
+        "STRIPE_API_KEY": "sk_test_dummy",
+        "PRODUCT_PRICE_CENTS": "4900",
+    }
     assert "/workspace/.deps/bin" in str(test_call["command"])
     assert "pytest -q" in str(test_call["command"])
 

@@ -122,6 +122,10 @@ class Idea(Base):
     #: future member addition is a Python-side change only.
     platform_dependency: Mapped[str | None] = mapped_column(String(16))
     replacement_mode: Mapped[str | None] = mapped_column(String(16))
+    #: The discriminator's self-serve price target, carried through to codegen
+    #: (`deploy.py::_runtime_env`) so the real Checkout amount and the pitch agree.
+    #: Defaulted 0.0, matching `ScoredIdea.self_serve_price_usd`'s own default.
+    self_serve_price_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

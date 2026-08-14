@@ -116,6 +116,114 @@ async def test_stripe_key_is_omitted_not_sent_empty_when_unconfigured(
     assert captured["env"]["PRODUCT_ID"] == "prod-123"
 
 
+# --- PRODUCT_PRICE_CENTS (Phase 5) ------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("price_usd", "expected_cents"),
+    [
+        (4.99, 499),
+        (9.99, 999),
+        # The exact case a naive int(price * 100) gets wrong: 19.99 * 100 is
+        # 1998.9999999999998 in IEEE-754 double precision, which truncates to
+        # 1998, not 1999 -- round() first is what makes this exact.
+        (19.99, 1999),
+        (29.99, 2999),
+        (0.0, 0),
+        (100.0, 10000),
+    ],
+)
+def test_price_cents_rounds_rather_than_truncates(price_usd: float, expected_cents: int) -> None:
+    from factory.engines.development.deploy import _price_cents
+
+    assert _price_cents(price_usd) == expected_cents
+
+
+async def test_product_price_cents_is_present_when_a_price_is_given(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_post(self: httpx.AsyncClient, url: str, **kwargs: Any) -> httpx.Response:
+        captured.update(kwargs.get("json") or {})
+        return httpx.Response(
+            200, json={"url": "example.vercel.app", "readyState": "READY"}, request=_REQUEST
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    live = settings.model_copy(update={"vercel_token": "vercel-test-token"})
+
+    await deploy_module.deploy(
+        council=_approved_council(),
+        product_id="prod-123",
+        product_name="Reconciliation Assistant",
+        workspace="product-1",
+        settings=live,
+        dry_run=False,
+        self_serve_price_usd=19.99,
+    )
+
+    assert captured["env"]["PRODUCT_PRICE_CENTS"] == "1999"
+
+
+async def test_product_price_cents_is_absent_for_a_validation_page(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`self_serve_price_usd=None` -- exactly what `_verify_and_ship` passes for a
+    validation landing page, which has no Stripe wiring to control at all."""
+    captured: dict[str, Any] = {}
+
+    async def fake_post(self: httpx.AsyncClient, url: str, **kwargs: Any) -> httpx.Response:
+        captured.update(kwargs.get("json") or {})
+        return httpx.Response(
+            200, json={"url": "example.vercel.app", "readyState": "READY"}, request=_REQUEST
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    live = settings.model_copy(update={"vercel_token": "vercel-test-token"})
+
+    await deploy_module.deploy(
+        council=_approved_council(),
+        product_id="prod-123",
+        product_name="Reconciliation Assistant",
+        workspace="product-1",
+        settings=live,
+        dry_run=False,
+        self_serve_price_usd=None,
+    )
+
+    assert "PRODUCT_PRICE_CENTS" not in captured["env"]
+
+
+async def test_a_zero_price_is_still_a_real_price_not_omitted(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """0.0 is a real, if degenerate, price (an idea scored before this field
+    existed) -- distinct from None, which means "no Stripe wiring at all"."""
+    captured: dict[str, Any] = {}
+
+    async def fake_post(self: httpx.AsyncClient, url: str, **kwargs: Any) -> httpx.Response:
+        captured.update(kwargs.get("json") or {})
+        return httpx.Response(
+            200, json={"url": "example.vercel.app", "readyState": "READY"}, request=_REQUEST
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    live = settings.model_copy(update={"vercel_token": "vercel-test-token"})
+
+    await deploy_module.deploy(
+        council=_approved_council(),
+        product_id="prod-123",
+        product_name="Reconciliation Assistant",
+        workspace="product-1",
+        settings=live,
+        dry_run=False,
+        self_serve_price_usd=0.0,
+    )
+
+    assert captured["env"]["PRODUCT_PRICE_CENTS"] == "0"
+
+
 def test_collect_files_excludes_installed_dependencies(settings: Settings) -> None:
     """.deps is where _verify_and_ship's install step puts dependencies for the
     sandbox test run (development/graph.py). Vercel installs from requirements.txt

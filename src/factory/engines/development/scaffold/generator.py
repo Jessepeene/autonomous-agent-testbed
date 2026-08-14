@@ -30,11 +30,20 @@ The MVP must include, as actual files with real contents:
 - Stripe Checkout billing wiring, reading the key from an environment variable. Every
   Checkout Session you create must set client_reference_id to the exact value of the
   PRODUCT_ID environment variable, read at request time. Never hard-code it, never
-  omit it — it is the only way a payment can be attributed back to this product.
+  omit it — it is the only way a payment can be attributed back to this product. The
+  Checkout Session's price must be read from the PRODUCT_PRICE_CENTS environment
+  variable (an integer number of US cents), also read at request time. Never
+  hard-code a price, and never create your own Stripe Price or Product object with a
+  baked-in amount — the target price given below is context for what to build, not a
+  literal number to embed; the environment variable is the only source of truth for
+  what a customer is actually charged.
 - An analytics beacon: a small inline script on the frontend's page load that POSTs
   JSON {"path": ..., "referrer": ...} to the exact analytics URL given below.
   Fire-and-forget — never block page rendering on it, and never surface a failure
   to the visitor.
+- A standalone privacy.html page describing what data is collected (account details,
+  anything the signup or checkout form asks for) and how it's used, linked from the
+  signup or account page.
 - SEO hygiene on the frontend page: a non-empty <title>, a <meta name="description"
   content="..."> summarising what the product does, Open Graph tags (og:title,
   og:description), a <link rel="canonical"> pointing at the product's own root
@@ -128,6 +137,9 @@ can retry.
 {"path": ..., "referrer": ...} to the exact analytics URL given below. \
 Fire-and-forget — never block page rendering on it, and never surface a failure to \
 the visitor.
+- A standalone privacy.html page stating that the visitor's submitted email is used \
+only to notify them about this product and nothing else, linked from the \
+interest-capture form's page.
 - SEO hygiene: a non-empty <title>, a <meta name="description" content="..."> \
 summarising the pitch, Open Graph tags (og:title, og:description), a \
 <link rel="canonical"> pointing at the page's own root URL, and semantic landmark \
@@ -228,6 +240,9 @@ async def generate_scaffold(
         f"- problem: {idea.problem_statement}\n"
         f"- target niche: {idea.target_niche}\n"
         f"- monetization: {idea.monetization_hypothesis}\n"
+        f"- target self-serve price: ${idea.self_serve_price_usd:.2f}/month (context "
+        f"for what to build -- the actual Checkout amount comes from "
+        f"PRODUCT_PRICE_CENTS at request time, see the system prompt)\n"
         f"- evidence: {idea.source_url}\n\n"
         f'Analytics beacon URL (POST JSON {{"path": ..., "referrer": ...}} here, '
         f"exactly, verbatim): {analytics_url}\n\n"
@@ -290,6 +305,8 @@ async def generate_landing_page(
         f"- problem: {idea.problem_statement}\n"
         f"- target niche: {idea.target_niche}\n"
         f"- monetization: {idea.monetization_hypothesis}\n"
+        f"- target self-serve price: ${idea.self_serve_price_usd:.2f}/month -- the "
+        f"pitch should state this price\n"
         f"- evidence: {idea.source_url}\n\n"
         f'Interest capture URL (POST JSON {{"email": ..., "message": ...}} here, '
         f"exactly, verbatim): {interest_url}\n\n"

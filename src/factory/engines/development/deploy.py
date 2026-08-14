@@ -96,11 +96,34 @@ def _collect_files(workspace: str, settings: Settings) -> list[dict[str, str]]:
     return payload
 
 
-def _runtime_env(product_id: str, settings: Settings) -> dict[str, str]:
+def _price_cents(price_usd: float) -> int:
+    """Rounds rather than truncates -- a bare ``int(price_usd * 100)`` silently
+    undercharges by a cent on plenty of real price points (``19.99 * 100`` is
+    ``1998.9999999999998`` in IEEE-754 double precision, which truncates to 1998,
+    not 1999). ``round()`` on a float with no ``ndigits`` already returns an
+    ``int`` in Python, and makes the float-to-cents conversion exact for every
+    price this system can produce (``self_serve_price_usd`` is capped at
+    100_000.0, nowhere near where round-half-to-even could matter at cent
+    precision)."""
+    return round(price_usd * 100)
+
+
+def _runtime_env(
+    product_id: str, settings: Settings, *, self_serve_price_usd: float | None = None
+) -> dict[str, str]:
     """Every generated product needs to know its own factory-assigned id — it is the
     only way a Stripe event the product creates can ever be attributed back to a
-    product row, since the factory itself never creates the Checkout Session."""
+    product row, since the factory itself never creates the Checkout Session.
+
+    ``self_serve_price_usd`` is ``None`` for a validation landing page (no Stripe
+    wiring at all, per `LANDING_PAGE_SYSTEM` -- there is nothing for
+    PRODUCT_PRICE_CENTS to control) and a real float for every real MVP build, even
+    0.0 for an idea scored before this field existed -- 0.0 is a real, if
+    degenerate, price, not a missing value the caller needs to special-case.
+    """
     env = {"PRODUCT_ID": product_id}
+    if self_serve_price_usd is not None:
+        env["PRODUCT_PRICE_CENTS"] = str(_price_cents(self_serve_price_usd))
     stripe_key = settings.secret("STRIPE_API_KEY")
     if stripe_key:
         env["STRIPE_API_KEY"] = stripe_key
@@ -120,6 +143,7 @@ async def deploy(
     workspace: str,
     settings: Settings,
     dry_run: bool,
+    self_serve_price_usd: float | None = None,
 ) -> DeployResult:
     deploy_requires_approval(council)
 
@@ -156,7 +180,7 @@ async def deploy(
         "files": files,
         "target": "production",
         "projectSettings": {"framework": None},
-        "env": _runtime_env(product_id, settings),
+        "env": _runtime_env(product_id, settings, self_serve_price_usd=self_serve_price_usd),
     }
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:

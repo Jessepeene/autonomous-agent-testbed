@@ -259,6 +259,64 @@ async def test_upsert_idea_defaults_evidence_count_to_zero(session: AsyncSession
     assert validated.evidence_count == 0
 
 
+async def test_self_serve_price_usd_round_trips_through_validated_idea(
+    session: AsyncSession,
+) -> None:
+    """Phase 5: the price the discriminator targeted used to be discarded after
+    the PLG gate -- this is the read side of carrying it through so codegen can
+    actually charge it. Exercised via `next_validated_idea` specifically because
+    that's one of the three `ValidatedIdea` construction sites this phase had to
+    update (`extra="forbid"` makes a partial miss a hard failure, not a silent
+    default)."""
+    from factory.state.schemas import ScoredIdea
+
+    idea = ScoredIdea(
+        problem_statement="Bookkeepers reconcile invoices by hand every single week.",
+        target_niche="Bookkeepers at small Dutch accounting firms (price case)",
+        source_url="https://example.test/thread",
+        monetization_hypothesis="EUR 49/month per seat.",
+        pain_severity=0.8,
+        willingness_to_pay=0.7,
+        build_feasibility=0.6,
+        adoption_ease=0.8,
+        self_serve_price_usd=49.0,
+    )
+    idea_id = await repository.upsert_idea(session, idea)
+    assert idea_id is not None
+    await repository.set_idea_status(session, idea_id, "approved")
+
+    validated = await repository.next_validated_idea(session)
+
+    assert validated is not None
+    assert validated.self_serve_price_usd == 49.0
+
+
+async def test_self_serve_price_usd_defaults_to_zero(session: AsyncSession) -> None:
+    idea_id = await repository.upsert_idea(session, _scored_idea())
+    assert idea_id is not None
+    await repository.set_idea_status(session, idea_id, "approved")
+
+    validated = await repository.next_validated_idea(session)
+
+    assert validated is not None
+    assert validated.self_serve_price_usd == 0.0
+
+
+async def test_get_idea_returns_the_row_by_id(session: AsyncSession) -> None:
+    idea_id = await repository.upsert_idea(session, _scored_idea())
+    assert idea_id is not None
+    await session.flush()
+
+    row = await repository.get_idea(session, idea_id)
+
+    assert row is not None
+    assert row.id == idea_id
+
+
+async def test_get_idea_returns_none_for_an_unknown_id(session: AsyncSession) -> None:
+    assert await repository.get_idea(session, "not-a-real-id") is None
+
+
 async def test_upsert_idea_persists_the_per_dimension_score_breakdown(
     session: AsyncSession,
 ) -> None:

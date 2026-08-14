@@ -480,6 +480,7 @@ async def upsert_idea(
             defensibility=idea.defensibility,
             platform_dependency=idea.platform_dependency.value,
             replacement_mode=idea.replacement_mode.value,
+            self_serve_price_usd=idea.self_serve_price_usd,
         )
         .on_conflict_do_nothing(index_elements=[Idea.fingerprint])
         .returning(Idea.id)
@@ -506,12 +507,22 @@ async def next_validated_idea(session: AsyncSession) -> ValidatedIdea | None:
         monetization_hypothesis=idea.monetization_hypothesis,
         score=idea.score,
         evidence_count=idea.evidence_count,
+        self_serve_price_usd=idea.self_serve_price_usd,
         created_at=idea.created_at,
     )
 
 
 async def set_idea_status(session: AsyncSession, idea_id: str, status: str) -> None:
     await session.execute(update(Idea).where(Idea.id == idea_id).values(status=status))
+
+
+async def get_idea(session: AsyncSession, idea_id: str) -> Idea | None:
+    """A plain row fetch, routed through `repository` (rather than a bare
+    `session.get(Idea, idea_id)` at the call site) so callers stay mockable the
+    same way every other DB access in this module already is -- see
+    `development/graph.py::_verify_and_ship`'s price lookup, exercised in tests
+    that pass no real session at all."""
+    return await session.get(Idea, idea_id)
 
 
 async def prior_verdicts_for_niche(

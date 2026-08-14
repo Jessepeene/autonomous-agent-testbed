@@ -21,6 +21,7 @@ from factory.agents.spawner import SpawnRequest, spawn
 from factory.engines.development import (
     ab_testing,
     bug_council,
+    contract,
     dependencies,
     domain,
     repair,
@@ -89,8 +90,21 @@ MAX_HEAL_CYCLES = 3
 #: edit; `deploy_failure` is not a workspace bug at all; `council_rejection:*` is
 #: plausible future work but the agent cannot re-run the Council, so it would be
 #: editing blind to the only opinion that decides the outcome.
+#: `contract_incomplete`: a codegen contract fact the system prompt asked for but
+#: the generated code doesn't actually satisfy (PRODUCT_PRICE_CENTS never read,
+#: client_reference_id never set, the beacon/interest URL never wired, or the
+#: privacy page missing/unlinked) -- see contract.py. Same shape as
+#: `seo_incomplete`: a small, well-defined addition, and the check is free and
+#: deterministic to re-run after the edit.
 SURGICAL_CATEGORIES = frozenset(
-    {"test_failure", "guided", "seo_incomplete", "growth_seo", "dependency_not_on_pypi"}
+    {
+        "test_failure",
+        "guided",
+        "seo_incomplete",
+        "growth_seo",
+        "dependency_not_on_pypi",
+        "contract_incomplete",
+    }
 )
 
 
@@ -139,6 +153,7 @@ async def _load_idea(session: AsyncSession, idea_id: str) -> ValidatedIdea | Non
         monetization_hypothesis=row.monetization_hypothesis,
         score=row.score,
         evidence_count=row.evidence_count,
+        self_serve_price_usd=row.self_serve_price_usd,
         created_at=row.created_at,
     )
 
@@ -1001,10 +1016,23 @@ async def _verify_and_ship(
     # put those on PATH the way a normal install does; `python -m pytest` would
     # have worked from PYTHONPATH alone, but nothing constrains the model to that
     # form.
+    # PRODUCT_ID/STRIPE_API_KEY/PRODUCT_PRICE_CENTS: every prompt tells the model to
+    # read these "at request time" specifically so a lookup never fires during test
+    # collection -- but that's a prompt convention, not a guarantee. A generated
+    # test that *does* exercise the request path (a real checkout/attribution test,
+    # exactly what a thorough test suite should have) would otherwise crash on
+    # KeyError before ever reaching the contract/SEO checks below, which are
+    # supposed to be the cheapest, earliest signal. Dummy values, not real
+    # credentials -- these tests never make a real network call to Stripe.
     tests = await ctx.sandbox.execute(
         f'export PATH="/workspace/.deps/bin:$PATH"; {test_command}',
         workspace=workspace,
-        env={"PYTHONPATH": "/workspace/.deps"},
+        env={
+            "PYTHONPATH": "/workspace/.deps",
+            "PRODUCT_ID": "test-product-id",
+            "STRIPE_API_KEY": "sk_test_dummy",
+            "PRODUCT_PRICE_CENTS": "4900",
+        },
     )
     if is_devops_error(tests):
         raise DevOpsError(
@@ -1040,6 +1068,23 @@ async def _verify_and_ship(
             category="seo_incomplete",
         )
 
+    # Same reasoning as the SEO check immediately above: no LLM call, so a missing
+    # PRODUCT_PRICE_CENTS read or an unlinked privacy page is caught before ever
+    # paying for Bug Council to review code that was going to heal regardless.
+    missing_contract = contract.missing_contract_requirements(
+        sources, product_id=product_id, is_validation=is_validation
+    )
+    if missing_contract:
+        return await _heal(
+            ctx,
+            session,
+            product_id,
+            "Codegen contract requirements from the system prompt were not met:\n"
+            + "\n".join(f"- {item}" for item in missing_contract),
+            idea_id,
+            category="contract_incomplete",
+        )
+
     try:
         council = await bug_council.convene(ctx, sources, task_id=task_id)
     except bug_council.CouncilUnavailable as exc:
@@ -1061,6 +1106,15 @@ async def _verify_and_ship(
             category=f"council_rejection:{','.join(blocked_by)}",
         )
 
+    # is_validation products have no Stripe wiring at all (LANDING_PAGE_SYSTEM), so
+    # they get no PRODUCT_PRICE_CENTS -- see _runtime_env's own None handling. A
+    # fresh lookup rather than threading the price through every _verify_and_ship
+    # caller: only this one call site needs it, and idea_id is already in scope.
+    price_usd: float | None = None
+    if not is_validation:
+        idea_row = await repository.get_idea(session, idea_id)
+        price_usd = idea_row.self_serve_price_usd if idea_row is not None else None
+
     result = await deploy_module.deploy(
         council=council,
         product_id=product_id,
@@ -1068,6 +1122,7 @@ async def _verify_and_ship(
         workspace=workspace,
         settings=ctx.settings,
         dry_run=ctx.dry_run,
+        self_serve_price_usd=price_usd,
     )
     if not result.ok and result.is_infra:
         # A transport error, missing credential, auth/rate-limit problem, or 5xx

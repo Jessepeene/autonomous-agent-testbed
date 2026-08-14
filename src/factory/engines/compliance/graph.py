@@ -69,6 +69,7 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
         monetization_hypothesis=row.monetization_hypothesis,
         score=row.score,
         evidence_count=row.evidence_count,
+        self_serve_price_usd=row.self_serve_price_usd,
         created_at=row.created_at,
     )
 
