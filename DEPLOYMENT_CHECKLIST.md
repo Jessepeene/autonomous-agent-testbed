@@ -3317,3 +3317,114 @@ Windows failures). Scratch-Postgres: full suite, 1086 passed.
 rebuilt, migration `0023` applied to the live database (confirmed via direct
 `psql` inspection, see above), service restarted. `/health` returns 200,
 boot log clean, all six engines enabled.
+
+## Post-Phase-4 fix: `discriminate()` never scaled `max_tokens` to batch size — 2026-08-14
+
+Found live, not in a test: a 20-idea sample run against the real, deployed
+discriminator (requested to see the new 5-dimension scorer's actual output
+distribution) failed outright on the second attempt at a larger batch with
+`SchemaViolation: gemini hit max_output_tokens before completing the JSON
+object`. `discriminate()` never passed `max_tokens` at all, so every call
+silently used the client's 8192-token default — fine for the old 11-field
+`ScoredIdea`, insufficient for the new 15-field one (two ~800-char free-text
+fields per idea) once a batch grew past a handful of ideas. Real Discovery
+cycles route through this exact same call with no `try`/`except` around it
+in `discovery/graph.py::run()`, so this was a live, uncaught-crash risk on
+any cycle whose generator emitted more than a handful of ideas, not a test
+artifact.
+
+Fixed with `discovery/score.py::_scaled_discriminator_tokens(n)` — the same
+shape as the already-established `compliance/assessor.py::_scaled_batch_tokens`
+precedent, capped at the same 16,384 ceiling that function already trusts as
+safe. `FakeProvider` now records `max_tokens` on every call so this is
+actually testable, not just asserted against the pure scaling function in
+isolation. 5 new tests (`test_discriminator_token_scaling.py`). Local unit
+suite: 811 passed (same two pre-existing Windows failures). Scratch-Postgres:
+full suite, 1091 passed. Deployed live (no migration): committed, image
+rebuilt, service restarted, `/health` returns 200.
+
+**Confirmed fixed**: reran the same 20-idea sample against the fixed live
+code. All 20 scored in one real call (5991 output tokens, comfortably under
+the new cap). Results: 3/20 survive under the new weights vs. 7/20 that
+would have survived under the old ones — the defensibility dimension
+correctly knocked 4 thin-wrapper ideas from survivor to reject, including a
+PDF-to-CSV OCR wrapper explicitly flagged as "commodity... easily replicated
+by OpenAI Vision or AWS Textract," the exact AI-wrapper failure mode this
+dimension exists to catch.
+
+## Risk-audit hardening, Phase 5: pricing flow-through + codegen contract gate — 2026-08-14
+
+`self_serve_price_usd` was reasoned about extensively — it gates the PLG
+constraint, it's part of what the discriminator scores — and then discarded;
+nothing downstream ever read it again, so a generated product's real Stripe
+Checkout amount had no connection to the number the discriminator and
+Compliance already agreed on. Separately, nothing deterministically verified
+that generated code actually implemented the contracts its own system prompt
+asked for (a `client_reference_id` on Checkout sessions, a privacy page) —
+only Bug Council's judgment stood between "the prompt asked for it" and "it's
+actually there."
+
+**External feedback on the plan was reviewed and adjusted before building**,
+not accepted wholesale: a float-to-cents truncation concern was real but its
+own illustrative example (`4.99 * 100`) didn't actually reproduce on real
+Python — `19.99 * 100` does (`1998.9999999999998`, truncates to 1998 not
+1999) and is a far more common real price point, so the fix (round before
+cast) was kept and the example corrected. An AST-parsing suggestion for the
+contract gate was downgraded to a tighter regex after checking `seo.py`'s own
+documented precedent, which deliberately stays to cheap/unambiguous pattern
+matching rather than real parsing. A test-environment-injection concern was
+confirmed real by reading `_verify_and_ship`'s actual test-run call (its
+`env=` carried only `PYTHONPATH`) — but reframed as a pre-existing gap
+already latent for `PRODUCT_ID`/`STRIPE_API_KEY`, not something Phase 5
+introduced, and fixed for all three at once.
+
+**Pricing flow-through**: `ideas` gains `self_serve_price_usd` (migration
+`0024_idea_price`); `ValidatedIdea` carries it through all three construction
+sites (`extra="forbid"` makes a partial miss a hard failure, not a silent
+default). `SYSTEM_PROMPT` now requires the Checkout amount come from a
+`PRODUCT_PRICE_CENTS` environment variable, read at request time, never
+hard-coded — same shape as the existing `client_reference_id`/`PRODUCT_ID`
+contract. `deploy.py::_runtime_env` injects it as integer cents via the new
+`_price_cents()` helper, which rounds before casting.
+
+**The codegen contract gate** (`development/contract.py`) — same
+architectural slot as `seo.py`, right after it (after tests pass, before Bug
+Council convenes): checks `PRODUCT_PRICE_CENTS` is actually read (not just
+named in a comment — the regex requires an actual `os.environ[...]`/
+`os.getenv(...)` call), `client_reference_id` is referenced, the analytics/
+interest beacon is wired to this product's own URL, and a privacy page
+exists and is linked. `is_validation` (already threaded through
+`_verify_and_ship` for the landing-page/real-MVP split) decides which facts
+even apply — a validation page has no Stripe wiring at all by design, so
+checking for it there would false-positive on every single validation build.
+New `contract_incomplete` heal category, added to `SURGICAL_CATEGORIES`. Both
+prompts now also require a standalone `privacy.html` page.
+
+**The test-run environment gap, closed for all three vars**: `_verify_and_ship`'s
+sandboxed test-run `env=` now carries dummy `PRODUCT_ID`/`STRIPE_API_KEY`/
+`PRODUCT_PRICE_CENTS` values. Every prompt says to read these "at request
+time" specifically so a lookup never fires during test collection, but that's
+a prompt convention a model doesn't have to obey perfectly, not a guarantee.
+
+**Verified**: local ruff/mypy clean (same pre-existing, unrelated findings
+noted in every earlier phase). New `test_codegen_contract.py` (16 tests,
+including that a `# TODO: PRODUCT_PRICE_CENTS` comment does *not* satisfy the
+check — the whole point of requiring an actual read pattern). New price-cents
+tests in `test_deploy_env.py`, including the corrected `19.99` truncation
+case. Fixing this phase's own contract gate broke three pre-existing test
+files that share `_verify_and_ship`'s pipeline for unrelated reasons
+(`test_seo_gate.py`, `test_devops_error_routing.py`,
+`test_domain_lifecycle_integration.py` — the last one only caught by the
+scratch-Postgres run, not locally, since it needs real Postgres) — one of
+those, a redeploy test, was silently passing for the wrong reason (it never
+asserted the redeploy actually succeeded, only that no domain-request
+interrupt fired, which a healed-not-deployed build also satisfies); fixed the
+assertion alongside the workspace data. Local unit suite: 839 passed (same
+two pre-existing Windows failures). Scratch-Postgres: full suite, 1123
+passed.
+
+**Deployed live**: committed across two commits (the feature, then the
+pre-existing-test fixes surfaced by scratch-Postgres), transferred via
+`git archive HEAD`, image rebuilt, migration `0024` applied to the live
+database, service restarted. `/health` returns 200, boot log clean, all six
+engines enabled.
