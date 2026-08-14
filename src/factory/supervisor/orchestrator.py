@@ -330,6 +330,27 @@ async def decide(session: AsyncSession, ctx: FactoryContext) -> OrchestratorDeci
             eligible=sorted(eligible),
         )
         return _fallback(snapshot)
+    if (
+        decision.next_action == NextAction.ROUTE
+        and snapshot.pending_by_engine.get(decision.target_engine.value, 0) == 0
+    ):
+        # Emptiness is a fact the model cannot be right or wrong about, not a
+        # judgement call -- routing to an engine with a provably empty queue can
+        # never actually claim anything (`_run_engine`'s `task is None` early
+        # return), only waste the tick. Observed live: a stale-but-technically-
+        # true `approved_ideas_waiting` reading (a Product sitting in VALIDATING,
+        # its landing page already built and nothing further queued) kept
+        # convincing the model Development had unbuilt work, tick after tick for
+        # five minutes straight, while real queued work sat untouched on
+        # Marketing and Discovery -- `deliberation_reason`'s own "stalled" trigger
+        # kept re-asking the model, but re-asking cannot fix a *consistently*
+        # wrong judgement, only a genuinely undecided one.
+        log.warning(
+            "orchestrator.route_to_empty_engine",
+            proposed=decision.target_engine.value,
+            rationale=decision.rationale,
+        )
+        return _fallback(snapshot)
     return decision
 
 

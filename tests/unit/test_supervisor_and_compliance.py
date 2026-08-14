@@ -333,6 +333,72 @@ async def test_spawn_agent_decision_passes_through_when_target_is_eligible(
     assert decision.agent_role == "researcher"
 
 
+async def test_a_model_route_to_an_engine_with_zero_pending_tasks_falls_back_to_deterministic(
+    ctx: FactoryContext, gemini_fake: FakeProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Found live: `approved_ideas_waiting` can stay non-zero for a product that has
+    already finished its landing-page build and is just sitting in VALIDATING,
+    waiting on signals (a deliberate design choice -- see
+    test_orchestrator_snapshot.py). In production this convinced the model
+    Development still had unbuilt work and it routed there, tick after tick for
+    five minutes straight, even though `pending_by_engine['development']` was
+    provably 0 -- nothing was ever actually claimed, and real queued work sat
+    untouched on Marketing. Routing to Compliance here instead of Development:
+    the default `ctx` fixture disables Development entirely, and a target the
+    model is not even eligible for would be caught by the pre-existing
+    eligibility check regardless of this guard -- Compliance is eligible but,
+    per this snapshot, has nothing queued, which is what actually isolates the
+    new check. Emptiness is a fact the model cannot be right or wrong about, so
+    a ROUTE to a zero-pending-tasks engine must never be trusted as-is."""
+    from factory.state.schemas import OrchestratorDecision
+
+    async def fake_snapshot(session: Any, context: Any) -> orchestrator.FactorySnapshot:
+        return _snapshot(pending_by_engine={"marketing": 1}, approved_ideas_waiting=1)
+
+    monkeypatch.setattr(orchestrator, "build_snapshot", fake_snapshot)
+    gemini_fake.register(
+        OrchestratorDecision,
+        OrchestratorDecision(
+            next_action=NextAction.ROUTE,
+            target_engine=EngineName.COMPLIANCE,
+            rationale="An idea is waiting on compliance review.",
+        ),
+    )
+
+    decision = await orchestrator.decide(None, ctx)  # type: ignore[arg-type]
+
+    assert decision.next_action is NextAction.ROUTE
+    assert decision.target_engine is EngineName.MARKETING
+
+
+async def test_a_model_route_to_an_engine_with_real_pending_work_is_trusted(
+    ctx: FactoryContext, gemini_fake: FakeProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The guard above must not reject every model decision -- only ones that
+    provably cannot claim anything. Discovery has real pending work here too, so a
+    model preferring it over the deterministic priority order's own top pick is a
+    legitimate judgement call, not a factual error, and must pass through."""
+    from factory.state.schemas import OrchestratorDecision
+
+    async def fake_snapshot(session: Any, context: Any) -> orchestrator.FactorySnapshot:
+        return _snapshot(pending_by_engine={"marketing": 1, "discovery": 2})
+
+    monkeypatch.setattr(orchestrator, "build_snapshot", fake_snapshot)
+    gemini_fake.register(
+        OrchestratorDecision,
+        OrchestratorDecision(
+            next_action=NextAction.ROUTE,
+            target_engine=EngineName.DISCOVERY,
+            rationale="Discovery work is fresher and cheaper to clear first.",
+        ),
+    )
+
+    decision = await orchestrator.decide(None, ctx)  # type: ignore[arg-type]
+
+    assert decision.next_action is NextAction.ROUTE
+    assert decision.target_engine is EngineName.DISCOVERY
+
+
 # --- LIA contact gate -------------------------------------------------------
 
 
