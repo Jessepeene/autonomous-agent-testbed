@@ -90,6 +90,32 @@ async def test_a_dashboard_token_does_not_also_authorize_metrics(
     assert cross.status_code == 401
 
 
+async def test_resolve_refuses_when_no_token_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DASHBOARD_AUTH_TOKEN", raising=False)
+
+    async with await _client() as client:
+        response = await client.post(
+            "/dashboard/interrupts/some-id/resolve", json={"response": "approve"}
+        )
+
+    assert response.status_code == 503
+
+
+async def test_resolve_rejects_a_wrong_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DASHBOARD_AUTH_TOKEN", "correct-horse-battery-staple")
+
+    async with await _client() as client:
+        response = await client.post(
+            "/dashboard/interrupts/some-id/resolve",
+            json={"response": "approve"},
+            headers={"Authorization": "Bearer wrong-token"},
+        )
+
+    assert response.status_code == 401
+
+
 async def test_serves_state_with_the_right_token(monkeypatch: pytest.MonkeyPatch) -> None:
     """`observability.dashboard.collect` is stubbed so this stays a unit test:
     what is under test is the authorisation decision, not the snapshot's

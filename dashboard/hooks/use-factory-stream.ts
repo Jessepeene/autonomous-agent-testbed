@@ -166,6 +166,7 @@ export function useFactoryStream() {
   const [state, setState] = useState<DashboardState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const cancelledRef = useRef(false);
+  const pollRef = useRef<() => Promise<void>>(async () => {});
 
   useEffect(() => {
     cancelledRef.current = false;
@@ -193,6 +194,7 @@ export function useFactoryStream() {
       }
     }
 
+    pollRef.current = poll;
     poll();
     const interval = setInterval(poll, POLL_INTERVAL_MS);
     return () => {
@@ -205,6 +207,10 @@ export function useFactoryStream() {
     state,
     loading: state === null && error === null,
     error,
+    // Lets a write action (e.g. resolving an interrupt) pull the next state
+    // in immediately instead of waiting up to POLL_INTERVAL_MS for it to
+    // disappear from the list on its own.
+    refresh: () => pollRef.current(),
     // Convenience destructuring so existing components can keep reading
     // e.g. `health`/`engines` directly rather than `state.health` everywhere.
     health: state?.health ?? null,

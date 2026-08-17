@@ -234,46 +234,56 @@ async def collect_replies(session: AsyncSession, notifier: Notifier) -> int:
         target = await _find_open_by_tag(session, tag)
         if target is None:
             continue
-        await repository.resolve_interrupt(session, target.id, answer or "acknowledged")
-        action = "none"
-        target_task = await session.get(Task, target.task_id) if target.task_id else None
-        if (
-            target_task is not None
-            and target_task.kind == TaskKind.ASSESS_COMPLIANCE.value
-            and target_task.idea_id
-        ):
-            action = await _act_on_idea_reply(session, target_task.idea_id, answer)
-        elif target.task_id and _RETRY_WORD.search(answer):
-            action = (
-                "retried"
-                if await repository.reopen_escalated_task(session, target.task_id)
-                else "none"
-            )
-        elif (
-            target.reason == InterruptReason.DOMAIN_REQUIRED.value
-            and target.product_id
-            and not target.task_id
-        ):
-            # Checked before the generic product-scoped branch below: that one
-            # means "heal-exhaustion guidance, REJECT retires the product" --
-            # completely wrong for a domain reply, which shares the same
-            # (product_id set, task_id unset) shape for an unrelated reason.
-            action = await _act_on_domain_reply(session, target.product_id, answer)
-        elif (
-            target.reason == InterruptReason.LEAD_SOURCING_STALLED.value
-            and target.product_id
-            and not target.task_id
-        ):
-            # Same reasoning as the DOMAIN_REQUIRED branch above: this shares the
-            # generic branch's (product_id set, task_id unset) shape, but "reply
-            # with anything to try again" is a completely different action from
-            # that branch's "anything but REJECT means code-patch guidance."
-            action = await _act_on_lead_sourcing_reply(session, target.product_id, answer)
-        elif target.product_id and not target.task_id:
-            action = await _act_on_product_reply(session, target.id, target.product_id, answer)
-        log.info("hitl.resolved", interrupt_id=target.id, action=action)
+        await resolve_reply(session, target, answer)
         resolved += 1
     return resolved
+
+
+async def resolve_reply(session: AsyncSession, target: Interrupt, answer: str) -> str:
+    """Resolve `target` with `answer`, dispatching to the same per-reason action
+    logic regardless of the reply's origin -- a Telegram message (`collect_replies`
+    above) or the dashboard's `POST /dashboard/interrupts/{id}/resolve`. Both
+    channels answer the exact same open `Interrupt` row the exact same way, so
+    there is exactly one place this branching logic lives. Returns the action
+    taken (see the individual `_act_on_*_reply` helpers), for logging/response.
+    """
+    await repository.resolve_interrupt(session, target.id, answer or "acknowledged")
+    action = "none"
+    target_task = await session.get(Task, target.task_id) if target.task_id else None
+    if (
+        target_task is not None
+        and target_task.kind == TaskKind.ASSESS_COMPLIANCE.value
+        and target_task.idea_id
+    ):
+        action = await _act_on_idea_reply(session, target_task.idea_id, answer)
+    elif target.task_id and _RETRY_WORD.search(answer):
+        action = (
+            "retried" if await repository.reopen_escalated_task(session, target.task_id) else "none"
+        )
+    elif (
+        target.reason == InterruptReason.DOMAIN_REQUIRED.value
+        and target.product_id
+        and not target.task_id
+    ):
+        # Checked before the generic product-scoped branch below: that one
+        # means "heal-exhaustion guidance, REJECT retires the product" --
+        # completely wrong for a domain reply, which shares the same
+        # (product_id set, task_id unset) shape for an unrelated reason.
+        action = await _act_on_domain_reply(session, target.product_id, answer)
+    elif (
+        target.reason == InterruptReason.LEAD_SOURCING_STALLED.value
+        and target.product_id
+        and not target.task_id
+    ):
+        # Same reasoning as the DOMAIN_REQUIRED branch above: this shares the
+        # generic branch's (product_id set, task_id unset) shape, but "reply
+        # with anything to try again" is a completely different action from
+        # that branch's "anything but REJECT means code-patch guidance."
+        action = await _act_on_lead_sourcing_reply(session, target.product_id, answer)
+    elif target.product_id and not target.task_id:
+        action = await _act_on_product_reply(session, target.id, target.product_id, answer)
+    log.info("hitl.resolved", interrupt_id=target.id, action=action)
+    return action
 
 
 async def _act_on_idea_reply(session: AsyncSession, idea_id: str, answer: str) -> str:

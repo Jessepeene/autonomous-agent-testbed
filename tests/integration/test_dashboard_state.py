@@ -1,6 +1,8 @@
 """The dashboard's real read API -- new repository/observability functions
 that back `GET /dashboard/state`, and `observability/dashboard.py::collect`
-assembling them into one snapshot.
+assembling them into one snapshot. Also covers the one write action,
+`hitl.interrupts.resolve_reply`, shared by the dashboard's
+`POST /dashboard/interrupts/{id}/resolve` and the Telegram reply path.
 
 Needs Postgres:
 
@@ -19,13 +21,14 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from factory.hitl import interrupts as hitl_interrupts
 from factory.observability import costs
 from factory.observability import dashboard as dashboard_metrics
 from factory.preflight import PreflightReport
 from factory.settings import EngineName, Settings
 from factory.state import repository
 from factory.state.orm import Base, LLMCall, TunableParameter
-from factory.state.schemas import ProductStatus, ScoredIdea, TaskKind
+from factory.state.schemas import InterruptReason, ProductStatus, ScoredIdea, TaskKind, TaskStatus
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -317,3 +320,98 @@ async def test_collect_assembles_a_full_snapshot_without_error(session: AsyncSes
     # Serializes cleanly -- this is exactly what the FastAPI route returns.
     as_dict = snapshot.as_dict()
     assert as_dict["balance_cents"] == 2500
+
+
+# --- hitl.interrupts.resolve_reply: the dashboard's one write action -------------------
+
+
+async def test_resolve_reply_reopens_an_escalated_task_on_retry(session: AsyncSession) -> None:
+    task_id = await repository.enqueue_task(
+        session,
+        kind=TaskKind.RECONCILE_REVENUE,
+        engine=EngineName.FINANCE,
+        idempotency_key="resolve-retry-task",
+    )
+    assert task_id is not None
+    task = await session.get(repository.Task, task_id)
+    assert task is not None
+    task.status = TaskStatus.ESCALATED.value
+    await session.flush()
+    interrupt_id = await repository.open_interrupt(
+        session,
+        reason=InterruptReason.DATA_INTEGRITY,
+        subject="resolve-retry-subject",
+        detail="it broke",
+        headline="Task failed",
+        reply_hint="Reply retry once fixed.",
+        task_id=task_id,
+    )
+    assert interrupt_id is not None
+    await session.commit()
+    target = await session.get(repository.Interrupt, interrupt_id)
+    assert target is not None
+
+    action = await hitl_interrupts.resolve_reply(session, target, "fixed it, please retry")
+    await session.commit()
+
+    assert action == "retried"
+    resolved = await session.get(repository.Interrupt, interrupt_id)
+    assert resolved is not None
+    assert resolved.status == "resolved"
+    reopened = await session.get(repository.Task, task_id)
+    assert reopened is not None
+    assert reopened.status == TaskStatus.PENDING.value
+
+
+async def test_resolve_reply_retires_a_product_on_reject(session: AsyncSession) -> None:
+    product_id = await _make_product(session, "resolve-reject-product")
+    interrupt_id = await repository.open_interrupt(
+        session,
+        reason=InterruptReason.HEAL_EXHAUSTED,
+        subject="resolve-reject-subject",
+        detail="ran out of heal attempts",
+        headline="Heal exhausted",
+        reply_hint="Reply with guidance, or REJECT to retire this product.",
+        product_id=product_id,
+    )
+    assert interrupt_id is not None
+    await session.commit()
+    target = await session.get(repository.Interrupt, interrupt_id)
+    assert target is not None
+
+    action = await hitl_interrupts.resolve_reply(session, target, "REJECT")
+    await session.commit()
+
+    assert action == "retired"
+    product = await repository.get_product(session, product_id)
+    assert product is not None
+    assert product.status == ProductStatus.RETIRED.value
+
+
+async def test_resolve_reply_flags_an_invalid_hostname_reply(session: AsyncSession) -> None:
+    """A reply that doesn't parse as a hostname, SKIP, or an empty string still
+    resolves the interrupt (so a stale escalation never blocks forever) but
+    takes no further action on the product -- exactly what a mistyped Telegram
+    reply does today; the dashboard's write endpoint must behave identically."""
+    product_id = await _make_product(session, "resolve-unmatched-product")
+    interrupt_id = await repository.open_interrupt(
+        session,
+        reason=InterruptReason.DOMAIN_REQUIRED,
+        subject="resolve-unmatched-subject",
+        detail="needs a domain",
+        headline="Domain required",
+        reply_hint="Reply with a domain, or SKIP.",
+        product_id=product_id,
+    )
+    assert interrupt_id is not None
+    await session.commit()
+    target = await session.get(repository.Interrupt, interrupt_id)
+    assert target is not None
+
+    action = await hitl_interrupts.resolve_reply(session, target, "not a hostname!!")
+    await session.commit()
+
+    assert action == "invalid_hostname"
+    resolved = await session.get(repository.Interrupt, interrupt_id)
+    assert resolved is not None
+    assert resolved.status == "resolved"
