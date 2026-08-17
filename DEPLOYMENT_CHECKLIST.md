@@ -3768,3 +3768,134 @@ boot log clean, all six engines still enabled, no new preflight findings —
 expected, since this phase touches no credential or schema surface.
 
 This closes the nine-phase risk-hardening plan.
+
+## Operator dashboard: wired the mocked Next.js UI onto the real backend — 2026-08-17
+
+Jesse had a polished Next.js/React dashboard (`dashboard/`, built via Google AI
+Studio) sitting unused — every number on every screen was `Math.random()`-simulated
+client-side, no backend connection, no authentication anywhere in the app's
+human-facing surface. Wired it onto the real factory: a new authenticated
+`GET /dashboard/state` endpoint, a real session-cookie login, and every view
+component reconciled field-by-field against the real schema instead of the
+mock's invented one.
+
+**Backend** — `observability/dashboard.py::collect()` assembles a
+`DashboardSnapshot` from real rows: `metrics.collect()` reused wholesale, plus
+new repository functions (`recent_tasks`, `tasks_in_flight_by_engine` —
+lease-aware, excludes a stale claim from an already-reclaimed worker,
+`products_with_idea`, `mrr_by_product`, `latest_ledger_entry`),
+`learning/store.py::list_all` (no status filter, unlike `list_trials`), and
+`observability/costs.py::provider_outcome_rates` for a new provider-health
+heuristic (0 calls -> up unless the credential itself is unconfigured; <10%
+error -> up; 10-50% -> degraded; >=50% with >=3 calls -> down). Per-trial
+significance reuses `learning/trials.py::_evaluate_one`'s exact
+`fisher_exact_less` call shape — the raw p-value is surfaced, not a fabricated
+"confidence %". `GET /dashboard/state` (`api/dashboard.py`) shares the same
+bearer-check dependency `/metrics` now uses (`api/auth.py::require_bearer_token`,
+extracted from the inline check that used to live only in `metrics_endpoint`),
+gated by a new `DASHBOARD_AUTH_TOKEN` setting — 503 unset, 401 wrong, same
+fail-closed shape as `METRICS_AUTH_TOKEN`. Two settings fields added mid-pass
+once the frontend needed real values instead of fabricated ones for two
+safety-relevant numbers: `HealthSection.daily_llm_spend_cap_usd` (backs the
+budget-circuit-breaker card) and `MarketingSection.spam_complaint_rate_threshold`
+/ `bounce_rate_threshold` (back the deliverability-circuit-breaker card) — both
+already existed as `Settings` fields, just not previously surfaced to any API
+response.
+
+**Frontend** — `hooks/use-factory-stream.ts` rewritten completely: polls
+`GET /api/dashboard` every 5s (was 450ms, tuned to make fake numbers look
+alive) instead of generating random values; every exported type now matches
+the backend's real snake_case JSON field-for-field. Auth:
+`lib/session.ts` signs a stateless session cookie via Web Crypto
+`SubtleCrypto` HMAC-SHA256 (has to run identically in `middleware.ts`'s Edge
+runtime and the Node-runtime route handlers), keyed off
+`sha256(DASHBOARD_AUTH_TOKEN + \":session\")` — the raw token is never put in
+the cookie. `middleware.ts` gates everything except `/login` and `/api/auth/*`;
+`lib/factory-api.ts` is the only place that ever holds the real token or talks
+to the factory container, guarded by the `server-only` import so an accidental
+client-side import fails the build rather than leaking the token into a
+browser bundle.
+
+Every view component was reconciled against the real data model rather than
+kept on the mock's invented one — the mock's `Product.stage` taxonomy
+(`DISCOVERY|COMPLIANCE|VALIDATION|BUILD|LIVE`) doesn't exist on `Product` at
+all; Discovery and Compliance are things an *Idea* goes through before a
+`Product` row exists. `SystemFlowVisualizer`'s "Market Intel" and "Compliance"
+nodes were repurposed to show real `ideas_by_status` counts and the real
+`planned` product bucket rather than being deleted or fed fake data.
+`PortfolioPipeline`'s stage columns now use the real 7-value `ProductStatus`
+enum. `LearningLoop` shows the raw Fisher's-exact p-value instead of a
+fabricated confidence percentage. `Interrupts`' "Approve (Override)"/"Reject &
+Requeue" buttons had no `onClick` at all in the original mock — disabled with
+a tooltip pointing at the real resolution path (Telegram) rather than left
+looking functional; the fabricated per-interrupt "Diagnostic Payload" stack
+trace (identical fake text on every card) was deleted, replaced by the real
+`headline`/`detail`/`reply_hint` fields. `SupervisorLogs.tsx` was fully built
+but never imported or routed anywhere — confirmed still orphaned and deleted,
+since `SystemHealthView`'s "Recent Activity" panel (synthesized from real task/
+interrupt rows, not a log tail — no log table exists anywhere in this codebase)
+already covers the same ground with real data.
+
+**The most load-bearing fix**: `FinanceSpend.tsx` had two rows that were
+*always* fake-positive regardless of real state — "Negative Stripe Balance
+Detected -> FALSE - CLEAR" (hardcoded, no query behind it at all) and "Ledger
+Sync Status -> SYNCED" (same). Shipping either unchanged would mean the
+dashboard permanently lies about system health, in the specific worst
+direction (silently claiming "clear" during a real problem) that defeats the
+entire point of a monitoring surface. Replaced with the real thing that
+exists: current ledger balance + reinvest pool (`repository.current_balance`),
+and real ledger-write recency (new `repository.latest_ledger_entry`) rendered
+as "Xm ago" instead of a static claim.
+
+**Deployment** — new `dashboard/Dockerfile` (Bun install -> `next build`
+with `output: 'standalone'` already set in `next.config.ts` -> slim
+`node:20-alpine` runtime, non-root user, standalone server), new
+`dashboard` service in `docker-compose.yml` matching the existing
+loopback-bind pattern (`127.0.0.1:3000:3000`), and a new
+`dash.{$PUBLIC_DOMAIN}` Caddy site block plus a defense-in-depth 404 for
+`/dashboard/*` added to the existing `/metrics` block on the main domain (the
+dashboard is only ever served from the subdomain). `DASHBOARD_AUTH_TOKEN`
+generated via `openssl rand -hex 32` and added directly to the server's
+`.env` over SSH — never pasted into chat.
+
+**Verification, in order**: `ruff check`/`ruff format`/`mypy src/factory`
+clean (only the two permanent baseline findings); `bun run lint`/
+`bunx tsc --noEmit`/`bun run build` clean on the dashboard side (one real
+lint catch along the way — `SystemFlowVisualizer.tsx` carried over the
+mock's `useEffect(() => setMounted(true), [])` hydration-guard pattern
+unchanged, which `eslint-plugin-react-hooks`'s newer `set-state-in-effect`
+rule flags; removed it since nothing in the component is actually
+nondeterministic between server and client anymore). Local unit suite: 873
+passed (same two permanent Windows-only path-separator failures). New
+integration test file (`tests/integration/test_dashboard_state.py`, 11 tests
+covering every new repository function plus `collect()` assembling a full
+snapshot) run against a genuine scratch Postgres — provisioned fresh on the
+server (`docker run postgres:16-alpine` on the `superagent_default` network,
+source copied to `/opt/scratch-dashboard-test`, `alembic upgrade head` run
+clean through all 26 revisions, `.[dev]` installed fresh in a throwaway
+`python:3.13-slim` container) rather than against the live database — all 11
+passed; scratch container and directory torn down afterward.
+
+**Deployed live**: committed locally, transferred via `git archive HEAD`
+(this repo has no configured git remote — `/opt/superagent` on the server is
+a plain synced tree, not a git checkout; `git archive` only carries tracked
+files, so it never touches the server's `.env`, `.env.bak-*` backups, or
+anything not committed). Both `factory` and `dashboard` images rebuilt,
+`docker compose up -d` recreated `factory` and created `dashboard`; Caddy's
+Caddyfile is a read-only bind mount so compose doesn't detect the content
+change as requiring a container recreate — reloaded explicitly with
+`docker exec superagent-caddy-1 caddy reload`. Verified end-to-end against
+the running containers: `/health` 200, `/dashboard/state` returns real
+production data (411 done tasks, 5 open interrupts, real MRR/balance/spend
+figures) and correctly 401s with no or a wrong token; full login -> session
+cookie -> authenticated `/api/dashboard` -> logout -> re-redirect flow tested
+against the dashboard container directly; Caddy confirmed routing
+`dash.manifestaudit.com` to the dashboard site block and blocking
+`/dashboard/*` on the main domain, both via `Host`-header curl against
+loopback (real HTTPS not yet reachable — no DNS record for the subdomain
+exists yet).
+
+**Not done, needs Jesse**: add the `dash.manifestaudit.com` DNS A record
+pointing at the droplet's IP. Caddy will provision its own Let's Encrypt cert
+automatically on first real request once that resolves — nothing else to
+configure server-side.
