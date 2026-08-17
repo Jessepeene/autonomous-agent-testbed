@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from factory.llm.client import LLMClient, NoProviderAvailable
-from factory.llm.providers.base import LLMError, ProviderRefusal, Turn, Usage
+from factory.llm.providers.base import LLMError, ProviderRefusal, ToolResult, Turn, Usage
 from factory.logging import get_logger
 from factory.settings import EngineName, Settings, TaskType, get_settings
 from factory.tools.registry import REGISTRY, ToolDescriptor, ToolRegistry
@@ -39,6 +39,13 @@ _MAX_RESULT_CHARS = 20_000
 #: dropped middle from a genuinely short result and does not reason about the gap as
 #: if it were absence.
 _ELISION = "\n...[{dropped} characters elided]...\n"
+
+#: Same honesty principle as `_ELISION`, at turn granularity: `_truncate_middle`
+#: shortens the middle of one oversized result, this replaces the *entire* content
+#: of an old tool-result turn once the whole transcript is over budget. The model
+#: sees plainly that history was dropped for space, not that the tool suddenly
+#: returned nothing.
+_TURN_ELISION = "[{count} earlier tool result(s) elided to stay under the context budget]"
 
 
 def _truncate_middle(content: str, limit: int) -> str:
@@ -67,6 +74,52 @@ def _truncate_middle(content: str, limit: int) -> str:
     return f"{content[:head]}{marker}{content[-tail:]}" if tail else content[:head]
 
 
+def _turn_chars(turn: Turn) -> int:
+    """Character weight of one turn -- chars, not tokens, matching the existing
+    convention (`max_result_chars` is already char-based, not token-based). Tool
+    results are the bulk of a transcript (`_mark_conversation_prefix`'s own
+    docstring in `anthropic_provider.py`), so they dominate this count; tool-call
+    arguments are counted too since they are real content the model re-reads every
+    step, just usually small structured JSON next to a tool result's payload."""
+    calls_chars = sum(len(json.dumps(c.arguments, default=str)) for c in turn.tool_calls)
+    results_chars = sum(len(r.content) for r in turn.tool_results)
+    return len(turn.text) + calls_chars + results_chars
+
+
+def _context_chars(turns: list[Turn]) -> int:
+    return sum(_turn_chars(t) for t in turns)
+
+
+def _compact_to_budget(turns: list[Turn], max_context_chars: int) -> None:
+    """Drop the oldest tool-result turns' content, oldest first, until back under
+    budget or nothing more can be dropped. Mutates ``turns`` in place.
+
+    Never touches ``turns[0]`` (the objective -- and any recalled memory/context
+    joined into it, see `spawner.py::spawn`) or the last two turns (the model's own
+    most recent action and its result), so a compacted run never loses its
+    objective and the model is never asked to continue from a state it cannot see.
+    Only entire tool-result turns are dropped, never the interleaved assistant
+    turns -- an assistant turn with no matching tool_result would desync the
+    conversation for a provider that expects every tool_use answered.
+    """
+    protected_head = 1
+    protected_tail = 2
+    for i in range(protected_head, len(turns) - protected_tail):
+        if _context_chars(turns) <= max_context_chars:
+            return
+        turn = turns[i]
+        if not turn.tool_results:
+            continue
+        marker = _TURN_ELISION.format(count=len(turn.tool_results))
+        turns[i] = Turn(
+            role=turn.role,
+            tool_results=[
+                ToolResult(call_id=r.call_id, name=r.name, content=marker, is_error=r.is_error)
+                for r in turn.tool_results
+            ],
+        )
+
+
 @dataclass(slots=True)
 class ToolInvocation:
     name: str
@@ -83,6 +136,10 @@ class AgentResult:
     invocations: list[ToolInvocation] = field(default_factory=list)
     stopped_because: str = "completed"
     usage: Usage = field(default_factory=Usage)
+    #: High-water mark of `_context_chars(turns)` across the run, recorded every
+    #: step regardless of whether `max_context_chars` was ever set or exceeded --
+    #: instrumentation for tuning a role's budget, not just a compaction artifact.
+    peak_context_chars: int = 0
 
     @property
     def succeeded(self) -> bool:
@@ -132,6 +189,7 @@ class AgentRuntime:
         max_result_chars: int = _MAX_RESULT_CHARS,
         cost_cap_usd: float | None = None,
         cost_model: str | None = None,
+        max_context_chars: int | None = None,
     ) -> AgentResult:
         descriptors = self.available_tools(tool_categories, docker_available=docker_available)
         by_name = {d.name: d for d in descriptors}
@@ -161,6 +219,28 @@ class AgentRuntime:
                     spent_usd=round(_spent_usd(result.usage, cost_model), 4),
                 )
                 break
+            # Tracked every step regardless of whether a budget is set, so the
+            # instrumentation is useful even for roles that never hit it.
+            context_chars = _context_chars(turns)
+            result.peak_context_chars = max(result.peak_context_chars, context_chars)
+            if max_context_chars is not None and context_chars > max_context_chars:
+                # Compact deterministically first -- an agent that would have hit
+                # the window and returned a truncated answer now continues, instead
+                # of stopping the instant it saturates. Only a genuine "nothing left
+                # to drop and still over budget" (a pathologically large objective
+                # or a single oversized turn) actually ends the run.
+                _compact_to_budget(turns, max_context_chars)
+                context_chars = _context_chars(turns)
+                if context_chars > max_context_chars:
+                    result.stopped_because = "context_budget"
+                    log.warning(
+                        "agent.context_budget",
+                        step=step,
+                        budget_chars=max_context_chars,
+                        context_chars=context_chars,
+                    )
+                    break
+                log.info("agent.context_compacted", step=step, context_chars_after=context_chars)
             result.steps = step
 
             try:
@@ -250,8 +330,6 @@ class AgentRuntime:
         *,
         max_result_chars: int = _MAX_RESULT_CHARS,
     ) -> tuple[ToolInvocation, Any]:
-        from factory.llm.providers.base import ToolResult
-
         descriptor = by_name.get(call.name)
         if descriptor is None:
             # The model asked for something it was not offered. Tell it so, rather

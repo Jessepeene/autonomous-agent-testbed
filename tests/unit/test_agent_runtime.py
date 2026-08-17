@@ -9,12 +9,13 @@ unknown-tool handling) that make it safe to hand an LLM a tool belt.
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any
 
 import pytest
 
-from factory.agents.runtime import AgentRuntime
+from factory.agents.runtime import AgentRuntime, _compact_to_budget, _context_chars, _turn_chars
 from factory.llm.client import LLMClient
 from factory.llm.providers.base import (
     AgentTurn,
@@ -22,6 +23,8 @@ from factory.llm.providers.base import (
     ProviderRefusal,
     ProviderUnavailable,
     ToolCall,
+    ToolResult,
+    Turn,
     Usage,
 )
 from factory.llm.providers.fake import FakeProvider
@@ -97,6 +100,19 @@ def _costly_turn(calls: list[ToolCall] | None = None, *, output_tokens: int = 50
     )
 
 
+def _big_tool(size: int) -> ToolDescriptor:
+    async def handler() -> str:
+        return "x" * size
+
+    return ToolDescriptor(
+        name="big",
+        description="Returns a large blob.",
+        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        category="test",
+        handler=handler,
+    )
+
+
 async def test_a_run_stops_once_it_has_spent_its_cost_cap(
     gemini_fake: FakeProvider, settings: Settings
 ) -> None:
@@ -165,6 +181,166 @@ async def test_no_cost_cap_leaves_the_run_governed_only_by_steps(
 
     assert result.stopped_because == "step_limit"
     assert result.steps == 3
+
+
+# --- context-saturation budget: _compact_to_budget, the pure function ----------------
+
+
+def test_turn_chars_counts_text_call_arguments_and_result_content() -> None:
+    turn = Turn(
+        role="assistant",
+        text="hello",
+        tool_calls=[ToolCall(id="1", name="t", arguments={"a": "bb"})],
+    )
+    assert _turn_chars(turn) == len("hello") + len(json.dumps({"a": "bb"}))
+
+
+def test_context_chars_sums_every_turn() -> None:
+    turns = [Turn(role="user", text="ab"), Turn(role="assistant", text="cde")]
+    assert _context_chars(turns) == 5
+
+
+def test_compact_to_budget_drops_the_oldest_droppable_tool_result_first() -> None:
+    turns = [
+        Turn(role="user", text="objective"),
+        Turn(role="assistant", tool_calls=[ToolCall(id="1", name="big", arguments={})]),
+        Turn(role="user", tool_results=[ToolResult(call_id="1", name="big", content="x" * 1000)]),
+        Turn(role="assistant", tool_calls=[ToolCall(id="2", name="big", arguments={})]),
+        Turn(role="user", tool_results=[ToolResult(call_id="2", name="big", content="y" * 1000)]),
+    ]
+
+    _compact_to_budget(turns, max_context_chars=1200)
+
+    assert turns[0].text == "objective"  # the objective is never touched
+    assert "elided" in turns[2].tool_results[0].content
+    assert turns[2].tool_results[0].content != "x" * 1000
+    assert turns[3].tool_calls[0].id == "2"  # the protected tail is untouched
+    assert turns[4].tool_results[0].content == "y" * 1000
+
+
+def test_compact_to_budget_stops_dropping_once_back_under_budget() -> None:
+    """Oldest-first, and no further than necessary: a second droppable turn must
+    survive if dropping only the first one already satisfies the budget."""
+    turns = [
+        Turn(role="user", text="o"),
+        Turn(role="assistant", tool_calls=[ToolCall(id="1", name="big", arguments={})]),
+        Turn(role="user", tool_results=[ToolResult(call_id="1", name="big", content="x" * 1000)]),
+        Turn(role="assistant", tool_calls=[ToolCall(id="2", name="big", arguments={})]),
+        Turn(role="user", tool_results=[ToolResult(call_id="2", name="big", content="y" * 1000)]),
+        Turn(role="assistant", tool_calls=[ToolCall(id="3", name="big", arguments={})]),
+        Turn(role="user", tool_results=[ToolResult(call_id="3", name="big", content="z" * 1000)]),
+    ]
+
+    _compact_to_budget(turns, max_context_chars=2100)
+
+    assert "elided" in turns[2].tool_results[0].content
+    assert turns[4].tool_results[0].content == "y" * 1000
+    assert turns[6].tool_results[0].content == "z" * 1000
+
+
+def test_compact_to_budget_is_a_no_op_when_nothing_is_droppable() -> None:
+    """Only the objective and the single most recent step exist -- both are
+    protected, so a budget too tight to ever satisfy must leave everything
+    exactly as it found it rather than violate the protection."""
+    turns = [
+        Turn(role="user", text="objective"),
+        Turn(role="assistant", tool_calls=[ToolCall(id="1", name="big", arguments={})]),
+        Turn(role="user", tool_results=[ToolResult(call_id="1", name="big", content="x" * 1000)]),
+    ]
+    before = list(turns)
+
+    _compact_to_budget(turns, max_context_chars=10)
+
+    assert turns == before
+
+
+# --- context-saturation budget: AgentRuntime.run integration --------------------------
+
+
+async def test_no_context_budget_leaves_the_run_governed_only_by_step_limit(
+    gemini_fake: FakeProvider, settings: Settings
+) -> None:
+    """The budget is opt-in: every existing caller passes nothing and must be
+    unaffected, no matter how large the transcript grows."""
+    call = ToolCall(id="1", name="big", arguments={})
+    gemini_fake.register_turns(*[_turn(calls=[call]) for _ in range(3)])
+    runtime = AgentRuntime(
+        _client(settings, gemini=gemini_fake),
+        settings=settings,
+        tools=_registry_with(_big_tool(50_000)),
+    )
+
+    result = await runtime.run(
+        objective="Fix it.",
+        system="s",
+        tool_categories=["test"],
+        max_steps=3,
+        max_result_chars=200_000,  # otherwise the default cap truncates "big" itself
+    )
+
+    assert result.stopped_because == "step_limit"
+    assert result.peak_context_chars > 100_000  # tracked even though nothing enforces it
+
+
+async def test_a_tight_context_budget_compacts_instead_of_ending_the_run(
+    gemini_fake: FakeProvider, settings: Settings
+) -> None:
+    """Without compaction, three 5,000-char tool results plus the transcript
+    overhead around them blow well past a 12,000-char budget -- this proves the
+    run recovers and reaches its own natural completion rather than being cut
+    off the instant it saturates."""
+    call = ToolCall(id="1", name="big", arguments={})
+    gemini_fake.register_turns(
+        _turn(calls=[call]),
+        _turn(calls=[call]),
+        _turn(calls=[call]),
+        _turn(text="done"),
+    )
+    runtime = AgentRuntime(
+        _client(settings, gemini=gemini_fake),
+        settings=settings,
+        tools=_registry_with(_big_tool(5_000)),
+    )
+
+    result = await runtime.run(
+        objective="Fix it.",
+        system="s",
+        tool_categories=["test"],
+        max_steps=8,
+        max_context_chars=12_000,
+    )
+
+    assert result.succeeded
+    assert result.stopped_because == "completed"
+    # Proof this was compaction recovering, not the budget simply never being
+    # exceeded: the peak (recorded before compaction each step) really did cross it.
+    assert result.peak_context_chars > 12_000
+
+
+async def test_context_budget_stops_the_run_when_nothing_can_be_dropped(
+    gemini_fake: FakeProvider, settings: Settings
+) -> None:
+    """A budget too tight to satisfy even by dropping everything droppable (here,
+    the very first step's own result already exceeds it) must not spin forever --
+    it stops cleanly, the same shape as `cost_cap`."""
+    call = ToolCall(id="1", name="big", arguments={})
+    gemini_fake.register_turns(*[_turn(calls=[call]) for _ in range(5)])
+    runtime = AgentRuntime(
+        _client(settings, gemini=gemini_fake),
+        settings=settings,
+        tools=_registry_with(_big_tool(5_000)),
+    )
+
+    result = await runtime.run(
+        objective="Fix it.",
+        system="s",
+        tool_categories=["test"],
+        max_steps=5,
+        max_context_chars=10,
+    )
+
+    assert result.stopped_because == "context_budget"
+    assert result.steps == 1  # the first step's own result is what tripped it
 
 
 async def test_runtime_completes_without_calling_any_tool(

@@ -388,6 +388,7 @@ async def attempt_repair(
         max_result_chars=MAX_RESULT_CHARS,
         cost_cap_usd=ctx.settings.repair_agent_cost_cap_usd,
         cost_model=ctx.settings.model_code,
+        max_context_chars=role.max_context_chars,
     )
 
     if result.stopped_because in BLOCKED_REASONS:

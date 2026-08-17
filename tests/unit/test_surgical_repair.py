@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import pytest
 
-from factory.agents.runtime import _truncate_middle
+from factory.agents.roles import RoleName, get_role
+from factory.agents.runtime import AgentResult, _truncate_middle
 from factory.engines.development import graph as dev_graph
 from factory.engines.development import repair
 from factory.settings import Settings
@@ -111,6 +112,39 @@ def test_clear_installed_deps_removes_the_stale_install_tree(
     repair.clear_installed_deps(workspace, settings)
 
     assert not (settings.workspace_root / workspace / ".deps").exists()
+
+
+# --- Phase 8: the role's context budget reaches the runtime ---------------------
+
+
+async def test_attempt_repair_passes_workspace_surgeons_max_context_chars(
+    ctx: FactoryContext, workspace: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One-line wiring check, same shape as the pre-existing
+    `cost_cap_usd=ctx.settings.repair_agent_cost_cap_usd` on the line above it in
+    `repair.py` -- WORKSPACE_SURGEON never goes through `spawn()` (see
+    WORKSPACE_SCOPED_ROLES), so this direct call site is the only place its
+    `max_context_chars` can ever reach `AgentRuntime.run`."""
+    captured: dict[str, object] = {}
+
+    async def fake_run(self: object, **kwargs: object) -> AgentResult:
+        captured.update(kwargs)
+        return AgentResult(objective=str(kwargs.get("objective")), answer="", steps=0)
+
+    monkeypatch.setattr(repair.AgentRuntime, "run", fake_run)
+
+    await repair.attempt_repair(
+        ctx,
+        product_id="prod-1",
+        workspace=workspace,
+        test_command="pytest -q",
+        healing="1 failed",
+        recalled="",
+    )
+
+    role = get_role(RoleName.WORKSPACE_SURGEON)
+    assert captured["max_context_chars"] == role.max_context_chars
+    assert captured["cost_cap_usd"] == ctx.settings.repair_agent_cost_cap_usd
 
 
 # --- the guards: green suite != fixed bug ---------------------------------------

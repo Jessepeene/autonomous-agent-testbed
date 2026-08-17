@@ -27,6 +27,7 @@ from factory.agents.roles import (
     get_role,
     role_catalogue,
 )
+from factory.agents.runtime import AgentResult
 from factory.agents.spawner import RoleNotPermitted, SpawnRequest, can_spawn, resolve_role, spawn
 from factory.llm.providers.base import AgentTurn, Provider, Usage
 from factory.llm.providers.fake import FakeProvider
@@ -129,6 +130,28 @@ def test_non_mutating_role_ignores_dry_run(ctx: FactoryContext) -> None:
     role = get_role(RoleName.ANALYST)
     permitted, _ = can_spawn(ctx, role)
     assert permitted is True
+
+
+def test_every_role_declares_a_context_budget() -> None:
+    """A role with no `max_context_chars` would be silently unbounded again --
+    exactly the gap Phase 8 closes. Every declared role must set one, whether or
+    not it goes through `spawn()` (repair.py reads WORKSPACE_SURGEON/SEO_OPTIMIZER's
+    directly)."""
+    for role in ROLES.values():
+        assert role.max_context_chars is not None, role.name
+
+
+def test_cost_cap_is_set_for_every_role_spawn_reaches_directly() -> None:
+    """WORKSPACE_SURGEON/SEO_OPTIMIZER are the only two roles `spawn()` never
+    reaches (see WORKSPACE_SCOPED_ROLES) -- `repair.py` applies its own
+    settings-based `repair_agent_cost_cap_usd` for them instead, so their role-
+    level field stays `None` on purpose. Every role `spawn()` can actually invoke
+    must declare its own, or it is silently uncapped."""
+    for name, role in ROLES.items():
+        if name in WORKSPACE_SCOPED_ROLES:
+            assert role.cost_cap_usd is None, name
+        else:
+            assert role.cost_cap_usd is not None, name
 
 
 def test_read_only_roles_are_all_declared_non_mutating() -> None:
@@ -309,6 +332,61 @@ async def test_channel_scout_cannot_reach_growth_analysts_action_tools(
     }
     assert "start_ab_test_action" not in tool_names
     assert "request_seo_pass_action" not in tool_names
+
+
+# --- spawn(): the role's budgets actually reach the runtime -------------------
+
+
+async def test_spawn_passes_the_roles_cost_cap_and_context_budget_to_the_runtime(
+    ctx: FactoryContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gap this closes: `spawn()` previously passed neither `cost_cap_usd` nor
+    `max_context_chars` for any of the roles it reaches -- only `repair.py`'s
+    separate direct call site enforced a cost cap, for two different roles, and
+    nothing anywhere enforced a context budget."""
+    from factory.agents import spawner as spawner_module
+
+    ctx.settings.factory_dry_run = False  # CHANNEL_SCOUT is mutating
+    captured: dict[str, object] = {}
+
+    async def fake_run(self: object, **kwargs: object) -> AgentResult:
+        captured.update(kwargs)
+        return AgentResult(objective=str(kwargs.get("objective")), answer="ok", steps=1)
+
+    monkeypatch.setattr(spawner_module.AgentRuntime, "run", fake_run)
+
+    role = get_role(RoleName.CHANNEL_SCOUT)
+    await spawn(ctx, None, SpawnRequest(role=RoleName.CHANNEL_SCOUT, objective="find a channel"))
+
+    assert captured["cost_cap_usd"] == role.cost_cap_usd
+    assert captured["max_context_chars"] == role.max_context_chars
+    # CHANNEL_SCOUT is ANALYSIS, not in NO_FAILOVER -- no single model is the
+    # deterministic answer to "what served this call," so cost_cap is priced
+    # against `_spent_usd`'s generic default rather than a specific model name.
+    assert captured["cost_model"] is None
+
+
+async def test_spawn_prices_a_code_generation_roles_cost_cap_against_model_code(
+    ctx: FactoryContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REPAIR_ENGINEER is CODE_GENERATION, which `router.NO_FAILOVER` always routes
+    to `model_code` deterministically -- unlike the ANALYSIS-type roles, this one
+    has an exact model to price its cost cap against."""
+    from factory.agents import spawner as spawner_module
+
+    ctx.docker_available = True
+    ctx.settings.factory_dry_run = False
+    captured: dict[str, object] = {}
+
+    async def fake_run(self: object, **kwargs: object) -> AgentResult:
+        captured.update(kwargs)
+        return AgentResult(objective=str(kwargs.get("objective")), answer="ok", steps=1)
+
+    monkeypatch.setattr(spawner_module.AgentRuntime, "run", fake_run)
+
+    await spawn(ctx, None, SpawnRequest(role=RoleName.REPAIR_ENGINEER, objective="fix the build"))
+
+    assert captured["cost_model"] == ctx.settings.model_code
 
 
 async def test_discovery_scout_only_reaches_http_and_submit_signal(

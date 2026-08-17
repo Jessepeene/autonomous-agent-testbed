@@ -22,7 +22,7 @@ from factory.agents.runtime import AgentResult, AgentRuntime
 from factory.llm.providers.base import ProviderRefusal
 from factory.logging import get_logger
 from factory.memory import store as memory_store
-from factory.settings import EngineName
+from factory.settings import EngineName, TaskType
 from factory.supervisor.context import FactoryContext
 
 log = get_logger(__name__)
@@ -108,6 +108,9 @@ async def spawn(
             deadline_seconds=role.deadline_seconds,
             docker_available=ctx.docker_available,
             context=_join(request.context, recalled),
+            cost_cap_usd=role.cost_cap_usd,
+            cost_model=_cost_model(ctx, role),
+            max_context_chars=role.max_context_chars,
         )
     except ProviderRefusal:
         raise
@@ -127,3 +130,19 @@ async def spawn(
 
 def _join(*blocks: str) -> str:
     return "\n\n".join(block.strip() for block in blocks if block and block.strip())
+
+
+def _cost_model(ctx: FactoryContext, role: AgentRole) -> str | None:
+    """Which model a role's `cost_cap_usd` should be priced against.
+
+    Only CODE_GENERATION/CODE_REVIEW are in `router.NO_FAILOVER`, so only those are
+    deterministically served by one configured model (`model_code`) -- pricing
+    against it is exact, the same reasoning `repair.py`'s own direct call already
+    uses. Every other role's task type can fail over between providers mid-run, so
+    there is no single correct model name to price against; `None` lets
+    `_spent_usd` fall back to its mid-range default price, which errs toward
+    stopping early rather than silently overspending.
+    """
+    if role.task_type in (TaskType.CODE_GENERATION, TaskType.CODE_REVIEW):
+        return ctx.settings.model_code
+    return None

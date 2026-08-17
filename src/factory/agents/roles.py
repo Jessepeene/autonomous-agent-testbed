@@ -78,6 +78,22 @@ class AgentRole:
     #: were spawned for a read-only question.
     mutating: bool = False
     tags: tuple[str, ...] = field(default_factory=tuple)
+    #: Dollar ceiling for one run, read by `spawn()` and passed straight through to
+    #: `AgentRuntime.run(cost_cap_usd=...)`. `None` means uncapped. Sized generously
+    #: above any observed normal run for this role's step count and typical tool-
+    #: result weight -- a safety net against a runaway loop, not a tight budget.
+    #: WORKSPACE_SURGEON/SEO_OPTIMIZER stay `None` here on purpose: they never go
+    #: through `spawn()` (see WORKSPACE_SCOPED_ROLES), and `repair.py` passes its own
+    #: `settings.repair_agent_cost_cap_usd` at the call site instead -- an existing,
+    #: separately-tuned setting this field must not silently shadow.
+    cost_cap_usd: float | None = None
+    #: Character ceiling on the accumulated transcript (`AgentRuntime.run`'s
+    #: `max_context_chars`) -- distinct from `max_result_chars`, which bounds one
+    #: tool result. This bounds the sum across every step. Same `None`-means-
+    #: unbounded convention and the same WORKSPACE_SURGEON/SEO_OPTIMIZER exception:
+    #: unlike cost_cap_usd there is no pre-existing settings-based override for
+    #: those two, so `repair.py` reads this field directly instead.
+    max_context_chars: int | None = None
 
 
 _SHARED_RULES = """
@@ -142,6 +158,8 @@ ROLES: dict[RoleName, AgentRole] = {
         tool_categories=("http", "git"),
         task_type=TaskType.ANALYSIS,
         max_steps=10,
+        cost_cap_usd=0.20,
+        max_context_chars=220_000,
     ),
     RoleName.ANALYST: AgentRole(
         name=RoleName.ANALYST,
@@ -156,6 +174,8 @@ ROLES: dict[RoleName, AgentRole] = {
         tool_categories=("http",),
         task_type=TaskType.ANALYSIS,
         max_steps=6,
+        cost_cap_usd=0.20,
+        max_context_chars=140_000,
     ),
     RoleName.REPAIR_ENGINEER: AgentRole(
         name=RoleName.REPAIR_ENGINEER,
@@ -173,6 +193,14 @@ ROLES: dict[RoleName, AgentRole] = {
         max_steps=14,
         deadline_seconds=1800,
         mutating=True,
+        # CODE_GENERATION is in `router.NO_FAILOVER`, so this role is always served
+        # by `model_code` deterministically -- `spawn()` prices its cost cap against
+        # that model rather than leaving it to `_spent_usd`'s generic default.
+        # Highest of any `spawn()`-reached role: the heaviest step count (14) and the
+        # widest tool set (sandbox+git+http) of anything not gated behind a product
+        # lock the way WORKSPACE_SURGEON is.
+        cost_cap_usd=1.00,
+        max_context_chars=300_000,
     ),
     RoleName.AUDITOR: AgentRole(
         name=RoleName.AUDITOR,
@@ -188,6 +216,8 @@ ROLES: dict[RoleName, AgentRole] = {
         tool_categories=("http",),
         task_type=TaskType.ANALYSIS,
         max_steps=6,
+        cost_cap_usd=0.15,
+        max_context_chars=100_000,
     ),
     RoleName.WORKSPACE_SURGEON: AgentRole(
         name=RoleName.WORKSPACE_SURGEON,
@@ -219,6 +249,14 @@ ROLES: dict[RoleName, AgentRole] = {
         # nothing: the agent would never run, and every heal cycle would fail
         # identically instead of exercising the pipeline.
         mutating=False,
+        # cost_cap_usd deliberately left at its `None` default -- this role is never
+        # reached through `spawn()` (see WORKSPACE_SCOPED_ROLES), and `repair.py`
+        # passes `settings.repair_agent_cost_cap_usd` at its own call site instead.
+        # max_context_chars has no equivalent pre-existing setting, so it lives here
+        # and `repair.py` reads it directly: 8 steps at the repair path's own
+        # tightened `MAX_RESULT_CHARS = 6_000`, plus headroom for the knowledge file
+        # and recalled memory both folded into the first turn's context.
+        max_context_chars=120_000,
     ),
     RoleName.LEAD_SCOUT: AgentRole(
         name=RoleName.LEAD_SCOUT,
@@ -241,6 +279,8 @@ ROLES: dict[RoleName, AgentRole] = {
         tool_categories=("leads", "search"),
         task_type=TaskType.ANALYSIS,
         max_steps=6,
+        cost_cap_usd=0.20,
+        max_context_chars=120_000,
     ),
     RoleName.GROWTH_ANALYST: AgentRole(
         name=RoleName.GROWTH_ANALYST,
@@ -273,6 +313,8 @@ ROLES: dict[RoleName, AgentRole] = {
         task_type=TaskType.ANALYSIS,
         max_steps=8,
         mutating=True,
+        cost_cap_usd=0.30,
+        max_context_chars=150_000,
     ),
     RoleName.SEO_OPTIMIZER: AgentRole(
         name=RoleName.SEO_OPTIMIZER,
@@ -297,6 +339,10 @@ ROLES: dict[RoleName, AgentRole] = {
         # only ever run from inside `_patch_surgically`'s already-locked, snapshot-
         # protected context.
         mutating=False,
+        # Same exception as WORKSPACE_SURGEON, same reasons: cost_cap_usd stays
+        # `None` (repair.py's own settings-based cap applies instead), and
+        # max_context_chars is set here since there is no equivalent setting.
+        max_context_chars=120_000,
     ),
     RoleName.CHANNEL_SCOUT: AgentRole(
         name=RoleName.CHANNEL_SCOUT,
@@ -332,6 +378,8 @@ ROLES: dict[RoleName, AgentRole] = {
         task_type=TaskType.ANALYSIS,
         max_steps=12,
         mutating=True,
+        cost_cap_usd=0.40,
+        max_context_chars=220_000,
     ),
     RoleName.DISCOVERY_SCOUT: AgentRole(
         name=RoleName.DISCOVERY_SCOUT,
@@ -368,6 +416,8 @@ ROLES: dict[RoleName, AgentRole] = {
         # email, payment, or deploy), the same reasoning WORKSPACE_SURGEON and
         # SEO_OPTIMIZER document for why they stay unflagged under FACTORY_DRY_RUN.
         mutating=False,
+        cost_cap_usd=0.40,
+        max_context_chars=220_000,
     ),
 }
 
