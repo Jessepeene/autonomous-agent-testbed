@@ -3532,3 +3532,134 @@ rebuilt, migration `0025` applied to the live database, service restarted.
 `/health` returns 200, boot log clean, all six engines enabled — and the new
 `review-churn` maintenance item was already picked up and enqueued on the
 very first tick after restart.
+
+## Risk-audit hardening, Phase 7: datacenter-proxy fallback + channel diversification — 2026-08-17
+
+The last phase of the plan. Two independent halves: a narrow, honestly-scoped
+mitigation for the datacenter-IP blocking diagnosed live in an earlier
+session (see the `project_scraping_datacenter_ip_blocking` memory), and —
+the higher-value half — a distribution system that tries a different channel
+on its own before ever asking a human.
+
+**The compliance line held throughout.** `compliance/assessor.py`'s
+`IDEA_SYSTEM_PROMPT` (permanently immutable) rejects any idea requiring
+"circumventing authentication or rate limits." A rotating residential proxy
+evading a deliberate datacenter-IP block is, read fairly, exactly that — the
+factory doing to a third party what it refuses to let a generated product
+do to anyone else. So the real fix (residential/rotating proxies) was
+refused on purpose, and what shipped instead is deliberately narrower:
+datacenter-class egress proxy only, never residential/rotating, no
+User-Agent spoofing, and — the guardrail that mattered most — a 429 must
+never trigger a proxy retry anywhere, since that would be functionally
+evading the rate limit itself. Stated honestly to the operator, not
+oversold: a plausible partial mitigation for simple IP-reputation blocking,
+not a fix for ASN-class bot defense (Akamai/Cloudflare-style).
+
+**External feedback was reviewed across three rounds before building**, each
+verified against the actual code rather than accepted at face value:
+- *Round 1* (burned-timeout inefficiency): confirmed the real cost
+  (`TIMEOUT = httpx.Timeout(20.0, connect=5.0)` — up to 5s connect, 20s
+  read per doomed direct attempt, correcting the feedback's own imprecise
+  "10-30s" claim) and adopted `ScrapeDomainFailure.requires_proxy` so a
+  domain already known to need the proxy skips the direct attempt entirely
+  on every later fetch.
+- *Round 2* (the 429 circumvention trap): confirmed `_fetch_page_text` had
+  zero existing 429 handling before this phase — a 429 fell into the
+  generic "not 200" branch and was silently swallowed. Adopted an explicit
+  `_RETRIABLE_VIA_PROXY = frozenset({"timeout", "forbidden"})` allowlist
+  that excludes `"rate_limited"` by design, not by omission.
+- *Round 3* (context-blind channel scouting): confirmed `IngestReport` — the
+  object that actually knows *why* a harvest found nothing — is genuinely
+  ephemeral, built fresh per `_harvest()` call and discarded once the
+  immediate credential-problem check consumes it. `report.summary()` already
+  produced exactly the needed text; it was just being thrown away. Adopted a
+  new `Product.last_lead_sourcing_summary` column instead of inventing new
+  plumbing — `SpawnRequest.context` already existed for exactly this kind of
+  hand-off.
+- Direct question answered the same way the feedback framed it: extend
+  `ScrapeDomainFailure` rather than add a new table — same primary-key grain
+  (`domain`), avoids an extra join for what's conceptually one fact about
+  one domain.
+
+**Schema (`0026_scrape_proxy`)**: `scrape_domain_failures` gains
+`requires_proxy`/`proxy_failure_count` (a separate counter from the
+existing `failure_count`, so a proxy failure never counts toward blocking a
+domain on its *direct* threshold — a different egress IP was never going to
+fix a proxy-side failure anyway). `products` gains
+`last_lead_sourcing_summary` (truncated to 500 chars).
+
+**New `integrations/outbound.py`**: the canonical owner of `USER_AGENT`/
+`TIMEOUT`/the plain client constructor, moved here from
+`sources/base.py` (which now delegates via a one-line alias, `client()` ->
+`direct_client()`, so every existing caller — the fixed HN/GitHub/Reddit/
+Product Hunt sources — keeps behaving identically). `proxy_client(settings)`
+returns `None` when `SCRAPE_PROXY_URL` is unset, matching the codebase's
+existing "missing optional credential degrades gracefully" idiom rather than
+raising.
+
+**`website.py`**: `_fetch_page_text` now returns a 3-tuple
+(`page_text, block_reason, used_proxy`). A domain flagged `requires_proxy`
+skips the direct attempt outright; otherwise a direct failure classified as
+`"timeout"` or `"forbidden"` gets exactly one retry through the proxy, and
+`"rate_limited"` (429) is never retried under any code path — checked by a
+dedicated test. The same `_FETCH_LIMITER` gates both the direct and proxy
+attempts, since it protects the *target site*, not this factory's own egress
+point. `search()` bulk-fetches `proxy_required_domains` alongside the
+existing `blocked_scrape_domains`, threads `requires_proxy` through both the
+robots check and the fetch, and the first time a domain is seen succeeding
+via the proxy, calls `mark_requires_proxy` so every later fetch from that
+domain skips the doomed direct attempt too.
+
+**Channel diversification** — the higher-value half:
+- `products_needing_channel_scout` now also covers `VALIDATING` products,
+  not just `LIVE` ones — a validating product blocked on its one channel
+  previously had no periodic net at all, even though it needs the
+  "try another channel" backstop more than an established live product does.
+- `scheduler.py`'s stalled-validation sweep gained a middle rung: first
+  strike retries `HARVEST_LEADS` once (unchanged); second strike now
+  enqueues `CHANNEL_SCOUT_REVIEW` instead of escalating immediately; only a
+  third strike (retry *and* channel scout both found nothing) raises
+  `LEAD_SOURCING_STALLED` to a human. The system tries a different route on
+  its own before ever asking — a direct autonomy increase, and a better
+  answer to "distribution blocked" than the proxy is.
+- `_harvest()` now writes `last_lead_sourcing_summary` on every call;
+  `_channel_scout_review()` reads it and passes it as the spawned
+  `CHANNEL_SCOUT` agent's `context`, so the scout reasons from *why* the
+  last channel came up empty instead of blind.
+- `_measure_channel_experiment()` now writes a second, niche-scoped memory
+  (`scope_for(engine=EngineName.MARKETING)`) alongside its existing
+  product-scoped one — the product-scoped memory dies with that one product,
+  but a niche-scoped outcome is what `CHANNEL_SCOUT`'s next spawn on a
+  *different* product in the same niche can actually draw on
+  (`agents/spawner.py::spawn` already recalls on every spawn — this was the
+  write side of a loop that was silently product-scoped only, the same gap
+  Phase 3 fixed for validation outcomes).
+
+**`settings.py`/`preflight.py`**: new `SCRAPE_PROXY_URL` credential,
+`Severity.DEGRADES`, no engine disabled by its absence — Marketing works
+direct-only without it, exactly as it did before this phase.
+
+**Verified**: local ruff/mypy clean (same two pre-existing, unrelated
+findings noted in every earlier phase — `UP037` in `learning/maintenance.py`,
+`RUF100` in `preflight.py`). New `test_outbound_proxy.py` (11 tests) covers
+client construction and `_fetch_page_text`'s full retry sequencing in
+isolation, including the two critical guardrails as dedicated tests: 429 is
+never retried via proxy, and `requires_proxy=True` skips the direct attempt
+entirely. `test_website_provider.py` extended with `search()`-level proxy
+wiring tests (`requires_proxy` threaded through, first-time proxy success
+marks the domain, a proxy-path failure records `via_proxy=True`) and its
+existing mocks updated for `_fetch_page_text`/`_robots_allowed`'s new
+3-tuple/keyword-only signatures. New integration coverage across
+`test_stalled_validation.py` (the three-strike ladder, `has_attempted_
+channel_scout`), `test_lead_sourcing_escalation.py` (the summary write),
+and `test_growth_roles_integration.py` (the widened channel-scout sweep,
+context passed into the scout's prompt, the niche-scoped memory write).
+Local unit suite: 856 passed (same two pre-existing Windows failures).
+Scratch-Postgres: full suite, 1167 passed, no failures.
+
+**Deployed live**: single commit, transferred via `git archive HEAD`, image
+rebuilt, migration `0026` applied to the live database, service restarted.
+`/health` returns 200, boot log clean, all six engines still enabled — the
+only new preflight finding is the expected `SCRAPE_PROXY_URL is not
+configured` degrading-credential interrupt, delivered once over Telegram,
+exactly as designed.
