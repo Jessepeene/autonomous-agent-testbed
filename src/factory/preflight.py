@@ -105,6 +105,19 @@ CREDENTIALS: tuple[CredentialSpec, ...] = (
             "then /metrics refuses every request with 503 rather than serving openly."
         ),
     ),
+    CredentialSpec(
+        env_var="SCRAPE_PROXY_URL",
+        severity=Severity.DEGRADES,
+        purpose=(
+            "Datacenter-class egress proxy for lead-sourcing page fetches. Not required "
+            "-- Marketing's WebsiteContactProvider works direct-only without it, same as "
+            "today; a domain that needs it just keeps failing until one is configured."
+        ),
+        remedy=(
+            "Set SCRAPE_PROXY_URL to a datacenter proxy (never residential/rotating -- "
+            "see integrations/outbound.py) if direct-only fetches are being blocked."
+        ),
+    ),
 )
 
 

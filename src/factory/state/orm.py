@@ -187,6 +187,14 @@ class Product(Base):
     #: project, and re-deriving it from `product_name` risks drift if that name
     #: ever changes between builds (a repair pass can rename it).
     vercel_project: Mapped[str | None] = mapped_column(String(64))
+    #: `IngestReport.summary()`'s own human-readable text, written every time
+    #: `marketing/graph.py::_harvest` completes -- the report object itself is
+    #: ephemeral (built fresh per call, consumed once by the credential-problem
+    #: escalation, then discarded), so without this, a *later*, separate sweep
+    #: (`scheduler.py`'s stalled-validation third strike) has no way to tell
+    #: CHANNEL_SCOUT *why* lead sourcing stalled -- it would just re-propose
+    #: another digital channel blind to whatever already failed.
+    last_lead_sourcing_summary: Mapped[str | None] = mapped_column(String(500))
     #: A human-supplied hostname, once asked for and given -- see `development/domain.py`.
     custom_domain: Mapped[str | None] = mapped_column(String(253))
     #: NULL (never asked) -> 'pending' (asked, no reply yet) -> 'attached' (Vercel
@@ -842,12 +850,13 @@ class ScoutSignal(Base):
 
 
 class ScrapeDomainFailure(Base):
-    """A domain the web-search lead provider (`marketing/providers/website.py`)
-    has failed to fetch from -- a running per-domain count, not a per-URL log.
+    """What's been learned about fetching from one domain (the web-search lead
+    provider, `marketing/providers/website.py`) -- a running per-domain state,
+    not a per-URL log.
 
     Global, not per-product: a site blocking a datacenter IP or timing out
-    blocks every product's harvest equally, so one domain's failure history is
-    shared across all of them. Once `failure_count` crosses
+    blocks every product's harvest equally, so one domain's history is shared
+    across all of them. Once `failure_count` crosses
     `WebsiteContactProvider`'s threshold, the domain is skipped before a fetch
     is even attempted on later harvests -- observed live: repeated
     `ConnectTimeout`/`ReadTimeout`/403s against the same small set of real
@@ -862,6 +871,20 @@ class ScrapeDomainFailure(Base):
     last_failed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )
+    #: Set the first time a direct fetch fails but the same URL succeeds
+    #: through `integrations/outbound.py`'s datacenter proxy -- once true,
+    #: later requests to this domain skip the doomed direct attempt entirely
+    #: rather than re-paying a real timeout (up to 20s) to rediscover
+    #: something already known. Never reset automatically, matching
+    #: `failure_count`'s own permanence -- a site that stops blocking is rare
+    #: enough that a stale flag just costs one unnecessary proxy hop, not a
+    #: correctness problem.
+    requires_proxy: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    #: Failures that happened *through* the proxy, tracked separately from
+    #: `failure_count` (which only ever counts direct-attempt failures) -- a
+    #: domain that fails even via the datacenter proxy is a different, worse
+    #: signal than one that just needed a different IP.
+    proxy_failure_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
 class PypiPackageCheck(Base):

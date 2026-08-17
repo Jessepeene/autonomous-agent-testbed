@@ -78,6 +78,7 @@ def _mock_repository(
     *,
     has_lead: bool = False,
     blocked_domains: set[str] | None = None,
+    proxy_domains: set[str] | None = None,
 ) -> None:
     async def fake_recently_processed(*args: object, **kwargs: object) -> set[str]:
         return set()
@@ -88,15 +89,23 @@ def _mock_repository(
     async def fake_blocked_domains(*args: object, **kwargs: object) -> set[str]:
         return blocked_domains or set()
 
+    async def fake_proxy_domains(*args: object, **kwargs: object) -> set[str]:
+        return proxy_domains or set()
+
     async def fake_record_failure(*args: object, **kwargs: object) -> int:
         return 1
+
+    async def fake_mark_requires_proxy(*args: object, **kwargs: object) -> None:
+        return None
 
     monkeypatch.setattr(
         website_module.repository, "recently_processed_urls", fake_recently_processed
     )
     monkeypatch.setattr(website_module.repository, "has_lead_for_company", fake_has_lead)
     monkeypatch.setattr(website_module.repository, "blocked_scrape_domains", fake_blocked_domains)
+    monkeypatch.setattr(website_module.repository, "proxy_required_domains", fake_proxy_domains)
     monkeypatch.setattr(website_module.repository, "record_scrape_failure", fake_record_failure)
+    monkeypatch.setattr(website_module.repository, "mark_requires_proxy", fake_mark_requires_proxy)
 
 
 def _mock_serper(monkeypatch: pytest.MonkeyPatch, results: list[SerperResult]) -> None:
@@ -109,16 +118,21 @@ def _mock_serper(monkeypatch: pytest.MonkeyPatch, results: list[SerperResult]) -
 
 
 def _mock_fetch(
-    monkeypatch: pytest.MonkeyPatch, page_text: str | None, block_reason: str | None = None
+    monkeypatch: pytest.MonkeyPatch,
+    page_text: str | None,
+    block_reason: str | None = None,
+    used_proxy: bool = False,
 ) -> None:
-    async def fake_fetch(url: str) -> tuple[str | None, str | None]:
-        return page_text, block_reason
+    async def fake_fetch(
+        url: str, *, settings: Settings, requires_proxy: bool
+    ) -> tuple[str | None, str | None, bool]:
+        return page_text, block_reason, used_proxy
 
     monkeypatch.setattr(website_module, "_fetch_page_text", fake_fetch)
 
 
 def _mock_robots_allowed(monkeypatch: pytest.MonkeyPatch, allowed: bool = True) -> None:
-    async def fake_allowed(url: str) -> bool:
+    async def fake_allowed(url: str, *, settings: Settings, requires_proxy: bool) -> bool:
         return allowed
 
     monkeypatch.setattr(website_module, "_robots_allowed", fake_allowed)
@@ -332,6 +346,126 @@ async def test_an_already_blocked_domain_is_never_fetched(
     assert fetch_calls == []
 
 
+# --- the datacenter-proxy fallback ----------------------------------------------------
+
+
+async def test_a_domain_already_requiring_the_proxy_is_fetched_with_requires_proxy_true(
+    ctx: FactoryContext, gemini_fake: FakeProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A domain already known (from an earlier harvest) to need the proxy must
+    have that threaded through to both the robots check and the fetch --
+    `_fetch_page_text`/`_robots_allowed` are what actually skip the doomed
+    direct attempt, but only if `search()` tells them to."""
+    _mock_repository(monkeypatch, proxy_domains={"acme-books.test"})
+    _mock_serper(
+        monkeypatch,
+        [SerperResult(title="Our Team", link="https://acme-books.test/team", snippet="...")],
+    )
+    gemini_fake.register(_QueryList, _QueryList(queries=["bookkeeping contact us"]))
+
+    robots_calls: list[bool] = []
+
+    async def fake_robots(url: str, *, settings: Settings, requires_proxy: bool) -> bool:
+        robots_calls.append(requires_proxy)
+        return True
+
+    fetch_calls: list[bool] = []
+
+    async def fake_fetch(
+        url: str, *, settings: Settings, requires_proxy: bool
+    ) -> tuple[str | None, str | None, bool]:
+        fetch_calls.append(requires_proxy)
+        return None, None, False
+
+    monkeypatch.setattr(website_module, "_robots_allowed", fake_robots)
+    monkeypatch.setattr(website_module, "_fetch_page_text", fake_fetch)
+    provider = _provider(ctx)
+
+    await provider.search(_PLAN)
+
+    assert robots_calls == [True]
+    assert fetch_calls == [True]
+
+
+async def test_a_first_time_proxy_success_marks_the_domain_as_requiring_it(
+    ctx: FactoryContext, gemini_fake: FakeProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first fetch that succeeds via the proxy for a domain not yet known
+    to need it must be remembered -- otherwise every later fetch from the same
+    domain keeps paying for a direct attempt already known to fail."""
+    _mock_repository(monkeypatch)
+    _mock_serper(
+        monkeypatch,
+        [SerperResult(title="Our Team", link="https://acme-books.test/team", snippet="...")],
+    )
+    _mock_fetch(
+        monkeypatch,
+        "Ada Lovelace, Owner of Acme Books. ada@acme-books.test",
+        used_proxy=True,
+    )
+    _mock_robots_allowed(monkeypatch, True)
+    gemini_fake.register(_QueryList, _QueryList(queries=["bookkeeping contact us"]))
+    gemini_fake.register(
+        _LeadExtraction,
+        _LeadExtraction(
+            leads=[
+                ExtractedContact(
+                    name="Ada Lovelace",
+                    company="Acme Books",
+                    job_title="Owner",
+                    email="ada@acme-books.test",
+                    confidence=0.95,
+                )
+            ]
+        ),
+    )
+    marked: list[str] = []
+
+    async def fake_mark_requires_proxy(session: object, domain: str) -> None:
+        marked.append(domain)
+
+    monkeypatch.setattr(website_module.repository, "mark_requires_proxy", fake_mark_requires_proxy)
+    provider = _provider(ctx)
+
+    result = await provider.search(_PLAN)
+
+    assert len(result) == 1
+    assert marked == ["acme-books.test"]
+
+
+async def test_a_429_via_the_direct_path_still_counts_toward_blocking_but_not_via_proxy(
+    ctx: FactoryContext, gemini_fake: FakeProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`record_scrape_failure` must be told `via_proxy=True` when the failure
+    came from the proxy attempt -- a proxy failure must not silently count
+    toward blocking a domain on its *direct* threshold, which a different
+    egress IP was never going to fix anyway."""
+    _mock_repository(monkeypatch)
+    _mock_serper(
+        monkeypatch,
+        [SerperResult(title="Our Team", link="https://acme-books.test/team", snippet="...")],
+    )
+    _mock_fetch(monkeypatch, None, "timeout", used_proxy=True)
+    _mock_robots_allowed(monkeypatch, True)
+    gemini_fake.register(_QueryList, _QueryList(queries=["bookkeeping contact us"]))
+
+    recorded: list[tuple[str, str, bool]] = []
+
+    async def fake_record_failure(
+        *args: object, domain: str, reason: str, via_proxy: bool = False
+    ) -> int:
+        recorded.append((domain, reason, via_proxy))
+        return 1
+
+    monkeypatch.setattr(website_module.repository, "record_scrape_failure", fake_record_failure)
+    provider = _provider(ctx)
+
+    result = await provider.search(_PLAN)
+
+    assert result == []
+    assert recorded == [("acme-books.test", "timeout", True)]
+
+
 async def test_a_timeout_records_a_scrape_failure(
     ctx: FactoryContext, gemini_fake: FakeProvider, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -343,7 +477,7 @@ async def test_a_timeout_records_a_scrape_failure(
     _mock_robots_allowed(monkeypatch, True)
     gemini_fake.register(_QueryList, _QueryList(queries=["bookkeeping contact us"]))
 
-    recorded: list[tuple[str, str]] = []
+    recorded: list[tuple[str, str, bool]] = []
 
     async def fake_recently_processed(*args: object, **kwargs: object) -> set[str]:
         return set()
@@ -351,21 +485,27 @@ async def test_a_timeout_records_a_scrape_failure(
     async def fake_blocked_domains(*args: object, **kwargs: object) -> set[str]:
         return set()
 
-    async def fake_record_failure(*args: object, domain: str, reason: str) -> int:
-        recorded.append((domain, reason))
+    async def fake_proxy_domains(*args: object, **kwargs: object) -> set[str]:
+        return set()
+
+    async def fake_record_failure(
+        *args: object, domain: str, reason: str, via_proxy: bool = False
+    ) -> int:
+        recorded.append((domain, reason, via_proxy))
         return 1
 
     monkeypatch.setattr(
         website_module.repository, "recently_processed_urls", fake_recently_processed
     )
     monkeypatch.setattr(website_module.repository, "blocked_scrape_domains", fake_blocked_domains)
+    monkeypatch.setattr(website_module.repository, "proxy_required_domains", fake_proxy_domains)
     monkeypatch.setattr(website_module.repository, "record_scrape_failure", fake_record_failure)
     provider = _provider(ctx)
 
     result = await provider.search(_PLAN)
 
     assert result == []
-    assert recorded == [("acme-books.test", "timeout")]
+    assert recorded == [("acme-books.test", "timeout", False)]
 
 
 async def test_a_second_failure_within_one_call_blocks_the_rest_of_that_call(
@@ -389,9 +529,11 @@ async def test_a_second_failure_within_one_call_blocks_the_rest_of_that_call(
 
     fetch_calls: list[str] = []
 
-    async def fake_fetch(url: str) -> tuple[str | None, str | None]:
+    async def fake_fetch(
+        url: str, *, settings: Settings, requires_proxy: bool
+    ) -> tuple[str | None, str | None, bool]:
         fetch_calls.append(url)
-        return None, "forbidden"
+        return None, "forbidden", False
 
     async def fake_recently_processed(*args: object, **kwargs: object) -> set[str]:
         return set()
@@ -399,7 +541,12 @@ async def test_a_second_failure_within_one_call_blocks_the_rest_of_that_call(
     async def fake_blocked_domains(*args: object, **kwargs: object) -> set[str]:
         return set()
 
-    async def fake_record_failure(*args: object, domain: str, reason: str) -> int:
+    async def fake_proxy_domains(*args: object, **kwargs: object) -> set[str]:
+        return set()
+
+    async def fake_record_failure(
+        *args: object, domain: str, reason: str, via_proxy: bool = False
+    ) -> int:
         return len(fetch_calls)  # 1st failure -> 1, 2nd -> 2 (meets threshold)
 
     monkeypatch.setattr(website_module, "_fetch_page_text", fake_fetch)
@@ -407,6 +554,7 @@ async def test_a_second_failure_within_one_call_blocks_the_rest_of_that_call(
         website_module.repository, "recently_processed_urls", fake_recently_processed
     )
     monkeypatch.setattr(website_module.repository, "blocked_scrape_domains", fake_blocked_domains)
+    monkeypatch.setattr(website_module.repository, "proxy_required_domains", fake_proxy_domains)
     monkeypatch.setattr(website_module.repository, "record_scrape_failure", fake_record_failure)
     provider = _provider(ctx)
 

@@ -73,6 +73,14 @@ class Settings(BaseSettings):
     # provider and the general-purpose `web_search` agent tool.
     serper_api_key: SecretStr | None = None
 
+    # Datacenter-class egress proxy for `WebsiteContactProvider`'s page fetches (see
+    # `integrations/outbound.py`). A *different* IP, not a disguise -- no residential
+    # or rotating proxies, no User-Agent spoofing, and a 429 never triggers a retry
+    # through it (that would be evading a rate limit, exactly what
+    # `IDEA_SYSTEM_PROMPT` rejects the factory building for someone else). Unset
+    # means every fetch is direct-only, same as today.
+    scrape_proxy_url: SecretStr | None = None
+
     outbound_from_address: str | None = None
     outbound_postal_address: str | None = None
     unsubscribe_base_url: str | None = None

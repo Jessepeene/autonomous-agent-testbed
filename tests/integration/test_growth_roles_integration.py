@@ -205,6 +205,83 @@ async def test_products_needing_growth_review_excludes_non_live_products(
     assert product_id not in {p.id for p in products}
 
 
+# --- repository.products_needing_channel_scout --------------------------------------
+
+
+async def test_products_needing_channel_scout_finds_an_overdue_live_product(
+    session: AsyncSession,
+) -> None:
+    product_id = await _make_live_product(session, "scout-overdue-live")
+    await _backdate(session, product_id, column="created_at", days=30)
+    await session.flush()
+
+    products = await repository.products_needing_channel_scout(
+        session, older_than=timedelta(days=14), limit=10
+    )
+
+    assert product_id in {p.id for p in products}
+
+
+async def test_products_needing_channel_scout_now_also_finds_a_validating_product(
+    session: AsyncSession,
+) -> None:
+    """The widening this phase adds: a validating product blocked on its one
+    channel previously got no periodic net at all -- only a LIVE product's
+    established base did, even though a validating product with no leads
+    needs the "try another channel" backstop more."""
+    idea = ScoredIdea(
+        problem_statement="Bookkeepers reconcile invoices by hand every week.",
+        target_niche="scout-overdue-validating",
+        source_url="https://example.test/thread",
+        monetization_hypothesis="Bookkeepers pay EUR 49/month per seat.",
+        pain_severity=0.8,
+        willingness_to_pay=0.7,
+        build_feasibility=0.6,
+        adoption_ease=0.8,
+    )
+    idea_id = await repository.upsert_idea(session, idea)
+    assert idea_id is not None
+    product_id = await repository.create_product(
+        session, name="scout-overdue-validating", idea_id=idea_id
+    )
+    await repository.set_product_status(session, product_id, ProductStatus.VALIDATING)
+    await _backdate(session, product_id, column="created_at", days=30)
+    await session.flush()
+
+    products = await repository.products_needing_channel_scout(
+        session, older_than=timedelta(days=14), limit=10
+    )
+
+    assert product_id in {p.id for p in products}
+
+
+async def test_products_needing_channel_scout_excludes_a_product_still_planned(
+    session: AsyncSession,
+) -> None:
+    idea = ScoredIdea(
+        problem_statement="Bookkeepers reconcile invoices by hand every week.",
+        target_niche="scout-not-planned",
+        source_url="https://example.test/thread",
+        monetization_hypothesis="Bookkeepers pay EUR 49/month per seat.",
+        pain_severity=0.8,
+        willingness_to_pay=0.7,
+        build_feasibility=0.6,
+        adoption_ease=0.8,
+    )
+    idea_id = await repository.upsert_idea(session, idea)
+    assert idea_id is not None
+    product_id = await repository.create_product(session, name="Not Planned", idea_id=idea_id)
+    # Left at PLANNED (create_product's default) -- neither LIVE nor VALIDATING.
+    await _backdate(session, product_id, column="created_at", days=30)
+    await session.flush()
+
+    products = await repository.products_needing_channel_scout(
+        session, older_than=timedelta(days=14), limit=10
+    )
+
+    assert product_id not in {p.id for p in products}
+
+
 # --- repository: channel_experiments CRUD and sync_decisions -----------------------
 
 
@@ -523,6 +600,39 @@ async def test_channel_scout_review_spawns_scout_and_marks_scouted(
     get_settings.cache_clear()
 
 
+async def test_channel_scout_review_passes_the_last_lead_sourcing_summary_as_context(
+    session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Why this scout was called matters -- a product whose only channel just
+    went quiet needs a genuinely different channel, not a repeat of the one
+    that already failed. `_harvest` writes `last_lead_sourcing_summary`
+    (see `test_lead_sourcing_escalation.py`); this is the read side."""
+    from factory.settings import get_settings
+    from factory.tools import growth  # noqa: F401 - import populates REGISTRY
+
+    monkeypatch.setenv("DATABASE_URL", DATABASE_URL or "")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    get_settings.cache_clear()
+
+    product_id = await _make_live_product(session, "channel-scout-context-e2e")
+    await repository.set_last_lead_sourcing_summary(
+        session, product_id, "Sourced 0/30 leads: Apollo quota exhausted."
+    )
+    await session.commit()
+
+    provider = FakeProvider(name=Provider.GEMINI)
+    provider.register_turns(_completion("Nothing promising found."))
+    ctx = _ctx(workspace_root=tmp_path, gemini=provider)
+
+    await mkt_graph.run(ctx, session, _channel_scout_task(product_id))
+
+    assert len(provider.conversations) == 1
+    prompt = provider.conversations[0]["turns"][0].text
+    assert "Apollo quota exhausted" in prompt
+
+    get_settings.cache_clear()
+
+
 # --- marketing/graph.py::_measure_channel_experiment --------------------------------
 
 
@@ -580,6 +690,55 @@ async def test_measure_channel_experiment_tallies_matching_referrers(
     assert experiment.status == "concluded"
     assert experiment.outcome is not None
     assert "2 visit" in experiment.outcome
+
+
+async def test_measure_channel_experiment_also_writes_a_niche_scoped_memory(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """The product-scoped memory dies with this one product once it's retired;
+    the niche-scoped twin is what CHANNEL_SCOUT's next spawn on a *different*
+    product in the same niche can actually draw on -- `agents/spawner.py::spawn`
+    already recalls on every spawn, so this is the write side of a loop that was
+    previously silently product-scoped only, same gap Phase 3 fixed for
+    validation outcomes."""
+    from factory.memory import store as memory_store
+    from factory.state.orm import Memory
+
+    niche = "measure-channel-niche-e2e"
+    product_id = await _make_live_product(session, niche)
+    experiment_id = await repository.create_channel_experiment(
+        session,
+        product_id=product_id,
+        channel="reddit",
+        url="https://www.reddit.com/r/bookkeeping/comments/xyz789",
+        rationale="...",
+        draft_content="...",
+    )
+    await repository.decide_channel_experiment(session, experiment_id, "approved")
+    await session.execute(
+        update(ChannelExperiment)
+        .where(ChannelExperiment.id == experiment_id)
+        .values(decided_at=datetime.now(UTC) - timedelta(hours=1))
+    )
+    await session.flush()
+
+    provider = FakeProvider(name=Provider.GEMINI)
+    ctx = _ctx(workspace_root=tmp_path, gemini=provider)
+
+    await mkt_graph.run(ctx, session, _measure_task(experiment_id, product_id))
+    await session.flush()
+
+    scope = memory_store.scope_for(engine=EngineName.MARKETING)
+    rows = (
+        (
+            await session.execute(
+                select(Memory).where(Memory.scope == scope, Memory.superseded_at.is_(None))
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert any(niche in row.content for row in rows)
 
 
 # --- development/graph.py::_patch with category="growth_seo" -----------------------

@@ -6,9 +6,13 @@ indefinitely after a lead-provider credential was rejected, with no retry and
 no escalation.
 
 `scheduler.py`'s stalled-validation sweep closes this: try one automatic
-re-harvest, then -- only if that also found nothing -- escalate, the same
-"someone tries to fix it, then asks" shape as every other autonomous-repair
-path in this factory (heal cycles, DevOps-error classification).
+re-harvest, then -- only if that also found nothing -- try a different
+distribution channel via CHANNEL_SCOUT_REVIEW, and only escalate to a human
+once *that* has also found nothing, the same "someone tries to fix it, then
+asks" shape as every other autonomous-repair path in this factory (heal
+cycles, DevOps-error classification) -- now with an extra rung, since a
+different channel is a better answer to "distribution blocked" than an
+automatic retry of the same one.
 
 Needs Postgres:
 
@@ -250,7 +254,33 @@ async def test_has_retried_once_a_second_harvest_task_exists(session: AsyncSessi
     assert await repository.has_retried_lead_sourcing(session, product_id) is True
 
 
-# --- scheduler: try once, then escalate -------------------------------------------------
+# --- repository.has_attempted_channel_scout ---------------------------------------------
+
+
+async def test_has_not_attempted_channel_scout_with_no_task(session: AsyncSession) -> None:
+    product_id = await _make_validating_product(session, "scout-check-one")
+    await session.flush()
+
+    assert await repository.has_attempted_channel_scout(session, product_id) is False
+
+
+async def test_has_attempted_channel_scout_once_a_task_exists(session: AsyncSession) -> None:
+    product_id = await _make_validating_product(session, "scout-check-two")
+    await repository.enqueue_task(
+        session,
+        kind=TaskKind.CHANNEL_SCOUT_REVIEW,
+        engine=EngineName.MARKETING,
+        idempotency_key=f"channel-scout:stall:{product_id}",
+        payload={"product_id": product_id},
+        product_id=product_id,
+        priority=100,
+    )
+    await session.flush()
+
+    assert await repository.has_attempted_channel_scout(session, product_id) is True
+
+
+# --- scheduler: retry, then try a channel, then escalate --------------------------------
 
 
 async def test_first_encounter_enqueues_a_retry_not_an_escalation(
@@ -272,7 +302,7 @@ async def test_first_encounter_enqueues_a_retry_not_an_escalation(
     assert await repository.count_open_interrupts(session) == 0
 
 
-async def test_second_encounter_escalates_instead_of_retrying_again(
+async def test_second_encounter_tries_a_channel_scout_before_escalating(
     session: AsyncSession, tmp_path: Path
 ) -> None:
     product_id = await _make_validating_product(session, "sweep-second-strike", age_hours=48)
@@ -295,12 +325,53 @@ async def test_second_encounter_escalates_instead_of_retrying_again(
     await scheduler._schedule_periodic(session)
     await session.commit()
 
+    task = await repository.claim_next_task(session, worker_id="w", engines=[EngineName.MARKETING])
+    assert task is not None
+    assert task.kind == TaskKind.CHANNEL_SCOUT_REVIEW.value
+    assert task.idempotency_key == f"channel-scout:stall:{product_id}"
+    assert await repository.count_open_interrupts(session) == 0
+
+
+async def test_third_encounter_escalates_after_a_channel_scout_also_found_nothing(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    product_id = await _make_validating_product(session, "sweep-third-strike", age_hours=48)
+    await _initial_harvest_task(session, product_id)
+    retry_task_id = await repository.enqueue_task(
+        session,
+        kind=TaskKind.HARVEST_LEADS,
+        engine=EngineName.MARKETING,
+        idempotency_key=f"leads:validate:{product_id}:retry",
+        payload={"product_id": product_id},
+        product_id=product_id,
+        priority=120,
+    )
+    assert retry_task_id is not None
+    await repository.complete_task(session, retry_task_id)
+    scout_task_id = await repository.enqueue_task(
+        session,
+        kind=TaskKind.CHANNEL_SCOUT_REVIEW,
+        engine=EngineName.MARKETING,
+        idempotency_key=f"channel-scout:stall:{product_id}",
+        payload={"product_id": product_id},
+        product_id=product_id,
+        priority=100,
+    )
+    assert scout_task_id is not None
+    await repository.complete_task(session, scout_task_id)
+    await session.commit()
+
+    ctx = _ctx(enabled={EngineName.MARKETING}, workspace_root=tmp_path)
+    scheduler = Scheduler(ctx, graph=None)
+    await scheduler._schedule_periodic(session)
+    await session.commit()
+
     assert await repository.count_pending_tasks(session, EngineName.MARKETING) == 0
     interrupts = await repository.list_open_interrupts(session)
     assert len(interrupts) == 1
     assert interrupts[0].reason == InterruptReason.LEAD_SOURCING_STALLED.value
     assert interrupts[0].product_id == product_id
-    assert "sweep-second-strike" in interrupts[0].subject
+    assert "sweep-third-strike" in interrupts[0].subject
 
 
 async def test_a_product_already_escalated_is_left_alone(

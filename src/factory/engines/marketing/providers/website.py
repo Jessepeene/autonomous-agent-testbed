@@ -20,6 +20,7 @@ construct it.
 from __future__ import annotations
 
 import urllib.robotparser
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from html.parser import HTMLParser
 from urllib.parse import urlparse
@@ -28,7 +29,7 @@ import httpx
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from factory.engines.discovery.sources.base import USER_AGENT, RateLimiter, client
+from factory.engines.discovery.sources.base import USER_AGENT, RateLimiter
 from factory.engines.marketing.providers.base import (
     LeadCandidate,
     LeadSearchPlan,
@@ -40,7 +41,7 @@ from factory.engines.marketing.providers.base import (
     usable_person_email,
 )
 from factory.engines.marketing.providers.hunter import find_email
-from factory.integrations import serper
+from factory.integrations import outbound, serper
 from factory.llm.providers.base import LLMError
 from factory.logging import get_logger
 from factory.settings import EngineName, Settings, TaskType
@@ -304,18 +305,80 @@ def _domain_matches_company(company: str, domain: str) -> bool:
     return any(word in domain_text for word in distinctive)
 
 
-async def _robots_allowed(url: str) -> bool:
+@dataclass(slots=True)
+class _FetchAttempt:
+    text: str | None
+    #: "timeout" | "forbidden" | "rate_limited" | None. Only "timeout" and
+    #: "forbidden" are ever retried through the proxy -- see
+    #: `_RETRIABLE_VIA_PROXY`'s own comment for why "rate_limited" (429) is
+    #: deliberately excluded, not just omitted by oversight.
+    block_reason: str | None
+
+
+#: Only these block reasons plausibly mean "this specific egress IP is the
+#: problem" -- a different datacenter IP could plausibly help with either.
+#: 429 is deliberately never included: retrying a rate-limit response through
+#: a different IP would be functionally evading the rate limit itself,
+#: exactly what IDEA_SYSTEM_PROMPT already refuses to let a generated product
+#: do to anyone else (see integrations/outbound.py's own module docstring).
+_RETRIABLE_VIA_PROXY = frozenset({"timeout", "forbidden"})
+
+
+async def _attempt_fetch(url: str, http_client: httpx.AsyncClient) -> _FetchAttempt:
+    """One GET through the given client, classified. Shared by both the direct
+    and proxy attempts so the classification logic exists in exactly one
+    place regardless of which egress point made the request."""
+    try:
+        response = await http_client.get(url, follow_redirects=True)
+    except httpx.TimeoutException as exc:
+        # httpx's TimeoutException subclasses commonly stringify to "" -- the
+        # exception's own class name is the only reliably informative thing
+        # to log here (observed live: ConnectTimeout and ReadTimeout both
+        # printed empty detail, making a run's log read as an unexplained gap
+        # until the eventual leads.website_domain_blocked line).
+        log.info("leads.website_fetch_timeout", url=url, kind=type(exc).__name__)
+        return _FetchAttempt(None, "timeout")
+    except httpx.HTTPError as exc:
+        log.info("leads.website_fetch_failed", url=url, detail=str(exc)[:200])
+        return _FetchAttempt(None, None)
+    if response.status_code == 429:
+        log.info("leads.website_fetch_rate_limited", url=url)
+        return _FetchAttempt(None, "rate_limited")
+    if response.status_code == 403:
+        log.info("leads.website_fetch_forbidden", url=url)
+        return _FetchAttempt(None, "forbidden")
+    if response.status_code != 200:
+        return _FetchAttempt(None, None)
+    content_type = response.headers.get("content-type", "")
+    if "html" not in content_type and "text" not in content_type:
+        return _FetchAttempt(None, None)
+    text = _strip_html(response.text)
+    return _FetchAttempt(text[:_MAX_PAGE_CHARS] if text.strip() else None, None)
+
+
+async def _robots_allowed(url: str, *, settings: Settings, requires_proxy: bool) -> bool:
     """Best-effort robots.txt check -- fails open (allowed) if robots.txt itself
     can't be fetched or parsed, since an absent/broken robots.txt is not a
     disallow. Apollo/Hunter never needed this: they call clean JSON APIs, not
     arbitrary third-party HTML -- this provider is the first thing in this
-    codebase that visits arbitrary sites, so it's the first that needs to."""
+    codebase that visits arbitrary sites, so it's the first that needs to.
+
+    ``requires_proxy``: skips straight to the datacenter proxy for a domain
+    already known (from an earlier page fetch) to need it -- same "don't
+    re-pay a known timeout" reasoning as `_fetch_page_text`. Deliberately
+    does not itself retry-then-mark on a *first-time* failure the way
+    `_fetch_page_text` does -- keeping that classification in one place
+    avoids the two functions disagreeing about which domains need the proxy.
+    """
     parsed = urlparse(url)
     robots_url = f"{parsed.scheme}://{parsed.netloc}/robots.txt"
     parser = urllib.robotparser.RobotFileParser()
+    http_client = outbound.proxy_client(settings) if requires_proxy else None
+    if http_client is None:
+        http_client = outbound.direct_client()
     try:
-        async with client() as http_client:
-            response = await http_client.get(robots_url)
+        async with http_client as c:
+            response = await c.get(robots_url)
     except httpx.HTTPError:
         return True
     if response.status_code >= 400:
@@ -327,40 +390,44 @@ async def _robots_allowed(url: str) -> bool:
     return parser.can_fetch(USER_AGENT, url)
 
 
-async def _fetch_page_text(url: str) -> tuple[str | None, str | None]:
-    """Returns ``(page_text, block_reason)``. ``block_reason`` is set only for
-    the failures worth counting toward a domain's no-call-list threshold --
-    timeouts and 403s, both host-level rejections that a retry with the same
-    request will not fix. Observed live: `ConnectTimeout` against a small
-    site and `ReadTimeout` against a large one, both real datacenter-IP
-    resistance, not a bug in how this factory builds the request. Anything
-    else (a 404, a non-HTML content type) is a normal skip, not a rejection,
-    and does not count toward blocking the domain."""
+async def _fetch_page_text(
+    url: str, *, settings: Settings, requires_proxy: bool
+) -> tuple[str | None, str | None, bool]:
+    """Returns ``(page_text, block_reason, used_proxy)``. ``block_reason`` is
+    set only for the failures worth counting toward a domain's no-call-list
+    threshold -- timeouts and 403s, both host-level rejections that a retry
+    with the same request will not fix. Observed live: `ConnectTimeout`
+    against a small site and `ReadTimeout` against a large one, both real
+    datacenter-IP resistance, not a bug in how this factory builds the
+    request. Anything else (a 404, a non-HTML content type, a 429) is not
+    retried and does not count toward blocking the domain.
+
+    ``requires_proxy``: a domain already known to need the proxy skips the
+    direct attempt entirely -- see `ScrapeDomainFailure.requires_proxy`.
+    Otherwise, a direct attempt that fails with a retriable reason
+    (``_RETRIABLE_VIA_PROXY``) gets exactly one retry through
+    `integrations/outbound.py`'s datacenter proxy before giving up.
+    """
     await _FETCH_LIMITER.wait()
-    try:
-        async with client() as http_client:
-            response = await http_client.get(url, follow_redirects=True)
-    except httpx.TimeoutException as exc:
-        # httpx's TimeoutException subclasses commonly stringify to "" -- the
-        # exception's own class name is the only reliably informative thing
-        # to log here (observed live: ConnectTimeout and ReadTimeout both
-        # printed empty detail, making a run's log read as an unexplained gap
-        # until the eventual leads.website_domain_blocked line).
-        log.info("leads.website_fetch_timeout", url=url, kind=type(exc).__name__)
-        return None, "timeout"
-    except httpx.HTTPError as exc:
-        log.info("leads.website_fetch_failed", url=url, detail=str(exc)[:200])
-        return None, None
-    if response.status_code == 403:
-        log.info("leads.website_fetch_forbidden", url=url)
-        return None, "forbidden"
-    if response.status_code != 200:
-        return None, None
-    content_type = response.headers.get("content-type", "")
-    if "html" not in content_type and "text" not in content_type:
-        return None, None
-    text = _strip_html(response.text)
-    return (text[:_MAX_PAGE_CHARS] if text.strip() else None), None
+    direct_attempt: _FetchAttempt | None = None
+    if not requires_proxy:
+        async with outbound.direct_client() as http_client:
+            direct_attempt = await _attempt_fetch(url, http_client)
+        if (
+            direct_attempt.text is not None
+            or direct_attempt.block_reason not in _RETRIABLE_VIA_PROXY
+        ):
+            return direct_attempt.text, direct_attempt.block_reason, False
+
+    proxy = outbound.proxy_client(settings)
+    if proxy is None:
+        fallback_reason = direct_attempt.block_reason if direct_attempt is not None else "timeout"
+        return None, fallback_reason, False
+
+    await _FETCH_LIMITER.wait()
+    async with proxy as http_client:
+        proxy_attempt = await _attempt_fetch(url, http_client)
+    return proxy_attempt.text, proxy_attempt.block_reason, True
 
 
 class WebsiteContactProvider:
@@ -421,6 +488,7 @@ class WebsiteContactProvider:
         blocked_domains = await repository.blocked_scrape_domains(
             self._session, threshold=_DOMAIN_BLOCK_THRESHOLD
         )
+        proxy_domains = await repository.proxy_required_domains(self._session)
 
         candidates: list[LeadCandidate] = []
         for query in queries:
@@ -449,17 +517,28 @@ class WebsiteContactProvider:
                 if domain and domain in blocked_domains:
                     log.info("leads.website_domain_blocked", domain=domain)
                     continue
-                if not await _robots_allowed(result.link):
+                domain_requires_proxy = bool(domain and domain in proxy_domains)
+                if not await _robots_allowed(
+                    result.link, settings=self._settings, requires_proxy=domain_requires_proxy
+                ):
                     log.info("leads.website_robots_disallowed", url=result.link)
                     continue
 
-                page_text, block_reason = await _fetch_page_text(result.link)
+                page_text, block_reason, used_proxy = await _fetch_page_text(
+                    result.link, settings=self._settings, requires_proxy=domain_requires_proxy
+                )
                 if block_reason is not None and domain:
                     new_count = await repository.record_scrape_failure(
-                        self._session, domain=domain, reason=block_reason
+                        self._session, domain=domain, reason=block_reason, via_proxy=used_proxy
                     )
-                    if new_count >= _DOMAIN_BLOCK_THRESHOLD:
+                    if not used_proxy and new_count >= _DOMAIN_BLOCK_THRESHOLD:
                         blocked_domains.add(domain)
+                elif page_text is not None and used_proxy and domain and not domain_requires_proxy:
+                    # First time this domain has been seen failing direct but
+                    # succeeding via the proxy -- remember it so every later
+                    # fetch from this domain skips the doomed direct attempt.
+                    await repository.mark_requires_proxy(self._session, domain)
+                    proxy_domains.add(domain)
                 if not page_text:
                     continue
                 processed.add(result.link)

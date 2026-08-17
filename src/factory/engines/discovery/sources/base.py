@@ -13,8 +13,18 @@ from typing import Protocol
 
 import httpx
 
-USER_AGENT = "superagent-factory/0.1 (+market research; contact via source site)"
-TIMEOUT = httpx.Timeout(20.0, connect=5.0)
+from factory.integrations.outbound import TIMEOUT, USER_AGENT
+from factory.integrations.outbound import direct_client as _direct_client
+
+__all__ = [
+    "COMPLAINT_QUERIES",
+    "TIMEOUT",
+    "USER_AGENT",
+    "RateLimiter",
+    "Signal",
+    "Source",
+    "client",
+]
 
 #: Phrases that reliably precede an unmet need in developer and operator writing.
 COMPLAINT_QUERIES: tuple[str, ...] = (
@@ -69,4 +79,8 @@ class RateLimiter:
 
 
 def client() -> httpx.AsyncClient:
-    return httpx.AsyncClient(timeout=TIMEOUT, headers={"User-Agent": USER_AGENT})
+    """Thin delegating alias -- `integrations/outbound.py` now owns egress
+    policy (the plain client, and the datacenter-proxy fallback
+    `website.py` uses); this keeps every one of this function's existing
+    callers unchanged."""
+    return _direct_client()

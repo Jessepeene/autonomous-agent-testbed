@@ -33,7 +33,7 @@ from factory.sandbox.disabled import DisabledSandbox
 from factory.settings import EngineName, Settings
 from factory.state import db as db_module
 from factory.state import repository
-from factory.state.orm import Base, Interrupt, Task, new_id
+from factory.state.orm import Base, Interrupt, Product, Task, new_id
 from factory.state.schemas import InterruptReason, ProductStatus, ScoredIdea, TaskKind, TaskStatus
 from factory.supervisor.context import FactoryContext
 
@@ -228,3 +228,29 @@ async def test_harvest_does_not_escalate_on_an_ordinary_zero_result_search(
     await session.commit()
 
     assert await repository.count_open_interrupts(session) == 0
+
+
+async def test_harvest_persists_the_report_summary_for_a_later_channel_scout(
+    session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`IngestReport` itself is thrown away once `_harvest` returns -- this is
+    the one place its summary text survives, so a later CHANNEL_SCOUT_REVIEW
+    (see `_channel_scout_review`) can be told why the last harvest came up
+    empty instead of reasoning blind about it."""
+    product_id = await _make_product(session, "harvest-wiring-summary-product")
+    await session.commit()
+
+    report = leads_module.IngestReport(planned=30, returned=0)
+
+    async def fake_ingest(*args: object, **kwargs: object) -> leads_module.IngestReport:
+        return report
+
+    monkeypatch.setattr(leads_module, "ingest", fake_ingest)
+
+    ctx = _ctx(workspace_root=tmp_path)
+    await mkt_graph._harvest(ctx, session, _harvest_task(product_id))
+    await session.commit()
+
+    product = await session.get(Product, product_id)
+    assert product is not None
+    assert product.last_lead_sourcing_summary == report.summary()

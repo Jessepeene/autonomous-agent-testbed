@@ -76,6 +76,13 @@ async def _harvest(ctx: FactoryContext, session: AsyncSession, task: Task) -> st
     report = await leads_module.ingest(
         ctx, session, product_summary=summary, product_id=resolved_id, limit=limit, task_id=task.id
     )
+    if resolved_id:
+        # `IngestReport` itself is ephemeral (built fresh per call, consumed only
+        # by the credential-problem check right below) -- this is the only place
+        # its "why" survives past this one call, so a later CHANNEL_SCOUT_REVIEW
+        # (see `_channel_scout_review` and `scheduler.py`'s stalled-validation
+        # third strike) can be told why the current channel came up empty.
+        await repository.set_last_lead_sourcing_summary(session, resolved_id, report.summary())
     if resolved_id and (report.credential_problem or report.request_problem):
         await _escalate_lead_sourcing_problem(session, resolved_id, report)
     if report.stored:
@@ -285,12 +292,19 @@ async def _channel_scout_review(ctx: FactoryContext, session: AsyncSession, task
         f"Research a new organic growth channel for product {product_id} "
         f"({product.name}) and propose one if you find a genuinely good fit."
     )
+    # Why this scout was called matters: a product whose only channel just went
+    # quiet (see `_harvest`'s write and `scheduler.py`'s stalled-validation third
+    # strike) needs a genuinely different channel, not a repeat of the one that
+    # already failed -- without this the scout would be reasoning blind about
+    # what's already been tried.
+    context = product.last_lead_sourcing_summary or ""
     result = await spawn(
         ctx,
         session,
         SpawnRequest(
             role=RoleName.CHANNEL_SCOUT,
             objective=objective,
+            context=context,
             engine=EngineName.MARKETING,
             product_id=product_id,
             task_id=task.id,
@@ -326,16 +340,33 @@ async def _measure_channel_experiment(
     )
     outcome = f"{views} visit(s) referred from {host} since approval on {since.date().isoformat()}."
     await repository.conclude_channel_experiment(session, experiment_id, outcome=outcome)
+    memory_content = (
+        f"Channel experiment on {experiment.channel} ({experiment.url}) for "
+        f"product {experiment.product_id}: {outcome}"
+    )
     await memory_store.remember(
         session,
-        content=(
-            f"Channel experiment on {experiment.channel} ({experiment.url}) for "
-            f"product {experiment.product_id}: {outcome}"
-        ),
+        content=memory_content,
         kind=memory_store.MemoryKind.LESSON,
         scope=memory_store.scope_for(product_id=experiment.product_id),
         origin="marketing:channel_experiment",
     )
+    # Second write, scoped by niche rather than product: the product-scoped memory
+    # above dies with this one product, but "(channel, niche, outcome)" is exactly
+    # the evidence CHANNEL_SCOUT's next spawn on a *different* product in the same
+    # niche needs -- `agents/spawner.py::spawn` already recalls on every spawn (see
+    # `Product.last_lead_sourcing_summary`'s sibling read above), so this is the
+    # write side of a loop that was previously silently product-scoped only, the
+    # same scoping gap Phase 3 fixed for validation outcomes.
+    niche = await repository.get_niche_for_product(session, experiment.product_id)
+    if niche:
+        await memory_store.remember(
+            session,
+            content=f"[{niche}] {memory_content}",
+            kind=memory_store.MemoryKind.LESSON,
+            scope=memory_store.scope_for(engine=EngineName.MARKETING),
+            origin="marketing:channel_experiment",
+        )
     log.info(
         "marketing.channel_experiment_concluded",
         product_id=experiment.product_id,

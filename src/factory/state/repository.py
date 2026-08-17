@@ -604,6 +604,20 @@ async def get_product(session: AsyncSession, product_id: str) -> Product | None:
     return await session.get(Product, product_id)
 
 
+async def set_last_lead_sourcing_summary(
+    session: AsyncSession, product_id: str, summary: str
+) -> None:
+    """`IngestReport.summary()`'s own text, persisted so it survives past the
+    single `_harvest()` call that produced it -- see `Product.
+    last_lead_sourcing_summary`'s own comment for why the report object
+    itself can't be read back later."""
+    await session.execute(
+        update(Product)
+        .where(Product.id == product_id)
+        .values(last_lead_sourcing_summary=summary[:500])
+    )
+
+
 async def get_niche_for_product(session: AsyncSession, product_id: str) -> str | None:
     """`Product.idea_id -> Idea.target_niche` -- the one piece of context
     `finance/churn.py::write_churn_lessons` needs to file a memory at
@@ -724,12 +738,21 @@ async def products_needing_growth_review(
 async def products_needing_channel_scout(
     session: AsyncSession, *, older_than: timedelta, limit: int = 10
 ) -> list[Product]:
-    """Same reasoning as `products_needing_growth_review`, for CHANNEL_SCOUT."""
+    """Same reasoning as `products_needing_growth_review`, for CHANNEL_SCOUT.
+
+    Includes VALIDATING alongside LIVE: a validating product blocked on its one
+    channel previously had no periodic net at all -- only a LIVE product's
+    established customer base got the "try another channel" backstop, even
+    though a validating product with no leads needs it more.
+    """
     cutoff = _now() - older_than
     effective = func.coalesce(Product.last_channel_scout_at, Product.created_at)
     stmt = (
         select(Product)
-        .where(Product.status == ProductStatus.LIVE.value, effective < cutoff)
+        .where(
+            Product.status.in_([ProductStatus.LIVE.value, ProductStatus.VALIDATING.value]),
+            effective < cutoff,
+        )
         .order_by(effective.asc())
         .limit(limit)
     )
@@ -787,6 +810,22 @@ async def has_retried_lead_sourcing(session: AsyncSession, product_id: str) -> b
         .where(Task.product_id == product_id, Task.kind == TaskKind.HARVEST_LEADS.value)
     )
     return int((await session.execute(stmt)).scalar_one()) >= 2
+
+
+async def has_attempted_channel_scout(session: AsyncSession, product_id: str) -> bool:
+    """The stalled-validation sweep's third rung: try a different distribution
+    channel before escalating to a human, but only once ever for this product --
+    whether that CHANNEL_SCOUT_REVIEW task came from this same stall ladder or
+    from `products_needing_channel_scout`'s own periodic sweep. A channel that
+    was already tried for any reason does not need trying again just because the
+    sweep also happens to be looking at a stall right now.
+    """
+    stmt = (
+        select(func.count())
+        .select_from(Task)
+        .where(Task.product_id == product_id, Task.kind == TaskKind.CHANNEL_SCOUT_REVIEW.value)
+    )
+    return int((await session.execute(stmt)).scalar_one()) >= 1
 
 
 async def set_vercel_project(session: AsyncSession, product_id: str, project: str) -> None:
@@ -996,28 +1035,56 @@ async def set_lead_qualification_brief(
     )
 
 
-async def record_scrape_failure(session: AsyncSession, *, domain: str, reason: str) -> int:
+async def record_scrape_failure(
+    session: AsyncSession, *, domain: str, reason: str, via_proxy: bool = False
+) -> int:
     """First failure for a domain inserts ``failure_count=1``; each later one
     increments it and refreshes the reason/timestamp. Global, not per-product
     -- see `ScrapeDomainFailure`'s docstring.
+
+    ``via_proxy=True`` increments ``proxy_failure_count`` instead --
+    a domain that fails even through the datacenter proxy is a different,
+    worse signal than one that just needed a different IP, and must not be
+    conflated with (or silently reset) the direct-attempt count.
 
     Returns the count *after* this failure — ``RETURNING`` rather than a
     second `SELECT`, so a caller deciding whether this exact failure just
     crossed its blocking threshold doesn't need an extra round trip.
     """
-    stmt = (
-        pg_insert(ScrapeDomainFailure)
-        .values(domain=domain, failure_count=1, last_reason=reason, last_failed_at=_now())
-        .on_conflict_do_update(
-            index_elements=[ScrapeDomainFailure.domain],
-            set_={
-                "failure_count": ScrapeDomainFailure.failure_count + 1,
-                "last_reason": reason,
-                "last_failed_at": _now(),
-            },
+    if via_proxy:
+        stmt = (
+            pg_insert(ScrapeDomainFailure)
+            .values(
+                domain=domain,
+                failure_count=0,
+                proxy_failure_count=1,
+                last_reason=reason,
+                last_failed_at=_now(),
+            )
+            .on_conflict_do_update(
+                index_elements=[ScrapeDomainFailure.domain],
+                set_={
+                    "proxy_failure_count": ScrapeDomainFailure.proxy_failure_count + 1,
+                    "last_reason": reason,
+                    "last_failed_at": _now(),
+                },
+            )
+            .returning(ScrapeDomainFailure.proxy_failure_count)
         )
-        .returning(ScrapeDomainFailure.failure_count)
-    )
+    else:
+        stmt = (
+            pg_insert(ScrapeDomainFailure)
+            .values(domain=domain, failure_count=1, last_reason=reason, last_failed_at=_now())
+            .on_conflict_do_update(
+                index_elements=[ScrapeDomainFailure.domain],
+                set_={
+                    "failure_count": ScrapeDomainFailure.failure_count + 1,
+                    "last_reason": reason,
+                    "last_failed_at": _now(),
+                },
+            )
+            .returning(ScrapeDomainFailure.failure_count)
+        )
     return int((await session.execute(stmt)).scalar_one())
 
 
@@ -1026,6 +1093,35 @@ async def blocked_scrape_domains(session: AsyncSession, *, threshold: int) -> se
     a fetch is even attempted on a later harvest."""
     stmt = select(ScrapeDomainFailure.domain).where(ScrapeDomainFailure.failure_count >= threshold)
     return set((await session.execute(stmt)).scalars().all())
+
+
+async def proxy_required_domains(session: AsyncSession) -> set[str]:
+    """Domains already known to need the datacenter proxy -- bulk-fetched once
+    per harvest, same idiom as `blocked_scrape_domains`, so a domain that
+    already proved it needs the proxy skips a doomed direct attempt (up to a
+    real 20s timeout) on every single URL fetched from it."""
+    stmt = select(ScrapeDomainFailure.domain).where(ScrapeDomainFailure.requires_proxy.is_(True))
+    return set((await session.execute(stmt)).scalars().all())
+
+
+async def mark_requires_proxy(session: AsyncSession, domain: str) -> None:
+    """The direct attempt failed but the proxy succeeded -- set once, never
+    reset automatically (see `ScrapeDomainFailure.requires_proxy`'s own
+    comment for why)."""
+    stmt = (
+        pg_insert(ScrapeDomainFailure)
+        .values(
+            domain=domain,
+            failure_count=0,
+            last_reason="",
+            last_failed_at=_now(),
+            requires_proxy=True,
+        )
+        .on_conflict_do_update(
+            index_elements=[ScrapeDomainFailure.domain], set_={"requires_proxy": True}
+        )
+    )
+    await session.execute(stmt)
 
 
 async def get_pypi_package_check(session: AsyncSession, name: str) -> PypiPackageCheck | None:

@@ -157,9 +157,25 @@ class Scheduler:
                         product_id=product.id,
                         priority=120,
                     )
+                elif not await repository.has_attempted_channel_scout(session, product.id):
+                    # Second strike: the retry didn't help either, but that's not
+                    # yet a reason to ask a human -- try a different distribution
+                    # channel first. `_channel_scout_review` (marketing/graph.py)
+                    # reads `last_lead_sourcing_summary` so the scout knows *why*
+                    # the current channel came up empty, not just that it did.
+                    await repository.enqueue_task(
+                        session,
+                        kind=TaskKind.CHANNEL_SCOUT_REVIEW,
+                        engine=EngineName.MARKETING,
+                        idempotency_key=f"channel-scout:stall:{product.id}",
+                        payload={"product_id": product.id},
+                        product_id=product.id,
+                        priority=100,
+                    )
                 else:
-                    # Second strike: the automatic retry did not help either --
-                    # this is not something more waiting can fix on its own.
+                    # Third strike: a retry and an automatic channel-scout review
+                    # both failed to unstick this -- this is not something more
+                    # waiting or another automatic channel can fix on its own.
                     # A fresh id, not product.id[:8]: stalled_validations() already
                     # excludes any product with an open interrupt, so this raise is
                     # never a duplicate of a still-open one -- but product.id is
@@ -171,8 +187,9 @@ class Scheduler:
                         reason=InterruptReason.LEAD_SOURCING_STALLED,
                         subject=f"{product.name[:80]} can't source leads ({new_id()[:8]})",
                         detail=(
-                            "Two lead-sourcing attempts both found nothing for this "
-                            "validating product. This usually means a lead-provider "
+                            "Two lead-sourcing attempts and an automatic channel-"
+                            "scout review all found nothing for this validating "
+                            "product. This usually means a lead-provider "
                             "credential (Hunter/Apollo) is present but being "
                             "rejected, not that it's genuinely missing -- worth "
                             "checking the provider account directly."
