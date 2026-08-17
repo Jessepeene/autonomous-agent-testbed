@@ -3663,3 +3663,108 @@ rebuilt, migration `0026` applied to the live database, service restarted.
 only new preflight finding is the expected `SCRAPE_PROXY_URL is not
 configured` degrading-credential interrupt, delivered once over Telegram,
 exactly as designed.
+
+## Risk-audit hardening, Phase 8: context-saturation budget — 2026-08-17
+
+The last phase of the plan. No migration, no schema, no new credential —
+pure code, and the smallest-surface phase of the nine, but it closed a real
+gap found by tracing the existing cost-cap code rather than just following
+the plan doc's own description of it.
+
+**The problem, concretely**: `AgentRuntime.run` had exactly one growth
+control, `max_steps` (6-14 depending on role). Nothing tracked the actual
+size of the accumulated transcript, and it only ever grows — two turns
+appended per step, capped per-result (`max_result_chars`, 20k default /
+6k on the repair path) but never capped in aggregate. A long run with
+several sizeable tool results could saturate the real context window with
+no controlled stop — unlike cost, which already had one.
+
+**A second, sharper gap found while tracing "the repair path caps cost"**:
+`AgentRole` had no `cost_cap_usd` field at all. `spawn()` never passed one
+for any of the eight roles it reaches (RESEARCHER, ANALYST, REPAIR_ENGINEER,
+AUDITOR, LEAD_SCOUT, GROWTH_ANALYST, CHANNEL_SCOUT, DISCOVERY_SCOUT — all
+fully uncapped). The one place a cap existed was `repair.py`'s direct
+`AgentRuntime.run()` call (bypassing `spawn()` entirely), hardcoded to the
+single global `settings.repair_agent_cost_cap_usd` for WORKSPACE_SURGEON/
+SEO_OPTIMIZER only. Confirmed precisely by reading the call site, not
+assumed from the plan document's own paraphrase of it.
+
+**What shipped**:
+- `AgentRole` gains `cost_cap_usd: float | None` and
+  `max_context_chars: int | None`, sized per role — proportional to each
+  role's step count and typical tool-result weight, generous headroom above
+  any observed normal run (a safety net against a runaway loop, not a tight
+  budget). REPAIR_ENGINEER highest at `$1.00`/`300_000` chars (14 steps,
+  sandbox+git+http, the widest tool set of anything not gated behind a
+  product lock); AUDITOR lowest at `$0.15`/`100_000` (6 steps, read-only
+  health checks). WORKSPACE_SURGEON/SEO_OPTIMIZER keep `cost_cap_usd` at
+  `None` on purpose — they never reach `spawn()` (see
+  `WORKSPACE_SCOPED_ROLES`), and `repair.py`'s existing, separately-tuned
+  `repair_agent_cost_cap_usd` must not be silently shadowed by a second
+  value; `max_context_chars` has no equivalent pre-existing setting, so it
+  lives on the role and `repair.py` reads it directly.
+- `runtime.py`: `max_context_chars` tracks the transcript's character count
+  (chars, not tokens — matching the existing `max_result_chars` convention)
+  every step, recording `peak_context_chars` regardless of whether a budget
+  is set, so the instrumentation is useful even for roles that never hit
+  it. On exceeding budget: compact deterministically first —
+  `_compact_to_budget` drops the oldest droppable tool-result turns' content
+  (replaced with an elision marker, same honesty principle as
+  `_truncate_middle`'s own), oldest first, stopping as soon as back under
+  budget. Never touches the first turn (the objective, and any recalled
+  memory/context joined into it) or the last two turns (the model's own
+  most recent action and its result) — so a compacted run never loses its
+  objective and the model is never asked to continue from a state it cannot
+  see. Only stops the run (`stopped_because = "context_budget"`, same shape
+  as `"cost_cap"`) when nothing left to drop still leaves it over budget —
+  a pathologically large objective, or a single turn that alone exceeds the
+  whole configured budget. No LLM summarization anywhere in this — costs
+  money and can lose the diagnosis, the same reasoning that kept this
+  deterministic everywhere else in the codebase.
+- `spawner.py`: `spawn()` now threads `cost_cap_usd`/`max_context_chars`
+  from the role. `cost_cap_usd` is priced against `model_code` only for
+  CODE_GENERATION/CODE_REVIEW roles — the only ones `router.NO_FAILOVER`
+  serves deterministically from one configured model; every other role's
+  task type can fail over between providers mid-run, so there is no single
+  correct model to price against, and `None` lets `_spent_usd` fall back to
+  its existing mid-range default price (errs toward stopping early, not
+  overspending).
+- `repair.py`: threads `max_context_chars=role.max_context_chars` through
+  the same direct `AgentRuntime.run()` call that already applies
+  `settings.repair_agent_cost_cap_usd` — a one-line addition next to the
+  existing cost-cap line.
+
+**Framing**: the same honesty principle as `_truncate_middle` — this is a
+capability increase, not a new restriction. A run that would previously
+have hit the window and returned a truncated answer, or crashed on a raw
+provider context-length error, now degrades in a controlled way and keeps
+working.
+
+**Verified**: local ruff/mypy clean (same two pre-existing, unrelated
+findings noted in every earlier phase). New coverage in
+`test_agent_runtime.py`: `_turn_chars`/`_context_chars` as pure functions,
+three white-box tests of `_compact_to_budget` (drops oldest-first, stops
+once satisfied, is a no-op when nothing is droppable), and four
+`AgentRuntime.run`-level tests (no budget set leaves the run governed only
+by steps; a tight budget compacts and lets the run reach its own natural
+completion — verified via `peak_context_chars` crossing the budget as proof
+compaction actually fired, not that the budget was simply never exceeded;
+the pathological case stops cleanly with `context_budget`). New coverage
+in `test_agent_spawner.py`: a role-catalogue invariant (every role declares
+`max_context_chars`; every `spawn()`-reachable role declares `cost_cap_usd`,
+the two workspace-scoped roles do not) and two wiring tests proving
+`spawn()` actually passes the role's values through, including that an
+ANALYSIS-type role prices against no fixed model while a CODE_GENERATION
+role prices against `model_code`. One matching wiring test added to
+`test_surgical_repair.py` for `repair.py`'s own direct call site. Local
+unit suite: 867 passed (same two pre-existing Windows failures).
+Scratch-Postgres: full suite, 1180 passed, no failures — the fresh scratch
+database also confirmed this phase adds no migration (chain still ends at
+`0026`).
+
+**Deployed live**: single commit, transferred via `git archive HEAD`, image
+rebuilt, service restarted (no migration to apply). `/health` returns 200,
+boot log clean, all six engines still enabled, no new preflight findings —
+expected, since this phase touches no credential or schema surface.
+
+This closes the nine-phase risk-hardening plan.
