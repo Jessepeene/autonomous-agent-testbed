@@ -68,11 +68,25 @@ services:
       - ${BLACKLIST_HOST_PATH:-/srv/factory-blacklist/blacklist.txt}:/app/blacklist.txt
     command: ["python", "-m", "factory.main"]
 
+  dashboard:
+    build: ./dashboard
+    restart: unless-stopped
+    depends_on:
+      - factory
+    environment:
+      FACTORY_API_BASE_URL: http://factory:8000
+      DASHBOARD_AUTH_TOKEN: ${DASHBOARD_AUTH_TOKEN}
+    ports:
+      # Loopback only, same reasoning as postgres/factory above -- Caddy is the
+      # sole public entrypoint, terminating TLS on dash.$PUBLIC_DOMAIN.
+      - "127.0.0.1:3000:3000"
+
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
     depends_on:
       - factory
+      - dashboard
     environment:
       PUBLIC_DOMAIN: ${PUBLIC_DOMAIN}
     ports:

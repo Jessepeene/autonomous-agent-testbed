@@ -1,0 +1,6 @@
+{
+  "name": "Live Factory OS Dashboard",
+  "description": "An operational, real-time dashboard designed to bolt on directly to the autonomous factory system via streaming data hooks.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

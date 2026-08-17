@@ -438,6 +438,35 @@ async def count_pending_tasks(
     return int((await session.execute(stmt)).scalar_one())
 
 
+async def recent_tasks(session: AsyncSession, *, limit: int = 50) -> list[Task]:
+    """Newest-first, unfiltered by status -- the dashboard's task-queue view.
+    No row-level task listing existed anywhere before this; every other task
+    query in this module is a `count()` or a status-specific work-queue claim."""
+    stmt = select(Task).order_by(Task.updated_at.desc()).limit(limit)
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def tasks_in_flight_by_engine(session: AsyncSession) -> dict[str, int]:
+    """Count of genuinely active (not stale-claimed) tasks per engine -- the
+    dashboard's "is this engine currently running something" signal.
+
+    The `lease_expires_at` filter matters: a worker that crashed mid-task
+    leaves its claim behind until `reclaim_expired_leases` next sweeps it, and
+    without this filter that abandoned claim would read as "running" for
+    however long it sits unswept, the same staleness `reclaim_expired_leases`
+    itself exists to fix -- this is the read-side equivalent.
+    """
+    stmt = (
+        select(Task.engine, func.count())
+        .where(
+            Task.status.in_((TaskStatus.CLAIMED.value, TaskStatus.RUNNING.value)),
+            or_(Task.lease_expires_at.is_(None), Task.lease_expires_at > _now()),
+        )
+        .group_by(Task.engine)
+    )
+    return {str(engine): int(count) for engine, count in (await session.execute(stmt)).all()}
+
+
 # ------------------------------------------------------------------------- ideas
 
 
@@ -695,6 +724,22 @@ async def active_products(session: AsyncSession, limit: int = 20) -> list[Produc
         .limit(limit)
     )
     return list((await session.execute(stmt)).scalars().all())
+
+
+async def products_with_idea(
+    session: AsyncSession, *, limit: int = 50
+) -> list[tuple[Product, Idea]]:
+    """Every product (including RETIRED -- unlike `active_products`, the
+    dashboard's portfolio view is a historical record, not a work queue)
+    joined against its idea, since niche and score live on `Idea`, not
+    `Product`."""
+    stmt = (
+        select(Product, Idea)
+        .join(Idea, Idea.id == Product.idea_id)
+        .order_by(Product.updated_at.desc())
+        .limit(limit)
+    )
+    return [(product, idea) for product, idea in (await session.execute(stmt)).all()]
 
 
 async def set_growth_reviewed(session: AsyncSession, product_id: str) -> None:
@@ -1648,6 +1693,14 @@ async def current_balance(session: AsyncSession) -> tuple[int, int]:
     return entry.balance_cents, entry.reinvest_pool_cents
 
 
+async def latest_ledger_entry(session: AsyncSession) -> LedgerEntry | None:
+    """The real recency signal behind the dashboard's "last ledger write"
+    display -- there is no Stripe/ledger sync-state concept anywhere in this
+    codebase to report instead."""
+    stmt = select(LedgerEntry).order_by(LedgerEntry.created_at.desc()).limit(1)
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
 async def append_ledger(
     session: AsyncSession,
     *,
@@ -1869,6 +1922,19 @@ async def mrr_cents(session: AsyncSession) -> int:
         Subscription.status == "active"
     )
     return int((await session.execute(stmt)).scalar_one())
+
+
+async def mrr_by_product(session: AsyncSession) -> dict[str, int]:
+    """Per-product breakdown of `mrr_cents` above, which only ever gave the
+    global total -- the dashboard's portfolio view needs the split."""
+    stmt = (
+        select(Subscription.product_id, func.coalesce(func.sum(Subscription.price_cents), 0))
+        .where(Subscription.status == "active", Subscription.product_id.is_not(None))
+        .group_by(Subscription.product_id)
+    )
+    return {
+        str(product_id): int(total) for product_id, total in (await session.execute(stmt)).all()
+    }
 
 
 async def active_subscription_count(session: AsyncSession) -> int:

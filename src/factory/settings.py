@@ -93,6 +93,15 @@ class Settings(BaseSettings):
     # this is the second of two layers rather than the only one.
     metrics_auth_token: SecretStr | None = None
 
+    # Bearer token for `GET /dashboard/state`, the read-only API behind the operator
+    # dashboard's login. Deliberately a *separate* secret from metrics_auth_token:
+    # that one guards a loopback-only, Caddy-404'd endpoint never meant to be
+    # reachable from a browser; this one is the credential the dashboard's own
+    # Next.js server holds and presents on every poll, from a genuinely
+    # internet-facing (if login-gated) subdomain. Same fail-closed shape: unset
+    # means every request gets 503, never an open endpoint.
+    dashboard_auth_token: SecretStr | None = None
+
     # Deliverability API (replaces raw SMTP for cold outreach — see
     # `engines/marketing/email.py`). Raw SMTP from a primary domain has no IP
     # rotation, no warmup, and no bounce/complaint feedback loop; a burst of cold

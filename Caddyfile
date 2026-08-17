@@ -1,11 +1,16 @@
+dash.{$PUBLIC_DOMAIN} {
+	reverse_proxy dashboard:3000
+}
+
 {$PUBLIC_DOMAIN} {
 	# /metrics carries the factory's full financial and operational state (see
-	# observability/metrics.py::collect). It was publicly readable by anyone who
+	# observability/metrics.py::collect). /dashboard/* carries the same plus
+	# task/product/interrupt detail. Both were publicly readable by anyone who
 	# guessed the path. Refused here rather than merely authenticated, so a
-	# misconfigured or missing METRICS_AUTH_TOKEN can never expose it either --
-	# the app-side bearer check in api/app.py is the second layer, not the only
-	# one. Operators read it over the loopback bind (127.0.0.1:8000).
-	@internal path /metrics /metrics/*
+	# misconfigured or missing auth token can never expose them either -- the
+	# app-side bearer check in api/app.py is the second layer, not the only
+	# one. The dashboard itself is only served from dash.{$PUBLIC_DOMAIN} above.
+	@internal path /metrics /metrics/* /dashboard/*
 	respond @internal 404
 
 	reverse_proxy factory:8000 {

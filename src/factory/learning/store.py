@@ -200,6 +200,15 @@ async def list_trials(session: AsyncSession) -> list[TunableParameter]:
     return list((await session.execute(stmt)).scalars().all())
 
 
+async def list_all(session: AsyncSession, *, limit: int = 50) -> list[TunableParameter]:
+    """Every tunable parameter regardless of status (candidate/trial/active/
+    retired), newest first -- the dashboard's Learning Loop view. Unlike
+    `list_trials` above, which only ever returns the single row currently on
+    trial (only one trial is ever in flight globally, by design)."""
+    stmt = select(TunableParameter).order_by(TunableParameter.created_at.desc()).limit(limit)
+    return list((await session.execute(stmt)).scalars().all())
+
+
 async def episode_counts(
     session: AsyncSession, tunable_parameter_id: str, *, limit: int | None = None
 ) -> tuple[int, int]:

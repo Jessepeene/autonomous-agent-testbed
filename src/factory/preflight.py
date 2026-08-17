@@ -106,6 +106,17 @@ CREDENTIALS: tuple[CredentialSpec, ...] = (
         ),
     ),
     CredentialSpec(
+        env_var="DASHBOARD_AUTH_TOKEN",
+        severity=Severity.DEGRADES,
+        purpose="Shared secret behind the dashboard's login page and GET /dashboard/state.",
+        remedy=(
+            "Generate one (`openssl rand -hex 32`) and set DASHBOARD_AUTH_TOKEN in "
+            "both the factory's and the dashboard's env. Until then the dashboard API "
+            "refuses every request with 503 and the dashboard's own login page "
+            "rejects everything."
+        ),
+    ),
+    CredentialSpec(
         env_var="SCRAPE_PROXY_URL",
         severity=Severity.DEGRADES,
         purpose=(

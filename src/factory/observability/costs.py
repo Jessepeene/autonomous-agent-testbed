@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from factory.state.orm import LLMCall
@@ -101,3 +101,33 @@ async def spend_by_model(session: AsyncSession, *, hours: int = 24) -> list[Cost
 
 async def total_usd(session: AsyncSession, *, hours: int = 24) -> float:
     return round(sum(row.usd for row in await spend_by_model(session, hours=hours)), 4)
+
+
+#: Outcomes that mean the call ultimately produced a usable result --
+#: "schema_violation_repaired" means the client's own repair pass recovered,
+#: not that the provider failed. Everything else ("refusal", "rejected",
+#: "schema_violation", "unavailable") is a real failure for this purpose.
+_SUCCESS_OUTCOMES = ("ok", "schema_violation_repaired")
+
+
+async def provider_outcome_rates(
+    session: AsyncSession, *, minutes: int = 30
+) -> dict[str, tuple[int, int]]:
+    """``(errors, total)`` per provider over a trailing window -- there is no
+    provider health-check/ping anywhere in this codebase, so "is Anthropic/
+    Gemini currently up" has to be inferred from how recent real calls
+    actually went, not measured directly."""
+    since = datetime.now(UTC) - timedelta(minutes=minutes)
+    stmt = (
+        select(
+            LLMCall.provider,
+            func.count().label("total"),
+            func.coalesce(
+                func.sum(case((LLMCall.outcome.notin_(_SUCCESS_OUTCOMES), 1), else_=0)), 0
+            ),
+        )
+        .where(LLMCall.created_at >= since)
+        .group_by(LLMCall.provider)
+    )
+    rows = (await session.execute(stmt)).all()
+    return {str(provider): (int(errors), int(total)) for provider, total, errors in rows}
