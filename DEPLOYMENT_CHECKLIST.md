@@ -4152,3 +4152,55 @@ string `localhost` tried `::1` (IPv6) first, which a `0.0.0.0` (IPv4-only)
 bind refuses, and never fell back to the working IPv4 address — fixed by
 using `127.0.0.1` explicitly in the healthcheck command instead of
 `localhost`. Both confirmed: container reports `healthy` after redeploy.
+
+## The real root cause of the Gemini failures — 2026-08-18
+
+Jesse noticed the dashboard's provider-health panel showing `gemini: down`
+(a real, accurately-computed signal — 4 errors of 7 calls in the trailing
+30 minutes, correctly crossing the ≥50% threshold in `_provider_status`).
+The effort-parameter fix above meant the failover safety net was catching
+every one of these, so the *system* was fine, but the underlying Gemini
+failures themselves were still happening and still unexplained — worth
+finding, not just tolerating via the fallback.
+
+Reproduced live by calling `GeminiProvider.converse()` directly with a real
+two-turn tool-calling conversation (assistant turn with a tool_call,
+followed by a user turn with the matching tool_result) — the same shape
+every real agentic Gemini call makes from its second turn onward. Got the
+real error for the first time all day: `"Function call is missing a
+thought_signature in functionCall parts. This is required for tools to
+work correctly..."` (Google's docs:
+ai.google.dev/gemini-api/docs/thought-signatures). Confirmed live against
+the real API: Gemini's response `Part` objects carry a real
+`thought_signature` (opaque bytes) alongside every `function_call`, which
+must be echoed back verbatim when that same function_call is replayed into
+a later turn — `gemini_provider.py::_to_gemini_content` never captured or
+replayed it. This explains the exact pattern seen in every incident all
+day: the *first* call in a conversation (no history to replay yet) always
+succeeded; *every subsequent* call in the same run failed, unconditionally,
+not intermittently.
+
+**Fix**: added `ToolCall.thought_signature: bytes | None = None` to the
+provider-neutral type (`llm/providers/base.py`) — populated only by
+`GeminiProvider` from the real response `Part`, read only by
+`_to_gemini_content` when rendering a call back into a request, `None` and
+ignored everywhere else (Anthropic/DeepSeek never touch it). One documented
+residual edge case, not fixed further: `LLMClient.converse()` re-resolves
+the primary provider fresh on every step (not sticky per run), so a single
+agent run can genuinely interleave providers (Gemini fails a step →
+Anthropic serves it → the next step tries Gemini again) — a
+signature-less call from that Anthropic-served step, if replayed into a
+later Gemini turn, would 400 the same way for that one part. Left
+unhandled because the existing failover machinery already absorbs it
+without a crash (just an extra round trip); not worth the added complexity
+for what should be a rare zigzag.
+
+**Verification**: added `test_a_replayed_function_call_carries_its_thought_signature`
+and `test_a_call_with_no_thought_signature_omits_the_field_entirely` to
+`test_gemini_provider.py` — the first direct unit coverage `_to_gemini_content`
+has ever had. Full local suite: 882 passed (same 2 permanent Windows-only
+failures). Deployed live, then re-reproduced the *exact* failing scenario
+end-to-end against the real API: turn 1 succeeds and now correctly captures
+a real signature; turn 2 (the one that 400'd every time before) now
+succeeds too, with the model continuing on to a genuine second tool call of
+its own.

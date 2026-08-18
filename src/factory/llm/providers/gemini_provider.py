@@ -151,7 +151,20 @@ def _to_gemini_content(turn: Turn) -> dict[str, Any]:
     if turn.text:
         parts.append({"text": turn.text})
     for call in turn.tool_calls:
-        parts.append({"function_call": {"name": call.name, "args": call.arguments}})
+        part: dict[str, Any] = {"function_call": {"name": call.name, "args": call.arguments}}
+        # Only set when this call actually originated from Gemini (see
+        # ToolCall.thought_signature). `LLMClient.converse()` re-resolves the
+        # primary provider fresh on every step, not just once per run, so a
+        # single agentic run genuinely can interleave providers (Gemini fails
+        # a step, Anthropic serves it, the next step retries Gemini first
+        # again) -- a signature-less call replayed into a Gemini turn that way
+        # will 400 the same "missing thought_signature" error for that one
+        # part, which is still a `ProviderRequestRejected` and still fails
+        # over cleanly; not fixed further here since the existing failover
+        # path already absorbs it without a crash, just an extra round trip.
+        if call.thought_signature is not None:
+            part["thought_signature"] = call.thought_signature
+        parts.append(part)
     return {
         "role": "model" if turn.role == "assistant" else "user",
         "parts": parts or [{"text": "(no content)"}],
@@ -367,6 +380,7 @@ class GeminiProvider:
                         id=f"call_{index}_{getattr(function_call, 'name', 'tool')}",
                         name=str(getattr(function_call, "name", "")),
                         arguments=dict(getattr(function_call, "args", None) or {}),
+                        thought_signature=getattr(part, "thought_signature", None),
                     )
                 )
             elif getattr(part, "text", None):

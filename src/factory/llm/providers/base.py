@@ -118,6 +118,14 @@ class ToolCall:
     id: str
     name: str
     arguments: dict[str, Any]
+    #: Gemini-only, opaque. Its newer models require every function_call part
+    #: echoed back into a later turn to carry the exact signature it was
+    #: returned with, or the request 400s with "Function call is missing a
+    #: thought_signature" -- confirmed live, and confirmed to break every
+    #: multi-turn Gemini tool-calling conversation from the second turn
+    #: onward, unconditionally (see gemini_provider.py::_to_gemini_content).
+    #: None for every other provider's calls; never read by them.
+    thought_signature: bytes | None = None
 
 
 @dataclass(slots=True)

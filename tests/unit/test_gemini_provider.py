@@ -15,12 +15,13 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from pydantic import BaseModel, Field, ValidationError
 
-from factory.llm.providers.base import ProviderRequestRejected
+from factory.llm.providers.base import ProviderRequestRejected, ToolCall, Turn
 from factory.llm.providers.gemini_provider import (
     GeminiProvider,
     _billable_input_tokens,
     _sanitize_tools_for_gemini,
     _strip_additional_properties,
+    _to_gemini_content,
 )
 from factory.settings import Settings, TaskType
 
@@ -177,3 +178,36 @@ async def test_parse_raises_provider_request_rejected_on_a_schema_validation_err
                 task_type=TaskType.ANALYSIS,
                 model="gemini-2.5-flash",
             )
+
+
+def test_a_replayed_function_call_carries_its_thought_signature() -> None:
+    """Real, reproducible regression: Gemini's newer models require every
+    function_call part echoed back into a later turn to carry the exact
+    thought_signature it was originally returned with, or the request 400s --
+    confirmed live against the real API: "Function call is missing a
+    thought_signature in functionCall parts." This broke every multi-turn
+    Gemini tool-calling conversation from the second turn onward,
+    unconditionally -- the first turn (no history to replay yet) always
+    worked, which is exactly the pattern seen in production before this was
+    root-caused."""
+    call = ToolCall(
+        id="1", name="http_get", arguments={"url": "https://x"}, thought_signature=b"opaque"
+    )
+    turn = Turn(role="assistant", tool_calls=[call])
+
+    content = _to_gemini_content(turn)
+
+    assert content["parts"][0]["thought_signature"] == b"opaque"
+
+
+def test_a_call_with_no_thought_signature_omits_the_field_entirely() -> None:
+    """A tool call that never had one (e.g. replayed from a different
+    provider after a mid-run failover) must not send a fabricated or null
+    value -- omitting the key is what the real API expects for a call that
+    never carried a signature to begin with."""
+    call = ToolCall(id="1", name="http_get", arguments={"url": "https://x"})
+    turn = Turn(role="assistant", tool_calls=[call])
+
+    content = _to_gemini_content(turn)
+
+    assert "thought_signature" not in content["parts"][0]
