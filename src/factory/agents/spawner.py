@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from factory.agents.roles import AgentRole, RoleName, get_role
 from factory.agents.runtime import AgentResult, AgentRuntime
 from factory.llm.providers.base import ProviderRefusal
+from factory.llm.router import model_for
 from factory.logging import get_logger
 from factory.memory import store as memory_store
 from factory.settings import EngineName, TaskType
@@ -135,14 +136,16 @@ def _join(*blocks: str) -> str:
 def _cost_model(ctx: FactoryContext, role: AgentRole) -> str | None:
     """Which model a role's `cost_cap_usd` should be priced against.
 
-    Only CODE_GENERATION/CODE_REVIEW are in `router.NO_FAILOVER`, so only those are
-    deterministically served by one configured model (`model_code`) -- pricing
+    Only CODE_GENERATION/CODE_REVIEW/CODE_REPAIR are in `router.NO_FAILOVER`, so
+    only those are deterministically served by one configured model -- pricing
     against it is exact, the same reasoning `repair.py`'s own direct call already
-    uses. Every other role's task type can fail over between providers mid-run, so
-    there is no single correct model name to price against; `None` lets
-    `_spent_usd` fall back to its mid-range default price, which errs toward
-    stopping early rather than silently overspending.
+    uses. `router.model_for` resolves the right one per task type (`model_code`
+    for CODE_GENERATION/CODE_REVIEW, `model_deepseek` for CODE_REPAIR). Every
+    other role's task type can fail over between providers mid-run, so there is
+    no single correct model name to price against; `None` lets `_spent_usd` fall
+    back to its mid-range default price, which errs toward stopping early rather
+    than silently overspending.
     """
-    if role.task_type in (TaskType.CODE_GENERATION, TaskType.CODE_REVIEW):
-        return ctx.settings.model_code
+    if role.task_type in (TaskType.CODE_GENERATION, TaskType.CODE_REVIEW, TaskType.CODE_REPAIR):
+        return model_for(role.task_type, ctx.settings)
     return None

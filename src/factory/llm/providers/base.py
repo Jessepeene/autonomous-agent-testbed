@@ -20,6 +20,7 @@ SchemaT = TypeVar("SchemaT", bound=BaseModel)
 class Provider(StrEnum):
     GEMINI = "gemini"
     ANTHROPIC = "anthropic"
+    DEEPSEEK = "deepseek"
 
 
 class LLMError(RuntimeError):

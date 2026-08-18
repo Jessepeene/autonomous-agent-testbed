@@ -72,8 +72,16 @@ def _tools_payload(
     descriptors: Sequence[ToolDescriptor], provider: Provider
 ) -> list[dict[str, Any]]:
     """Only the serving provider's shape is correct; rendering happens per attempt,
-    not once up front, so a failover to the other vendor never sends the wrong one."""
-    if provider is Provider.ANTHROPIC:
+    not once up front, so a failover to the other vendor never sends the wrong one.
+
+    DeepSeek shares Anthropic's shape deliberately, not by omission: it is served
+    over DeepSeekProvider(AnthropicProvider), the same Anthropic-compatible
+    endpoint/message format -- sending it Gemini's tool-schema shape produced a
+    real, reproducible 400 ("Invalid schema for function ...: null is not of
+    types 'boolean', 'object'") the first time CODE_REPAIR actually ran against
+    production traffic, caught before this shipped to real users.
+    """
+    if provider in (Provider.ANTHROPIC, Provider.DEEPSEEK):
         return anthropic_payload(descriptors)
     return gemini_payload(descriptors)
 
@@ -487,10 +495,13 @@ def build_registry(settings: Settings | None = None) -> ProviderRegistry:
     """Construct the real providers. Unconfigured ones report themselves unavailable.
 
     ``staging_mock_expensive_calls`` swaps only the Anthropic slot for a
-    deterministic fixture provider (see ``llm/providers/staging.py``) -- Gemini is
-    never touched by this flag, and it is orthogonal to ``factory_dry_run``.
+    deterministic fixture provider (see ``llm/providers/staging.py``) -- Gemini and
+    DeepSeek are never touched by this flag (DeepSeek serves CODE_REPAIR, which is
+    already the cheap option this flag exists to avoid paying for), and it is
+    orthogonal to ``factory_dry_run``.
     """
     from factory.llm.providers.anthropic_provider import AnthropicProvider
+    from factory.llm.providers.deepseek_provider import DeepSeekProvider
     from factory.llm.providers.gemini_provider import GeminiProvider
 
     settings = settings or get_settings()
@@ -503,6 +514,7 @@ def build_registry(settings: Settings | None = None) -> ProviderRegistry:
         anthropic = AnthropicProvider(settings)
     return ProviderRegistry(
         {
+            Provider.DEEPSEEK: DeepSeekProvider(settings),
             Provider.GEMINI: GeminiProvider(settings),
             Provider.ANTHROPIC: anthropic,
         }

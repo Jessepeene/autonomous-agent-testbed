@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from factory.llm.client import LLMClient, UsageRecord
+from factory.llm.client import LLMClient, UsageRecord, _tools_payload
 from factory.llm.providers.base import (
     Provider,
     ProviderRefusal,
@@ -36,6 +36,7 @@ from factory.llm.providers.fake import FakeProvider
 from factory.llm.router import ProviderRegistry
 from factory.settings import Settings, TaskType
 from factory.state.schemas import IdeaBatch
+from factory.tools.registry import ToolDescriptor
 
 
 @dataclass
@@ -164,3 +165,34 @@ async def test_schema_violation_that_never_repairs_is_still_recorded_with_usage(
     outcomes = [r.outcome for r in recorder.records]
     assert outcomes == ["schema_violation_repaired", "schema_violation"]
     assert recorder.records[1].output_tokens == 64000
+
+
+def test_deepseek_gets_anthropics_tool_schema_shape_not_geminis() -> None:
+    """Real, reproducible regression: DeepSeek is served over
+    DeepSeekProvider(AnthropicProvider) -- the same Anthropic-compatible
+    endpoint/message format -- but defaulted to Gemini's tool-schema shape here
+    (only Provider.ANTHROPIC was special-cased), which DeepSeek's endpoint
+    rejected outright the first time CODE_REPAIR ran against real production
+    traffic: 400 "Invalid schema for function 'list_workspace_files': null is
+    not of types 'boolean', 'object'"."""
+    async def _handler() -> None:
+        return None
+
+    descriptors = [
+        ToolDescriptor(
+            name="list_workspace_files",
+            description="d",
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            category="workspace",
+            handler=_handler,
+        )
+    ]
+
+    anthropic_shaped = _tools_payload(descriptors, Provider.ANTHROPIC)
+    deepseek_shaped = _tools_payload(descriptors, Provider.DEEPSEEK)
+    gemini_shaped = _tools_payload(descriptors, Provider.GEMINI)
+
+    assert deepseek_shaped == anthropic_shaped
+    assert "input_schema" in deepseek_shaped[0]
+    assert "parameters" not in deepseek_shaped[0]
+    assert "parameters" in gemini_shaped[0]

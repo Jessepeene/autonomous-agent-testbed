@@ -112,8 +112,8 @@ def _agent_turn(text: str = "", calls: list[ToolCall] | None = None) -> AgentTur
         text=text,
         tool_calls=calls or [],
         stop_reason="end_turn" if not calls else "tool_use",
-        provider=Provider.ANTHROPIC,
-        model="claude-opus-5",
+        provider=Provider.DEEPSEEK,
+        model="deepseek-v4-pro",
         usage=Usage(input_tokens=100, output_tokens=50),
     )
 
@@ -123,7 +123,7 @@ def _ctx(settings: Settings, sandbox: object, provider: FakeProvider) -> Factory
         settings=settings,
         # backoff_base=0 exercises the real retry path without real sleeps.
         llm=LLMClient(
-            ProviderRegistry({Provider.ANTHROPIC: provider}), settings=settings, backoff_base=0.0
+            ProviderRegistry({Provider.DEEPSEEK: provider}), settings=settings, backoff_base=0.0
         ),
         notifier=NullNotifier(),
         sandbox=sandbox,  # type: ignore[arg-type]
@@ -208,7 +208,7 @@ async def test_a_surgical_repair_completes_while_patch_holds_the_product_lock(
     workspace = f"product-{product_id[:12]}"
     sandbox = _FakeSandbox(tmp_path, workspace)
 
-    provider = FakeProvider(Provider.ANTHROPIC)
+    provider = FakeProvider(Provider.DEEPSEEK)
     provider.register_turns(
         _agent_turn(
             calls=[
@@ -284,7 +284,7 @@ async def test_a_repair_that_deletes_the_failing_test_is_rolled_back(
     workspace = f"product-{product_id[:12]}"
     sandbox = _FakeSandbox(tmp_path, workspace)
 
-    provider = FakeProvider(Provider.ANTHROPIC)
+    provider = FakeProvider(Provider.DEEPSEEK)
     provider.register_turns(
         _agent_turn(
             calls=[
@@ -323,7 +323,7 @@ async def test_a_repair_that_changes_nothing_never_reaches_verification(
     product_id, idea_id = await _seed_product(session, settings)
     sandbox = _FakeSandbox(tmp_path, f"product-{product_id[:12]}")
 
-    provider = FakeProvider(Provider.ANTHROPIC)
+    provider = FakeProvider(Provider.DEEPSEEK)
     provider.register_turns(
         _agent_turn(text="The bug is that add() subtracts. Someone should fix it.")
     )
@@ -361,12 +361,12 @@ async def test_a_provider_outage_defers_instead_of_consuming_a_heal_cycle(
 
     from factory.llm.providers.base import ProviderUnavailable
 
-    provider = FakeProvider(Provider.ANTHROPIC)
+    provider = FakeProvider(Provider.DEEPSEEK)
     # `converse` retries a transport failure up to _MAX_TRANSPORT_ATTEMPTS times
-    # against the same provider, and CODE_GENERATION is in NO_FAILOVER so there is no
+    # against the same provider, and CODE_REPAIR is in NO_FAILOVER so there is no
     # second vendor to fall through to -- three queued failures exhaust the budget.
     for _ in range(3):
-        provider.register_turns(ProviderUnavailable(Provider.ANTHROPIC, "503", status=503))
+        provider.register_turns(ProviderUnavailable(Provider.DEEPSEEK, "503", status=503))
     ctx = _ctx(settings, sandbox, provider)
     task = await _patch_task(session, product_id, idea_id)
 

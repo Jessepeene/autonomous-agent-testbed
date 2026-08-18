@@ -32,12 +32,20 @@ def test_every_task_type_is_routed() -> None:
     """A task type with no provider would fail at runtime, not at import."""
     for task_type in TaskType:
         assert task_type in ROUTING, f"{task_type} has no provider"
-        assert provider_for(task_type) in (Provider.GEMINI, Provider.ANTHROPIC)
+        assert provider_for(task_type) in (Provider.GEMINI, Provider.ANTHROPIC, Provider.DEEPSEEK)
 
 
 def test_code_tasks_route_to_claude() -> None:
     assert provider_for(TaskType.CODE_GENERATION) is Provider.ANTHROPIC
     assert provider_for(TaskType.CODE_REVIEW) is Provider.ANTHROPIC
+
+
+def test_code_repair_routes_to_deepseek() -> None:
+    """Split from CODE_GENERATION: agentic tool-calling repair/healing work
+    (WORKSPACE_SURGEON/SEO_OPTIMIZER/REPAIR_ENGINEER) goes through `converse()`,
+    which DeepSeek handles -- unlike CODE_GENERATION/CODE_REVIEW's `parse()`-based
+    strict JSON-schema output, which it does not reliably produce."""
+    assert provider_for(TaskType.CODE_REPAIR) is Provider.DEEPSEEK
 
 
 def test_general_tasks_route_to_gemini() -> None:
@@ -52,13 +60,15 @@ def test_general_tasks_route_to_gemini() -> None:
 
 
 def test_code_tasks_never_fail_over() -> None:
-    assert NO_FAILOVER == {TaskType.CODE_GENERATION, TaskType.CODE_REVIEW}
+    assert NO_FAILOVER == {TaskType.CODE_GENERATION, TaskType.CODE_REVIEW, TaskType.CODE_REPAIR}
     assert not may_failover(TaskType.CODE_GENERATION)
+    assert not may_failover(TaskType.CODE_REPAIR)
     assert may_failover(TaskType.DISCOVERY)
 
 
 def test_model_ids_come_from_settings(settings: Settings) -> None:
     assert model_for(TaskType.CODE_GENERATION, settings) == settings.model_code
+    assert model_for(TaskType.CODE_REPAIR, settings) == settings.model_deepseek
     assert model_for(TaskType.ORCHESTRATION, settings) == settings.model_fast
     assert model_for(TaskType.COMPLIANCE, settings) == settings.model_general
 

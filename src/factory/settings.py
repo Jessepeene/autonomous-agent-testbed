@@ -27,6 +27,15 @@ class TaskType(StrEnum):
     MARKETING_COPY = "marketing_copy"
     CODE_GENERATION = "code_generation"
     CODE_REVIEW = "code_review"
+    #: Agentic tool-calling repair/healing work (WORKSPACE_SURGEON, SEO_OPTIMIZER,
+    #: REPAIR_ENGINEER) -- split out from CODE_GENERATION because it goes through
+    #: `LLMClient.converse()` (tool_use blocks), never `parse()`'s strict
+    #: JSON-schema-constrained output. That distinction is what makes this task
+    #: type routable to DeepSeek (see router.py) while CODE_GENERATION/CODE_REVIEW,
+    #: both parse()-based, stay on Claude -- DeepSeek's Anthropic-compatible
+    #: endpoint does not reliably honor output_config.format=json_schema
+    #: (confirmed empirically: returns prose instead of the requested JSON).
+    CODE_REPAIR = "code_repair"
 
 
 class EngineName(StrEnum):
@@ -52,6 +61,14 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr | None = None
 
     # --- Degrading credentials --------------------------------------------------
+    # Unlike anthropic_api_key, this is not a hard-block credential: it only serves
+    # TaskType.CODE_REPAIR (see router.py), never blocks boot. Missing it means
+    # CODE_REPAIR calls fail with NoProviderAvailable (it's in NO_FAILOVER, so no
+    # cross-vendor fallback) -- AgentRuntime.run() already handles that gracefully
+    # (stopped_because="no_provider"), so this deliberately has no preflight
+    # CredentialSpec disabling the whole DEVELOPMENT engine over it the way
+    # ANTHROPIC_API_KEY's does; only repair/healing attempts are affected.
+    deepseek_api_key: SecretStr | None = None
     telegram_bot_token: SecretStr | None = None
     telegram_chat_id: str | None = None
     stripe_api_key: SecretStr | None = None
@@ -296,6 +313,13 @@ class Settings(BaseSettings):
     model_general: str = "gemini-2.5-pro"
     model_fast: str = "gemini-2.5-flash"
     model_code: str = "claude-opus-5"
+    # Only TaskType.CODE_REPAIR is routed to this (see router.py) -- agentic
+    # repair/healing work, proven live against a real broken-test-suite fixture
+    # via the real WORKSPACE_SURGEON role/AgentRuntime tool-calling loop before
+    # this routing was wired in. Deliberately never used for CODE_GENERATION/
+    # CODE_REVIEW's parse()-based structured output, which DeepSeek's
+    # Anthropic-compatible endpoint does not reliably produce.
+    model_deepseek: str = "deepseek-v4-pro"
     # Used only when a Gemini-routed call (orchestration/discovery/analysis/
     # compliance/marketing copy -- all normally cheap, high-frequency work) fails
     # over to Anthropic. CODE_GENERATION/CODE_REVIEW are in `router.NO_FAILOVER` and
@@ -341,6 +365,12 @@ class Settings(BaseSettings):
     def has_anthropic(self) -> bool:
         return self.anthropic_api_key is not None and bool(
             self.anthropic_api_key.get_secret_value()
+        )
+
+    @property
+    def has_deepseek(self) -> bool:
+        return self.deepseek_api_key is not None and bool(
+            self.deepseek_api_key.get_secret_value()
         )
 
     @property

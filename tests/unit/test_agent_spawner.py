@@ -366,11 +366,11 @@ async def test_spawn_passes_the_roles_cost_cap_and_context_budget_to_the_runtime
     assert captured["cost_model"] is None
 
 
-async def test_spawn_prices_a_code_generation_roles_cost_cap_against_model_code(
+async def test_spawn_prices_a_code_repair_roles_cost_cap_against_model_deepseek(
     ctx: FactoryContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """REPAIR_ENGINEER is CODE_GENERATION, which `router.NO_FAILOVER` always routes
-    to `model_code` deterministically -- unlike the ANALYSIS-type roles, this one
+    """REPAIR_ENGINEER is CODE_REPAIR, which `router.NO_FAILOVER` always routes to
+    `model_deepseek` deterministically -- unlike the ANALYSIS-type roles, this one
     has an exact model to price its cost cap against."""
     from factory.agents import spawner as spawner_module
 
@@ -386,7 +386,7 @@ async def test_spawn_prices_a_code_generation_roles_cost_cap_against_model_code(
 
     await spawn(ctx, None, SpawnRequest(role=RoleName.REPAIR_ENGINEER, objective="fix the build"))
 
-    assert captured["cost_model"] == ctx.settings.model_code
+    assert captured["cost_model"] == ctx.settings.model_deepseek
 
 
 async def test_discovery_scout_only_reaches_http_and_submit_signal(

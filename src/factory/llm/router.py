@@ -10,7 +10,9 @@ from factory.llm.providers.base import LLMProvider, Provider
 from factory.settings import Settings, TaskType, get_settings
 
 #: Gemini handles general reasoning; Claude handles anything that produces or
-#: judges source code.
+#: judges source code via strict structured output; DeepSeek handles agentic
+#: repair/healing (tool-calling only -- see TaskType.CODE_REPAIR's docstring in
+#: settings.py for why it's split out from CODE_GENERATION rather than sharing it).
 ROUTING: dict[TaskType, Provider] = {
     TaskType.ORCHESTRATION: Provider.GEMINI,
     TaskType.DISCOVERY: Provider.GEMINI,
@@ -19,11 +21,14 @@ ROUTING: dict[TaskType, Provider] = {
     TaskType.MARKETING_COPY: Provider.GEMINI,
     TaskType.CODE_GENERATION: Provider.ANTHROPIC,
     TaskType.CODE_REVIEW: Provider.ANTHROPIC,
+    TaskType.CODE_REPAIR: Provider.DEEPSEEK,
 }
 
 #: Code tasks must never be silently served by the other vendor: a cross-provider
 #: failover here would change *who wrote the code that ships*, invisibly.
-NO_FAILOVER: frozenset[TaskType] = frozenset({TaskType.CODE_GENERATION, TaskType.CODE_REVIEW})
+NO_FAILOVER: frozenset[TaskType] = frozenset(
+    {TaskType.CODE_GENERATION, TaskType.CODE_REVIEW, TaskType.CODE_REPAIR}
+)
 
 
 def provider_for(task_type: TaskType) -> Provider:
@@ -46,8 +51,11 @@ def model_for(task_type: TaskType, settings: Settings | None = None) -> str:
     settings = settings or get_settings()
     if task_type is TaskType.ORCHESTRATION:
         return settings.model_fast
-    if provider_for(task_type) is Provider.ANTHROPIC:
+    provider = provider_for(task_type)
+    if provider is Provider.ANTHROPIC:
         return settings.model_code
+    if provider is Provider.DEEPSEEK:
+        return settings.model_deepseek
     return settings.model_general
 
 
@@ -65,6 +73,12 @@ def max_tokens_for(task_type: TaskType) -> int:
         return 64_000
     if task_type is TaskType.CODE_REVIEW:
         return 16_000
+    if task_type is TaskType.CODE_REPAIR:
+        # Same ceiling as CODE_GENERATION -- WORKSPACE_SURGEON/SEO_OPTIMIZER/
+        # REPAIR_ENGINEER got this budget when they were still routed under
+        # CODE_GENERATION; splitting the task type out is a routing change,
+        # not a reason to also shrink their existing headroom.
+        return 64_000
     if task_type is TaskType.ORCHESTRATION:
         return 2_048
     return 8_192

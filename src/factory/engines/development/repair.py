@@ -32,6 +32,7 @@ from pathlib import Path
 from factory.agents.roles import RoleName, get_role
 from factory.agents.runtime import AgentRuntime
 from factory.engines.development.scaffold.generator import WORKSPACE_SKIP_DIRS
+from factory.llm.router import model_for
 from factory.logging import get_logger
 from factory.sandbox.runner import resolve_workspace
 from factory.settings import EngineName, Settings
@@ -387,7 +388,7 @@ async def attempt_repair(
         context=context,
         max_result_chars=MAX_RESULT_CHARS,
         cost_cap_usd=ctx.settings.repair_agent_cost_cap_usd,
-        cost_model=ctx.settings.model_code,
+        cost_model=model_for(role.task_type, ctx.settings),
         max_context_chars=role.max_context_chars,
     )
 

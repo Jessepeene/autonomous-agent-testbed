@@ -189,12 +189,12 @@ ROLES: dict[RoleName, AgentRole] = {
             "make a test pass.\n" + _SHARED_RULES
         ),
         tool_categories=("sandbox", "git", "http"),
-        task_type=TaskType.CODE_GENERATION,
+        task_type=TaskType.CODE_REPAIR,
         max_steps=14,
         deadline_seconds=1800,
         mutating=True,
-        # CODE_GENERATION is in `router.NO_FAILOVER`, so this role is always served
-        # by `model_code` deterministically -- `spawn()` prices its cost cap against
+        # CODE_REPAIR is in `router.NO_FAILOVER`, so this role is always served by
+        # `model_deepseek` deterministically -- `spawn()` prices its cost cap against
         # that model rather than leaving it to `_spent_usd`'s generic default.
         # Highest of any `spawn()`-reached role: the heaviest step count (14) and the
         # widest tool set (sandbox+git+http) of anything not gated behind a product
@@ -231,7 +231,7 @@ ROLES: dict[RoleName, AgentRole] = {
             "again to confirm. Do not refactor code that is not implicated.\n" + _REPAIR_RULES
         ),
         tool_categories=("workspace",),
-        task_type=TaskType.CODE_GENERATION,
+        task_type=TaskType.CODE_REPAIR,
         # 8, not the repair_engineer's 14: an agent loop re-sends its whole transcript
         # every step, so cost grows superlinearly in step count -- past roughly this
         # many steps a surgical repair stops being cheaper than the full regeneration
@@ -332,7 +332,7 @@ ROLES: dict[RoleName, AgentRole] = {
             "you have not broken anything.\n" + _REPAIR_RULES
         ),
         tool_categories=("workspace",),
-        task_type=TaskType.CODE_GENERATION,
+        task_type=TaskType.CODE_REPAIR,
         max_steps=8,
         deadline_seconds=600,
         # Same reasoning as WORKSPACE_SURGEON: edits confined to a product workspace,

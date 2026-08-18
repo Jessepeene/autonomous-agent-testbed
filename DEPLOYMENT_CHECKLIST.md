@@ -3899,3 +3899,156 @@ exists yet).
 pointing at the droplet's IP. Caddy will provision its own Let's Encrypt cert
 automatically on first real request once that resolves — nothing else to
 configure server-side.
+
+## Go-live: dry-run data wiped, FACTORY_DRY_RUN=0 — 2026-08-18
+
+The dry-run period ended. Jesse provided real live credentials (Stripe live
+secret key + live webhook signing secret, a real Mailgun sending domain
+`mail.manifestaudit.com` on the EU region with a domain-scoped sending key)
+directly via SSH rather than in chat. Both were verified working end-to-end
+before going live, not just checked for presence:
+
+- **Mailgun**: real send through the actual `engines.marketing.email` code
+  path succeeded (`SEND_OK`) after discovering the domain is EU-only —
+  `api.mailgun.net` (US) 401'd with *both* the domain-scoped key and the
+  account-wide private key, `api.eu.mailgun.net` worked with the domain key.
+  `MAILGUN_BASE_URL` set to `https://api.eu.mailgun.net/v3` accordingly.
+- **Stripe**: since Stripe's dashboard "Send test webhook" button only exists
+  for test-mode endpoints (confirmed by Jesse, matches Stripe's real
+  behavior), verified the live webhook secret by constructing a real,
+  correctly-signed event server-side with `stripe.WebhookSignature.
+  generate_signature_header` (the same scheme Stripe's own tooling uses) and
+  posting it through the actual public URL — `200`, `{"handled":true,
+  "kind":"customer.subscription.created","detail":"subscription state
+  recorded"}`. Confirms live-mode signature verification actually works, not
+  just that a `whsec_` value is present (a stale test-mode secret would also
+  match that prefix).
+
+**Database wipe**: `docker compose stop factory` first (releases task
+leases), full pg_dump backup to `/opt/backups/pre-golive-dryrun-backup-
+2026-08-18-071512.sql.gz`, then `TRUNCATE` on every business-data table
+(`ideas`, `products`, `tasks`, `interrupts`, `leads`, `outreach_log`,
+`ledger`, `llm_calls`, `subscriptions`, `customers`, `tunable_parameters`,
+`learning_episodes`, `memories`, `heal_attempts`, `campaign_approvals`, the
+LangGraph `checkpoints`/`checkpoint_blobs`/`checkpoint_writes` tables, and the
+rest) with `RESTART IDENTITY CASCADE` — deliberately *not* touching
+`alembic_version` or `checkpoint_migrations`, which are schema/version
+tracking, not business data. Confirmed the one `status='live'` product from
+the dry run had `deploy_url='dry-run://...'` and no real `vercel_project`/
+`custom_domain` before wiping — dry-run mode never actually deployed
+anything real, so there was nothing live on the internet to orphan or tear
+down.
+
+Settings changed: `FACTORY_DRY_RUN` 1→0, `DAILY_LLM_SPEND_CAP_USD` 5→10 (Jesse's
+choice). `DISCOVERY_INTERVAL_SECONDS` deliberately left at `10800` (3h) —
+Jesse chose to keep the faster testing-era cadence rather than the
+documented `21600` production default.
+
+First real tick after restart: clean boot, all six engines enabled, real
+Gemini/Telegram calls succeeded, a real discovery cycle ran (HN + GitHub
+search, 74 signals, 32 clusters, 0 new after dedup — a normal outcome), real
+`finance.reconciled` against the live Stripe account correctly showed
+`balance_cents: 0`, and the learning loop's tunable parameters
+(`GENERATOR_SYSTEM`/`DISCRIMINATOR_SYSTEM`/`SCORING_WEIGHTS`) re-bootstrapped
+cleanly from their code-defined defaults now that the table was empty. One
+pre-existing `SCRAPE_PROXY_URL is not configured` interrupt fired on boot —
+expected, not new (see the datacenter-IP-blocking note above).
+
+**Minor thing to watch, not blocking**: one Gemini `ANALYSIS` call 400'd and
+correctly failed over to `claude-haiku-4-5` per `router.may_failover`, but the
+failover call's usage recorded `input_tokens=0, output_tokens=0,
+latency_ms=1` — too fast/empty to be a real completion, yet the run still
+reported `stopped: "completed"` (not `empty_response`) and the discovery
+cycle finished normally. Likely a pre-existing accounting quirk specific to
+this failover path, not a functional break; worth a closer look if it
+recurs.
+
+## Post-go-live: STAGING_MOCK_EXPENSIVE_CALLS still on, and DeepSeek routed for code repair — 2026-08-18
+
+Two changes shortly after go-live, both driven by Jesse noticing real
+behavior didn't match expectations.
+
+**`STAGING_MOCK_EXPENSIVE_CALLS` was still `1` in production** — missed as
+part of the go-live checklist. This meant every `CODE_GENERATION`/
+`CODE_REVIEW` call since go-live had been served by `StagingCodeProvider`, a
+deterministic stub that returns a genuinely functional but fixed, generic
+MVP template rather than real AI-generated code tailored to the specific
+idea. Confirmed with Jesse and flipped to `0`; real Claude-authored
+scaffolds/reviews from this point on.
+
+**DeepSeek V4-Pro routed for `CODE_REPAIR` only, not `CODE_GENERATION`/
+`CODE_REVIEW`.** Jesse's stated reasoning: confident to test the live system
+with real cost pressure now that it's in production, and earlier live
+testing this same pass already showed a clear split: DeepSeek fails
+`parse()`'s strict JSON-schema structured output (returns
+prose instead of valid JSON) but succeeds at `converse()`'s agentic
+tool-calling. Since `generate_scaffold()`/`generate_landing_page()`
+(`CODE_GENERATION`) and Bug Council's three model reviewers (`CODE_REVIEW`)
+are all `parse()`-based while `WORKSPACE_SURGEON`/`SEO_OPTIMIZER`/
+`REPAIR_ENGINEER` are all `converse()`-based, a full switch would have
+broken new-product builds with no fallback (`NO_FAILOVER`). Jesse chose the
+scoped option over a full switch when asked directly.
+
+**Implementation**: a new `TaskType.CODE_REPAIR` (`settings.py`), routed to
+a new `Provider.DEEPSEEK` (`llm/providers/base.py`) served by
+`DeepSeekProvider(AnthropicProvider)` (`llm/providers/deepseek_provider.py`
+— overrides only `_get_client()`'s base_url/credential, inheriting every
+other request/response shape). `router.py`: `CODE_REPAIR → DEEPSEEK`, added
+to `NO_FAILOVER` (same reasoning as the other two — a cross-vendor failover
+on a code-writing task must never happen invisibly), `max_tokens_for`
+matches `CODE_GENERATION`'s existing 64k ceiling (no reason to shrink
+WORKSPACE_SURGEON's existing headroom just because the task type split).
+`client.py::build_registry()` wires the new provider slot. `roles.py`:
+`REPAIR_ENGINEER`/`WORKSPACE_SURGEON`/`SEO_OPTIMIZER` moved from
+`CODE_GENERATION` to `CODE_REPAIR`. `spawner.py::_cost_model` and
+`repair.py`'s direct `attempt_repair()` call both now resolve their cost cap
+via `router.model_for(role.task_type, ...)` instead of hardcoding
+`settings.model_code`, so `CODE_REPAIR` prices against `model_deepseek`
+correctly. Deliberately no `preflight.py` `CredentialSpec` for
+`DEEPSEEK_API_KEY`: unlike `ANTHROPIC_API_KEY`, missing it should not
+disable the whole `DEVELOPMENT` engine (`generate_scaffold()` still works
+fine without DeepSeek) — `AgentRuntime.run()` already handles
+`NoProviderAvailable` gracefully (`stopped_because="no_provider"`, caught by
+`repair.py`'s existing `RepairBlocked`/`BLOCKED_REASONS` machinery).
+
+**A real bug found by live-testing the actual deploy, not by an existing
+test**: `client.py::_tools_payload()` only special-cased `Provider.ANTHROPIC`
+for Anthropic-shaped tool schemas, defaulting everything else — including
+the new `Provider.DEEPSEEK` — to Gemini's shape. The very first real
+production `CODE_REPAIR` call 400'd: `"Invalid schema for function
+'list_workspace_files': null is not of types 'boolean', 'object'"` —
+DeepSeek's Anthropic-compatible endpoint correctly rejecting a Gemini-shaped
+payload. Fixed by treating `Provider.DEEPSEEK` the same as `Provider.
+ANTHROPIC` in that one function; added a regression test
+(`test_deepseek_gets_anthropics_tool_schema_shape_not_geminis`) asserting
+the two shapes are identical and distinct from Gemini's. This is exactly
+the class of bug static checks can't catch (both branches were individually
+valid Python, correctly typed) — only exercising the real code path against
+the real API surfaced it.
+
+**Verification**: `ruff`/`mypy` clean throughout. Full local unit suite
+(877-878 passed depending on pass, same 2 permanent Windows-only failures).
+Fixed one test (`test_agent_spawner.py`'s cost-model test, now asserts
+`model_deepseek`) and one file whose fakes were silently testing the wrong
+provider slot after the routing split
+(`test_surgical_patch.py` — its `_ctx()`/`FakeProvider` registered under
+`Provider.ANTHROPIC`, which `WORKSPACE_SURGEON` no longer reaches at all;
+moved to `Provider.DEEPSEEK` so the outage/retry test still exercises the
+scenario it's named for instead of silently degrading into an immediate
+`NoProviderAvailable`). Added `test_router_and_sandbox.py` coverage for the
+new routing/`NO_FAILOVER`/`model_for` entries. Ran the full affected
+integration suite (`test_surgical_patch.py`, `test_growth_roles_integration.py`,
+`test_run_in_sandbox_lock.py` — 25 tests) plus the full unit suite against a
+genuine scratch Postgres before deploying, and again after the
+`_tools_payload` fix.
+
+**Deployed live** by syncing the exact changed files directly (not a git
+commit — not asked for one this pass), rebuilt, restarted. Verified with a
+real end-to-end repair run through the actual `build_client()`/
+`attempt_repair()` production path (not a standalone script) against a
+small broken-fixture workspace, `.deps` pre-seeded exactly like a real
+repair run: 5 steps, `stopped: "completed"`, `provider=deepseek model=
+deepseek-v4-pro task_type=code_repair` on every real LLM call, correct
+diagnosis and fix, independently re-verified passing (5/5 tests, exit code
+0) outside the agent's own transcript. Confirmed `CODE_GENERATION`/
+`CODE_REVIEW` still resolve to `anthropic`/`claude-sonnet-5` unchanged.
