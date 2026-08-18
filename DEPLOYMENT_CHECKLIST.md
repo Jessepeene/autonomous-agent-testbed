@@ -4052,3 +4052,103 @@ deepseek-v4-pro task_type=code_repair` on every real LLM call, correct
 diagnosis and fix, independently re-verified passing (5/5 tests, exit code
 0) outside the agent's own transcript. Confirmed `CODE_GENERATION`/
 `CODE_REVIEW` still resolve to `anthropic`/`claude-sonnet-5` unchanged.
+
+## Two more real bugs, found answering "is LLM spend accurate?" — 2026-08-18
+
+Jesse asked a plain status question a few hours after the DeepSeek deploy.
+Checking the real numbers against `PRICE_TABLE` surfaced two genuine
+problems, one of them a second real bug in the DeepSeek work from earlier
+the same day.
+
+**1. Gemini (and now DeepSeek) spend was never priced correctly.**
+`PRICE_TABLE`'s Gemini keys are the dated names (`gemini-2.5-pro`,
+`gemini-2.5-flash`); production's `MODEL_GENERAL`/`MODEL_FAST` are
+configured to Google's rolling aliases (`gemini-pro-latest`,
+`gemini-flash-latest`), which is what `LLMCall.model` actually logs. Every
+real Gemini call has therefore always fallen through to `_DEFAULT_PRICE`
+(Claude Sonnet 5's rate: $3.00/$15.00 per M) instead of Gemini's real rate
+($1.25/$10.00 pro, $0.30/$2.50 flash) — confirmed against the live table:
+19 `gemini-pro-latest` + 4 `gemini-flash-latest` calls, zero of which had
+ever matched a `PRICE_TABLE` key. `deepseek-v4-pro` was simply never added
+when `CODE_REPAIR` was routed to it earlier the same day, so every real
+DeepSeek call was *also* silently priced at Sonnet 5's rate — directly
+undermining the reason DeepSeek was chosen. Verified DeepSeek's real
+pricing against `deepseek.ai/pricing` (not a third-party reseller markup
+like OpenRouter shows): $0.435/$0.87 per M, roughly 14x cheaper than what
+it was being charged internally. Added both real Gemini alias keys and
+`deepseek-v4-pro` to `PRICE_TABLE`. Known, accepted residual gap: DeepSeek's
+real cache-hit discount (~99.2%, $0.003625 vs $0.435 cache-miss) is far
+steeper than this file's blanket `_CACHE_READ_MULTIPLIER` (10%, calibrated
+for Anthropic) — a smaller, separate overstatement on DeepSeek's cached
+input tokens specifically, not fixed this pass. Cost values already written
+to `llm_calls` are not retroactively corrected (`costs.py`'s own module
+docstring: recomputing at read time would rewrite history to a price never
+actually charged) — acceptable here since the affected historical total was
+a few cents, accumulated in under a day of real traffic.
+
+**2. A second real bug in the DeepSeek routing shipped earlier today**:
+`ProviderRegistry.alternatives()` has no concept of "is this provider
+appropriate for this task" — it returns every other *registered* provider,
+regardless of fitness. With three providers now registered instead of two,
+a Gemini-routed, failover-eligible task type (`ANALYSIS`, `ORCHESTRATION`,
+`COMPLIANCE`, `DISCOVERY`, `MARKETING_COPY`) failing over would treat
+DeepSeek as a candidate too — sending it a model name it has never heard of
+(whatever `model_general`/`model_fast` resolves to for whichever provider
+was actually primary). Confirmed live in `llm_calls`: one real `ANALYSIS`
+call reached DeepSeek this way (`provider=deepseek, model=gemini-pro-latest,
+outcome=rejected`) — caught safely only because DeepSeek's endpoint
+rejected the unrecognised model name; a more lenient endpoint could have
+silently served a compliance or orchestration decision on the wrong model
+entirely. Fixed with a new `router.GENERAL_FALLBACK_PROVIDERS = {GEMINI,
+ANTHROPIC}` policy set, filtering both `parse()`'s and `converse()`'s
+failover-candidate lists in `client.py` — DeepSeek can now only ever be
+reached as `CODE_REPAIR`'s own primary, never as anyone else's fallback.
+
+**Verification**: `ruff`/`mypy` clean. Added two regression tests
+(`test_deepseek_is_never_an_accidental_failover_target`,
+extending the existing `_tools_payload` coverage). Full local unit suite:
+878 passed (same 2 permanent Windows-only failures). Full unit **and**
+integration suite together against a genuine scratch Postgres: 1205 passed,
+0 failed (~8 minutes). Deployed live, rebuilt, restarted, confirmed with a
+direct check against the running container: `gemini-pro-latest` now prices
+at $11.25 for 1M in + 1M out (was $18.00 at the wrong default),
+`deepseek-v4-pro` at $1.305 (was $18.00 — roughly 14x too high before),
+and `Provider.DEEPSEEK in GENERAL_FALLBACK_PROVIDERS` confirmed `False` —
+correctly excluded from the general fallback pool.
+
+## Two more found on a routine "anything weird?" check-in — 2026-08-18
+
+**A real, previously-latent reliability bug, unrelated to anything else
+today**: `AnthropicProvider._effort()` always sent a real `effort` value in
+`output_config` on every `parse()`/`converse()` call, regardless of which
+model actually served it. `model_fallback_anthropic` (`claude-haiku-4-5`,
+the cheap stand-in used only when a Gemini-routed call fails over) does not
+support the `effort` parameter at all — confirmed live in `llm_calls`: three
+real incidents the same day (`09:00`, `12:00`, `15:00` UTC), each one a
+Gemini 400 correctly triggering failover to Anthropic, which then *also*
+400'd (`"This model does not support the effort parameter"`) — silently
+defeating the entire failover safety net for every agentic, Gemini-routed
+task type. Real-world impact so far was minor (each incident was
+`DISCOVERY_SCOUT`'s supplementary sub-step finding 0 signals instead of
+possibly a few; no crashes, no wasted spend — rejections fail before any
+tokens generate) but the mechanism was real and reproducible every time it
+fired. Fixed by making `_effort()` take the model string and return `None`
+(omit the field) specifically for `model_fallback_anthropic`; both
+`parse()`/`converse()` now build `output_config` conditionally. Added
+`tests/unit/test_anthropic_provider.py` — the first direct unit test of
+`AnthropicProvider`'s own request-shaping logic (previously only exercised
+indirectly via `FakeProvider` substitution, which is exactly how this shipped
+unnoticed for as long as it did). Verified live: a real `converse()` call to
+`claude-haiku-4-5` that would have 400'd before now succeeds.
+
+**A cosmetic one, found in the same sweep**: `docker ps` showed
+`dashboard: unhealthy` despite the app serving real traffic correctly all
+day (confirmed via direct HTTPS checks). Root-caused to two independent
+issues in the Dockerfile's `HEALTHCHECK`: (1) Next.js standalone's
+`server.js` was binding only to the container's own interface IP, never
+loopback, because `HOSTNAME` was never set — fixed with `ENV
+HOSTNAME=0.0.0.0`; (2) even after that, `wget`'s resolution of the literal
+string `localhost` tried `::1` (IPv6) first, which a `0.0.0.0` (IPv4-only)
+bind refuses, and never fell back to the working IPv4 address — fixed by
+using `127.0.0.1` explicitly in the healthcheck command instead of
+`localhost`. Both confirmed: container reports `healthy` after redeploy.

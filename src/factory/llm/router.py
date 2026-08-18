@@ -30,6 +30,21 @@ NO_FAILOVER: frozenset[TaskType] = frozenset(
     {TaskType.CODE_GENERATION, TaskType.CODE_REVIEW, TaskType.CODE_REPAIR}
 )
 
+#: DeepSeek is a dedicated, single-purpose provider (CODE_REPAIR only, itself in
+#: NO_FAILOVER) -- it must never become an accidental fallback for some *other*
+#: task type's outage. `ProviderRegistry.alternatives()` has no concept of "is
+#: this provider appropriate for this task," so without this filter a
+#: Gemini-routed task (ANALYSIS, ORCHESTRATION, COMPLIANCE, ...) failing over
+#: would treat every other registered provider as a candidate, including
+#: DeepSeek -- sending it a model name it has never heard of (whatever
+#: model_general/model_fast resolves to for the *primary* provider). Confirmed
+#: live: one real ANALYSIS call reached DeepSeek this way and was correctly
+#: rejected for an unrecognised model, but a more lenient endpoint could have
+#: silently served a compliance or orchestration decision on the wrong model
+#: entirely. Only the two general-reasoning providers may stand in for each
+#: other; DeepSeek can only ever be reached as CODE_REPAIR's own primary.
+GENERAL_FALLBACK_PROVIDERS: frozenset[Provider] = frozenset({Provider.GEMINI, Provider.ANTHROPIC})
+
 
 def provider_for(task_type: TaskType) -> Provider:
     try:

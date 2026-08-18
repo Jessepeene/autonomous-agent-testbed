@@ -158,7 +158,18 @@ class AnthropicProvider:
             self._client = anthropic.AsyncAnthropic(api_key=key)
         return self._client
 
-    def _effort(self, task_type: TaskType) -> str:
+    def _effort(self, task_type: TaskType, model: str) -> str | None:
+        """`None` means omit the field entirely, not "use some default" --
+        `model_fallback_anthropic` (Haiku 4.5, the cheap stand-in used only when
+        a Gemini-routed call fails over) does not support `effort` at all.
+        Confirmed live: "This model does not support the effort parameter,"
+        a permanent 400 that also broke the *next* fallback attempt would-be
+        (there is none -- Anthropic is the last candidate), silently
+        defeating the entire point of the failover safety net. Every other
+        model this class ever serves does support it.
+        """
+        if model == self._settings.model_fallback_anthropic:
+            return None
         if task_type is TaskType.CODE_GENERATION:
             return self._settings.effort_code
         if task_type is TaskType.CODE_REVIEW:
@@ -226,15 +237,18 @@ class AnthropicProvider:
         tools: list[dict[str, Any]] | None = None,
         cache_prefix: str | None = None,
     ) -> Completion[SchemaT]:
+        output_config: dict[str, Any] = {
+            "format": {"type": "json_schema", "schema": json_schema_for(schema)},
+        }
+        effort = self._effort(task_type, model)
+        if effort is not None:
+            output_config["effort"] = effort
         kwargs: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
             "system": _system_blocks(system, cache_prefix),
             "messages": [{"role": "user", "content": prompt}],
-            "output_config": {
-                "format": {"type": "json_schema", "schema": json_schema_for(schema)},
-                "effort": self._effort(task_type),
-            },
+            "output_config": output_config,
         }
         if tools:
             kwargs["tools"] = tools
@@ -309,8 +323,10 @@ class AnthropicProvider:
             "max_tokens": max_tokens,
             "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             "messages": _mark_conversation_prefix([_to_anthropic_message(turn) for turn in turns]),
-            "output_config": {"effort": self._effort(task_type)},
         }
+        effort = self._effort(task_type, model)
+        if effort is not None:
+            kwargs["output_config"] = {"effort": effort}
         if tools:
             kwargs["tools"] = tools
 

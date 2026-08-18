@@ -18,12 +18,31 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from factory.state.orm import LLMCall
 
 #: USD per million tokens, (input, output). Update alongside provider pricing.
+#:
+#: The gemini-*-latest and deepseek-v4-pro keys are not redundant with the dated
+#: names above them -- they are what actually gets logged. MODEL_GENERAL/
+#: MODEL_FAST are configured in production to Google's rolling aliases
+#: ("gemini-pro-latest"/"gemini-flash-latest"), never the dated "gemini-2.5-*"
+#: names, so every real Gemini call silently missed this table and fell through
+#: to _DEFAULT_PRICE (Claude Sonnet 5's rate) -- confirmed live: 19
+#: gemini-pro-latest + 4 gemini-flash-latest calls, zero of which had ever
+#: matched a key here. deepseek-v4-pro was simply never added when CODE_REPAIR
+#: was routed to it, so every real DeepSeek call was *also* silently priced at
+#: Sonnet 5's rate -- directly undermining the reason DeepSeek was chosen.
+#: deepseek-v4-pro pricing verified against deepseek.ai/pricing 2026-08-18;
+#: its real cache-hit rate ($0.003625/M, ~0.83% of cache-miss) is far below
+#: this file's blanket _CACHE_READ_MULTIPLIER (10%), calibrated for Anthropic --
+#: a smaller, known residual overstatement on DeepSeek's cached input tokens
+#: specifically, not fixed here.
 PRICE_TABLE: dict[str, tuple[float, float]] = {
     "claude-opus-5": (5.00, 25.00),
     "claude-sonnet-5": (3.00, 15.00),
     "claude-haiku-4-5": (1.00, 5.00),
     "gemini-2.5-pro": (1.25, 10.00),
     "gemini-2.5-flash": (0.30, 2.50),
+    "gemini-pro-latest": (1.25, 10.00),
+    "gemini-flash-latest": (0.30, 2.50),
+    "deepseek-v4-pro": (0.435, 0.87),
 }
 
 _DEFAULT_PRICE = (3.00, 15.00)

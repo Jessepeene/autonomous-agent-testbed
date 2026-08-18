@@ -27,6 +27,7 @@ from factory.llm.providers.base import (
     Usage,
 )
 from factory.llm.router import (
+    GENERAL_FALLBACK_PROVIDERS,
     ProviderRegistry,
     max_tokens_for,
     may_failover,
@@ -127,7 +128,11 @@ class LLMClient:
         if routed is not None:
             candidates.append(routed)
         if may_failover(task_type):
-            candidates.extend(self._registry.alternatives(exclude=primary))
+            candidates.extend(
+                p
+                for p in self._registry.alternatives(exclude=primary)
+                if p.name in GENERAL_FALLBACK_PROVIDERS
+            )
 
         if not candidates:
             raise NoProviderAvailable(
@@ -328,7 +333,11 @@ class LLMClient:
         if routed is not None:
             candidates.append(routed)
         if may_failover(task_type):
-            candidates.extend(self._registry.alternatives(exclude=primary))
+            candidates.extend(
+                p
+                for p in self._registry.alternatives(exclude=primary)
+                if p.name in GENERAL_FALLBACK_PROVIDERS
+            )
 
         if not candidates:
             raise NoProviderAvailable(

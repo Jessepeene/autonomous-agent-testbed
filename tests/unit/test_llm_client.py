@@ -167,6 +167,31 @@ async def test_schema_violation_that_never_repairs_is_still_recorded_with_usage(
     assert recorder.records[1].output_tokens == 64000
 
 
+async def test_deepseek_is_never_an_accidental_failover_target() -> None:
+    """Real, reproducible regression: DeepSeek is a dedicated single-purpose
+    provider (CODE_REPAIR only, itself in NO_FAILOVER), but ProviderRegistry.
+    alternatives() has no concept of task-type appropriateness -- with three
+    providers registered, a Gemini-routed ANALYSIS call failing over used to
+    treat DeepSeek as a candidate too, sending it a model name it has never
+    heard of. Confirmed live: one real ANALYSIS call reached DeepSeek this way
+    and was rejected for an unrecognised model before this fix."""
+    gemini = FakeProvider(Provider.GEMINI)
+    gemini.register(IdeaBatch, ProviderRequestRejected(Provider.GEMINI, "400", status=400))
+    anthropic = FakeProvider(Provider.ANTHROPIC)
+    anthropic.register(IdeaBatch, IdeaBatch(ideas=[]))
+    deepseek = FakeProvider(Provider.DEEPSEEK)
+    settings = Settings(gemini_api_key="test-key", anthropic_api_key="test-key")
+    registry = ProviderRegistry(
+        {Provider.GEMINI: gemini, Provider.ANTHROPIC: anthropic, Provider.DEEPSEEK: deepseek}
+    )
+    client = LLMClient(registry, settings=settings, backoff_base=0.0)
+
+    await client.parse(IdeaBatch, task_type=TaskType.ANALYSIS, system="s", prompt="p")
+
+    assert len(deepseek.calls) == 0
+    assert len(anthropic.calls) == 1
+
+
 def test_deepseek_gets_anthropics_tool_schema_shape_not_geminis() -> None:
     """Real, reproducible regression: DeepSeek is served over
     DeepSeekProvider(AnthropicProvider) -- the same Anthropic-compatible
