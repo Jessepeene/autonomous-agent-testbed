@@ -12,22 +12,84 @@ time it's fixed, not batched up afterward.**
 
 ## Index
 
-1. [Gemini: missing `thought_signature` breaks every multi-turn tool call](#1-gemini-missing-thought_signature-breaks-every-multi-turn-tool-call)
-2. [Anthropic: `effort` param unsupported by the Haiku 4.5 fallback model](#2-anthropic-effort-param-unsupported-by-the-haiku-45-fallback-model)
-3. [Dashboard container reports unhealthy despite working correctly](#3-dashboard-container-reports-unhealthy-despite-working-correctly)
-4. [DeepSeek could accidentally serve as fallback for unrelated tasks](#4-deepseek-could-accidentally-serve-as-fallback-for-unrelated-tasks)
-5. [DeepSeek sent Gemini-shaped tool schemas, not Anthropic-shaped](#5-deepseek-sent-gemini-shaped-tool-schemas-not-anthropic-shaped)
-6. [Gemini and DeepSeek spend silently mispriced](#6-gemini-and-deepseek-spend-silently-mispriced)
-7. [Real code generation was mocked in production](#7-real-code-generation-was-mocked-in-production)
+1. [Gemini: unbounded thinking budget crowds out the JSON answer in `parse()`](#1-gemini-unbounded-thinking-budget-crowds-out-the-json-answer-in-parse)
+2. [Gemini: missing `thought_signature` breaks every multi-turn tool call](#2-gemini-missing-thought_signature-breaks-every-multi-turn-tool-call)
+3. [Anthropic: `effort` param unsupported by the Haiku 4.5 fallback model](#3-anthropic-effort-param-unsupported-by-the-haiku-45-fallback-model)
+4. [Dashboard container reports unhealthy despite working correctly](#4-dashboard-container-reports-unhealthy-despite-working-correctly)
+5. [DeepSeek could accidentally serve as fallback for unrelated tasks](#5-deepseek-could-accidentally-serve-as-fallback-for-unrelated-tasks)
+6. [DeepSeek sent Gemini-shaped tool schemas, not Anthropic-shaped](#6-deepseek-sent-gemini-shaped-tool-schemas-not-anthropic-shaped)
+7. [Gemini and DeepSeek spend silently mispriced](#7-gemini-and-deepseek-spend-silently-mispriced)
+8. [Real code generation was mocked in production](#8-real-code-generation-was-mocked-in-production)
 
 ---
 
-## 1. Gemini: missing `thought_signature` breaks every multi-turn tool call
+## 1. Gemini: unbounded thinking budget crowds out the JSON answer in `parse()`
+
+**Found**: 2026-08-19, routine periodic check-in — `llm_calls` showed a
+`schema_violation` on an `analysis`/`discovery` call from a few hours
+earlier, right after the factory's own supervisor had already run a
+maintenance task at 00:04 titled "Review recent schema_violation and
+refusal outcomes... and tighten the prompts that produced them" without
+fully resolving it.
+
+**Severity**: Real, intermittent, and directly relevant to why Discovery
+had produced zero surviving ideas after its first full day live — this
+crashed the discriminator step outright (`engine.failed`) on some fraction
+of small-batch scoring calls, rather than merely scoring the batch low.
+
+**Root cause**: `GeminiProvider.parse()` never set a `thinking_config`, so
+Gemini used its default dynamic/unbounded thinking budget — and thinking
+tokens share the *same* `max_output_tokens` ceiling as the visible JSON
+answer (confirmed via `usage_metadata.thoughts_token_count`, counted
+separately from `candidates_token_count` but against the same cap).
+`discovery/score.py::_scaled_discriminator_tokens()` scales the ceiling down
+for small batches (as low as ~2236 tokens for a single candidate idea), and
+on some inputs thinking alone consumed nearly all of it. Real failure
+reproduced live: a call with `max_tokens=2236` hit `finish_reason=MAX_TOKENS`
+after emitting only 106 tokens of visible answer — `SchemaViolation`, fatal
+for structured output (unlike `converse()`, where a `MAX_TOKENS` finish is
+merely a short turn the agent loop can continue from, so this class of bug
+is specific to `parse()`). Confirmed directly: an unbounded live repro call
+against the same prompt used `thoughts_token_count=860` against
+`candidates_token_count=178` — thinking spend is real and highly variable,
+not a fixed small overhead.
+
+**Affected**: `src/factory/llm/providers/gemini_provider.py` (`parse`, new
+`_thinking_budget` helper).
+
+**Fix**: Added `_thinking_budget(max_tokens) -> int`, returning
+`max(128, min(1024, max_tokens // 4))`, passed as `thinking_config` on every
+`parse()` call. `thinking_budget=0` (fully disabled) was tried first and
+rejected outright by `gemini-pro-latest` — `"Budget 0 is invalid. This model
+only works in thinking mode."` — so this reserves a small, capped share
+instead: verified live that a bounded budget (512–1024) still completes the
+same schema successfully, using less than the cap when the model doesn't
+need it (guarantees answer headroom without forcing extra thinking spend on
+the easy case). Deliberately scoped to `parse()` only — `converse()` is left
+with its default dynamic thinking, since a truncated agentic turn there
+isn't fatal the way a truncated JSON blob is.
+
+**Verification**: `test_gemini_provider.py::test_thinking_budget_is_a_quarter_of_max_tokens_within_bounds`,
+`test_thinking_budget_never_drops_below_the_floor_on_a_tiny_ceiling`,
+`test_thinking_budget_always_leaves_headroom_for_the_answer`,
+`test_parse_sets_a_bounded_thinking_config_on_every_request`. Full local
+suite (888 tests) green in a genuine scratch Postgres container before
+deploying. Reproduced the exact real failure shape live pre-fix (unbounded
+repro showing `thoughts_token_count=860`), then re-ran the exact previously
+-failing call (`max_tokens=2236`, single-idea batch) 5x live post-fix — all
+5 succeeded, two scored above the `SCORE_THRESHOLD=0.55` survival bar.
+
+**Status**: Fixed, deployed, commit pending (not yet committed — awaiting
+Jesse's go-ahead per this project's "ask before committing" rule).
+
+---
+
+## 2. Gemini: missing `thought_signature` breaks every multi-turn tool call
 
 **Found**: 2026-08-18, prompted by Jesse noticing the dashboard's provider-health
 panel showing `gemini: down`.
 
-**Severity**: Real, recurring, previously invisible (masked by bug #2's fix,
+**Severity**: Real, recurring, previously invisible (masked by bug #3's fix,
 which made every occurrence fail over successfully instead of crashing).
 
 **Root cause**: Gemini's newer models attach an opaque `thought_signature`
@@ -66,7 +128,7 @@ end-to-end, including the model continuing to a genuine second tool call.
 
 ---
 
-## 2. Anthropic: `effort` param unsupported by the Haiku 4.5 fallback model
+## 3. Anthropic: `effort` param unsupported by the Haiku 4.5 fallback model
 
 **Found**: 2026-08-18, routine "anything weird?" check-in — found by querying
 `llm_calls` for the day's `rejected` outcomes.
@@ -101,9 +163,9 @@ which is exactly how this shipped unnoticed). Verified live: a real
 
 ---
 
-## 3. Dashboard container reports unhealthy despite working correctly
+## 4. Dashboard container reports unhealthy despite working correctly
 
-**Found**: 2026-08-18, same check-in as #2 — `docker ps` showed
+**Found**: 2026-08-18, same check-in as #3 — `docker ps` showed
 `dashboard: unhealthy`.
 
 **Severity**: Cosmetic only. Real traffic through Caddy worked all day
@@ -129,9 +191,9 @@ probe `http://127.0.0.1:3000/login` instead of `http://localhost:3000/login`.
 
 ---
 
-## 4. DeepSeek could accidentally serve as fallback for unrelated tasks
+## 5. DeepSeek could accidentally serve as fallback for unrelated tasks
 
-**Found**: 2026-08-18, while investigating bug #6 (checking `llm_calls` for
+**Found**: 2026-08-18, while investigating bug #7 (checking `llm_calls` for
 pricing accuracy turned up an unrelated anomalous row).
 
 **Severity**: Real, live risk — not just theoretical. One real production
@@ -140,7 +202,7 @@ call already hit it.
 **Root cause**: `ProviderRegistry.alternatives()` returns every other
 *registered* provider on failover, with no concept of task-type fitness.
 Once DeepSeek became a third registered provider (for `CODE_REPAIR`, see
-bug #5's context), any Gemini-routed, failover-eligible task type
+bug #6's context), any Gemini-routed, failover-eligible task type
 (`ANALYSIS`, `ORCHESTRATION`, `COMPLIANCE`, `DISCOVERY`, `MARKETING_COPY`)
 could fail over to DeepSeek and send it a model name it had never heard of.
 Confirmed live: `provider=deepseek, model=gemini-pro-latest,
@@ -165,7 +227,7 @@ Postgres before deploying.
 
 ---
 
-## 5. DeepSeek sent Gemini-shaped tool schemas, not Anthropic-shaped
+## 6. DeepSeek sent Gemini-shaped tool schemas, not Anthropic-shaped
 
 **Found**: 2026-08-18, the very first real production `CODE_REPAIR` call
 after routing DeepSeek in — caught before it affected a real repair
@@ -195,7 +257,7 @@ steps, correct diagnosis, correct fix, independently verified passing.
 
 ---
 
-## 6. Gemini and DeepSeek spend silently mispriced
+## 7. Gemini and DeepSeek spend silently mispriced
 
 **Found**: 2026-08-18, Jesse asked directly: "is LLM spend accurate?"
 
@@ -235,7 +297,7 @@ affected total was a few cents.
 
 ---
 
-## 7. Real code generation was mocked in production
+## 8. Real code generation was mocked in production
 
 **Found**: 2026-08-18, go-live day, a few hours after `FACTORY_DRY_RUN` was
 flipped off — not caught as part of the go-live checklist itself.

@@ -127,6 +127,25 @@ def _billable_input_tokens(meta: Any) -> int:
     return max(prompt_tokens - cache_read_tokens, 0)
 
 
+def _thinking_budget(max_tokens: int) -> int:
+    """Bound Gemini's thinking-token spend for a `parse()` call.
+
+    `max_output_tokens` is a *shared* ceiling for thinking + the visible answer
+    (confirmed live via `usage_metadata.thoughts_token_count`, which is separate
+    from `candidates_token_count` but counts against the same cap) -- left at its
+    default (unbounded/dynamic), thinking can consume almost the entire budget on
+    some inputs, leaving too little for the answer and truncating the JSON
+    mid-object (`SchemaViolation`, finish_reason=MAX_TOKENS). This bites hardest on
+    small `max_tokens` ceilings, e.g. `discovery/score.py`'s scaled discriminator
+    budget for a 1-idea batch (~2236) -- reproduced live: one real call emitted
+    only 106 answer tokens before hitting the cap. `thinking_budget=0` (fully
+    disabled) is rejected outright on gemini-pro-latest ("this model only works in
+    thinking mode"), so this reserves a small, capped share instead of disabling
+    it -- verified live that a bounded budget still completes the same schema
+    successfully (the model uses less than the cap when it doesn't need it)."""
+    return max(128, min(1024, max_tokens // 4))
+
+
 def _to_gemini_content(turn: Turn) -> dict[str, Any]:
     """Render a neutral turn as Gemini content parts.
 
@@ -215,6 +234,9 @@ class GeminiProvider:
             "response_mime_type": "application/json",
             "response_schema": schema_dict,
             "max_output_tokens": max_tokens,
+            "thinking_config": genai_types.ThinkingConfig(
+                thinking_budget=_thinking_budget(max_tokens)
+            ),
         }
         if tools:
             config_kwargs["tools"] = [{"function_declarations": _sanitize_tools_for_gemini(tools)}]

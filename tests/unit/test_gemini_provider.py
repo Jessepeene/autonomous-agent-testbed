@@ -21,6 +21,7 @@ from factory.llm.providers.gemini_provider import (
     _billable_input_tokens,
     _sanitize_tools_for_gemini,
     _strip_additional_properties,
+    _thinking_budget,
     _to_gemini_content,
 )
 from factory.settings import Settings, TaskType
@@ -178,6 +179,65 @@ async def test_parse_raises_provider_request_rejected_on_a_schema_validation_err
                 task_type=TaskType.ANALYSIS,
                 model="gemini-2.5-flash",
             )
+
+
+# --- thinking-budget bound: a shared max_output_tokens ceiling, reproduced live --
+
+
+def test_thinking_budget_is_a_quarter_of_max_tokens_within_bounds() -> None:
+    assert _thinking_budget(8192) == 1024  # capped at the 1024 ceiling
+    assert _thinking_budget(2048) == 512  # ORCHESTRATION's real ceiling
+
+
+def test_thinking_budget_never_drops_below_the_floor_on_a_tiny_ceiling() -> None:
+    # A 1-idea discriminator batch scales max_tokens down to ~2236 (see
+    # discovery/score.py::_scaled_discriminator_tokens); even smaller than that,
+    # thinking still needs a nonzero budget -- gemini-pro-latest rejects
+    # thinking_budget=0 outright ("this model only works in thinking mode").
+    assert _thinking_budget(400) == 128
+
+
+def test_thinking_budget_always_leaves_headroom_for_the_answer() -> None:
+    for max_tokens in (400, 2048, 2236, 8192, 16384):
+        assert _thinking_budget(max_tokens) < max_tokens
+
+
+class _Echo2(BaseModel):
+    text: str
+
+
+async def test_parse_sets_a_bounded_thinking_config_on_every_request() -> None:
+    """Regression: left unset, Gemini's thinking budget is dynamic/unbounded and
+    shares the same max_output_tokens ceiling as the JSON answer -- reproduced
+    live, a small discriminator batch's answer was truncated (SchemaViolation,
+    finish_reason=MAX_TOKENS) after thinking alone consumed most of a ~2236-token
+    budget (see BUG_LOG.md). parse() must always pass a bounded thinking_config
+    so the answer keeps guaranteed room."""
+    provider = GeminiProvider(Settings(gemini_api_key="test-key"))
+    fake_response = SimpleNamespace(
+        prompt_feedback=None,
+        candidates=[SimpleNamespace(finish_reason="STOP")],
+        text='{"text": "ok"}',
+        usage_metadata=SimpleNamespace(
+            prompt_token_count=10, cached_content_token_count=0, candidates_token_count=5
+        ),
+    )
+    generate_content = AsyncMock(return_value=fake_response)
+    provider._client = SimpleNamespace(
+        aio=SimpleNamespace(models=SimpleNamespace(generate_content=generate_content))
+    )
+
+    await provider.parse(
+        _Echo2,
+        system="s",
+        prompt="p",
+        task_type=TaskType.ANALYSIS,
+        model="gemini-pro-latest",
+        max_tokens=2236,
+    )
+
+    config = generate_content.call_args.kwargs["config"]
+    assert 0 < config.thinking_config.thinking_budget < 2236
 
 
 def test_a_replayed_function_call_carries_its_thought_signature() -> None:
