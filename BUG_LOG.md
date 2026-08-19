@@ -79,8 +79,7 @@ repro showing `thoughts_token_count=860`), then re-ran the exact previously
 -failing call (`max_tokens=2236`, single-idea batch) 5x live post-fix — all
 5 succeeded, two scored above the `SCORE_THRESHOLD=0.55` survival bar.
 
-**Status**: Fixed, deployed, commit pending (not yet committed — awaiting
-Jesse's go-ahead per this project's "ask before committing" rule).
+**Status**: Fixed, deployed, commit `1668906`.
 
 ---
 
