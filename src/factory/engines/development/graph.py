@@ -47,7 +47,7 @@ from factory.sandbox.runner import (
     is_devops_error,
     resolve_workspace,
 )
-from factory.settings import EngineName
+from factory.settings import EngineName, Settings, get_settings
 from factory.state import repository
 from factory.state.orm import ABTest, Idea, Product, Task, new_id
 from factory.state.schemas import (
@@ -1281,7 +1281,8 @@ async def _heal(
             detail=explanation,
             headline="\U0001f527 Repair stuck — needs your input",
             reply_hint=(
-                "Reply with guidance for one more attempt, or REJECT to retire this product."
+                "Reply with guidance for one more attempt, DEFER to deploy as-is and "
+                "accept this as a known, un-fixed risk, or REJECT to retire this product."
             ),
             product_id=product_id,
         )
@@ -1315,3 +1316,98 @@ async def _heal(
     )
     log.info("development.heal_queued", product_id=product_id, attempt=attempts)
     return f"development: product {product_id} needs repair (cycle {attempts})"
+
+
+async def deploy_accepting_risk(
+    session: AsyncSession,
+    *,
+    product_id: str,
+    override_reason: str,
+    settings: Settings | None = None,
+) -> str:
+    """Force-deploy a product's current workspace exactly as it stands, bypassing
+    Bug Council's approval gate entirely -- reached only from a human's own
+    explicit "defer/accept the risk" reply to a heal_exhausted escalation (see
+    `hitl/interrupts.py::_act_on_product_reply`), never from the normal
+    build/patch pipeline. The whole point of this path is that the product's
+    actual owner, not the Council, gets the final call on their own product's
+    launch-readiness bar -- e.g. shipping a known, deferred issue to test real
+    market traction before spending more repair budget hardening it. No test
+    suite or Council review runs here; there is nothing to re-check that would
+    change the outcome, since the whole point is to ship the workspace as it
+    already is.
+    """
+    settings = settings or get_settings()
+    product = await session.get(Product, product_id)
+    if product is None:
+        return f"development: product {product_id!r} not found"
+
+    workspace = product.workspace_path or f"product-{product_id[:12]}"
+    try:
+        async with product_lock(
+            session,
+            product_id=product_id,
+            holder=EngineName.DEVELOPMENT,
+            reason="deploying with an accepted, known risk",
+        ):
+            idea_row = await repository.get_idea(session, product.idea_id)
+            price_usd = idea_row.self_serve_price_usd if idea_row is not None else None
+
+            result = await deploy_module.deploy(
+                council=None,
+                override_reason=override_reason,
+                product_id=product_id,
+                product_name=product.name,
+                workspace=workspace,
+                settings=settings,
+                dry_run=settings.factory_dry_run,
+                self_serve_price_usd=price_usd,
+            )
+            if not result.ok:
+                await repository.set_product_status(session, product_id, ProductStatus.PLANNED)
+                return f"development: override deploy for {product_id} failed: {result.detail}"
+
+            await repository.set_product_status(
+                session, product_id, ProductStatus.LIVE, deploy_url=result.url, heal_attempts=0
+            )
+            if result.project:
+                await repository.set_vercel_project(session, product_id, result.project)
+            await repository.enqueue_task(
+                session,
+                kind=TaskKind.HARVEST_LEADS,
+                engine=EngineName.MARKETING,
+                idempotency_key=f"leads:{product_id}",
+                payload={"product_id": product_id},
+                product_id=product_id,
+                priority=120,
+            )
+            if product.domain_status is None:
+                await domain.ensure_requested(
+                    session, product_id=product_id, product_name=product.name
+                )
+                await repository.set_domain_requested(session, product_id)
+            # "Make a note of it" -- PREFERENCE is the one MemoryKind that means "an
+            # operator decision to honour going forward," not a bug or a lesson: this
+            # is neither, it's a deliberate, informed risk acceptance that the next
+            # human or agent touching this product needs to see.
+            await memory_store.remember(
+                session,
+                content=(
+                    f"Deployed with a known, deliberately deferred issue (human override, "
+                    f"not fixed): {override_reason[:600]}"
+                ),
+                kind=memory_store.MemoryKind.PREFERENCE,
+                scope=memory_store.scope_for(product_id=product_id),
+                origin="development:deploy_accepting_risk",
+            )
+            log.warning(
+                "development.deployed_with_accepted_risk",
+                product_id=product_id,
+                reason=override_reason[:300],
+            )
+            return (
+                f"development: product {product_id} deployed with an accepted, "
+                f"known risk to {result.url}"
+            )
+    except LockUnavailable:
+        return f"development: product {product_id} is locked by another worker"

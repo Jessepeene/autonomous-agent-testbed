@@ -42,9 +42,22 @@ _TAG = re.compile(r"#([0-9a-f]{8})\b", re.IGNORECASE)
 _RETRY_WORD = re.compile(r"\bretry\b", re.IGNORECASE)
 
 #: Same idea, for a heal-exhausted product (no task_id -- see graph.py's
-#: "Reply with guidance, or REJECT to retire this product" escalation text). Any
-#: other non-empty reply is treated as guidance for one more patch attempt.
+#: "Reply with guidance, DEFER to deploy as-is, or REJECT to retire this product"
+#: escalation text). Checked before `_DEFER_WORD` below in `_act_on_product_reply`
+#: -- an operator typing "reject" should never be second-guessed by a coincidental
+#: "defer" elsewhere in the same message.
 _REJECT_WORD = re.compile(r"\breject\b", re.IGNORECASE)
+
+#: A human explicitly accepting a heal-exhausted product's current, known risk
+#: rather than spending another repair cycle on it -- e.g. shipping a real MVP to
+#: test market traction before hardening a flagged issue. Deliberately a single
+#: exact keyword, the same design as `_REJECT_WORD` right above: this bypasses
+#: Bug Council's approval gate for one product on one human's explicit say-so (see
+#: `deploy.py::deploy_requires_approval`'s `override_reason`), so it stays a
+#: narrow, unambiguous trigger rather than a guess at loose natural-language
+#: intent. Any other non-empty reply that matches neither this nor `_REJECT_WORD`
+#: is treated as guidance for one more patch attempt.
+_DEFER_WORD = re.compile(r"\bdefer\b", re.IGNORECASE)
 
 #: A flagged idea's escalation (compliance/graph.py's FLAG_FOR_REVIEW branch) asks
 #: for APPROVE or REJECT specifically -- distinct vocabulary from the task-retry and
@@ -317,6 +330,18 @@ async def _act_on_product_reply(
     if _REJECT_WORD.search(answer):
         retired = await repository.retire_product(session, product_id)
         return "retired" if retired else "none"
+    if _DEFER_WORD.search(answer):
+        # Deferred import: `development.graph` imports this module at its own top
+        # level (for `interrupts.request`/`plain_language_error` in its own
+        # heal-exhaustion path), so importing it back from here at module level
+        # would be circular. Both modules are fully loaded by the time a reply
+        # actually triggers this branch.
+        from factory.engines.development import graph as development_graph
+
+        await development_graph.deploy_accepting_risk(
+            session, product_id=product_id, override_reason=answer
+        )
+        return "deployed_with_accepted_risk"
     if not answer:
         return "none"
     task_id = await repository.enqueue_guided_patch(

@@ -14,7 +14,7 @@ import httpx
 import pytest
 
 from factory.engines.development import deploy as deploy_module
-from factory.engines.development.deploy import _collect_files
+from factory.engines.development.deploy import _collect_files, _has_fastapi_entrypoint
 from factory.settings import Settings
 from factory.state.schemas import CouncilResult
 
@@ -292,3 +292,113 @@ async def test_dry_run_never_calls_the_deploy_api_at_all(
     )
 
     assert result.ok is True
+
+
+# --- FastAPI entrypoint detection ---------------------------------------------
+#
+# Real bug, found live on the first product this factory ever deployed:
+# `deploy()` used to send `projectSettings.framework: None` unconditionally,
+# which tells Vercel not to detect a framework at all. Confirmed against the
+# real Deployments API: `"functions": null, "builds": []` -- the generated
+# FastAPI backend (app/main.py) never actually ran, so every `/api/*` call
+# 404'd. See `_has_fastapi_entrypoint`'s own docstring for the full story.
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["app.py", "index.py", "server.py", "main.py", "wsgi.py", "asgi.py"],
+)
+def test_recognizes_every_documented_root_level_entrypoint_name(path: str) -> None:
+    assert _has_fastapi_entrypoint([{"file": path, "data": "", "encoding": "base64"}])
+
+
+@pytest.mark.parametrize("directory", ["src", "app", "api"])
+def test_recognizes_main_py_one_level_under_the_documented_directories(directory: str) -> None:
+    files = [{"file": f"{directory}/main.py", "data": "", "encoding": "base64"}]
+    assert _has_fastapi_entrypoint(files)
+
+
+def test_a_pure_static_landing_page_has_no_entrypoint() -> None:
+    """LANDING_PAGE_SYSTEM builds are explicitly "no backend business logic of
+    any kind" -- must not declare framework: "fastapi" for a page with no `app`
+    instance, or Vercel's build fails looking for one that was never generated."""
+    files = [
+        {"file": "public/index.html", "data": "", "encoding": "base64"},
+        {"file": "public/privacy.html", "data": "", "encoding": "base64"},
+        {"file": "requirements.txt", "data": "", "encoding": "base64"},
+    ]
+    assert not _has_fastapi_entrypoint(files)
+
+
+def test_a_nested_main_py_two_levels_deep_does_not_count() -> None:
+    """Only a fixed, shallow set of locations counts -- matches Vercel's own
+    documented detection rule, not "any main.py anywhere in the tree" (which
+    would false-positive on, say, a vendored dependency's own main.py)."""
+    files = [{"file": "app/nested/main.py", "data": "", "encoding": "base64"}]
+    assert not _has_fastapi_entrypoint(files)
+
+
+async def test_deploy_declares_fastapi_when_a_real_backend_is_present(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        deploy_module,
+        "_collect_files",
+        lambda workspace, settings: [{"file": "app/main.py", "data": "", "encoding": "base64"}],
+    )
+    captured: dict[str, Any] = {}
+
+    async def fake_post(self: httpx.AsyncClient, url: str, **kwargs: Any) -> httpx.Response:
+        captured.update(kwargs.get("json") or {})
+        return httpx.Response(
+            200, json={"url": "example.vercel.app", "readyState": "READY"}, request=_REQUEST
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    live = settings.model_copy(update={"vercel_token": "vercel-test-token"})
+
+    await deploy_module.deploy(
+        council=_approved_council(),
+        product_id="prod-123",
+        product_name="Reconciliation Assistant",
+        workspace="product-1",
+        settings=live,
+        dry_run=False,
+    )
+
+    assert captured["projectSettings"]["framework"] == "fastapi"
+
+
+async def test_deploy_declares_no_framework_for_a_pure_static_build(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Overrides the module's autouse `_fixed_files` fixture (which returns
+    # app.py, a real entrypoint name) with a pure-static file list.
+    monkeypatch.setattr(
+        deploy_module,
+        "_collect_files",
+        lambda workspace, settings: [
+            {"file": "public/index.html", "data": "", "encoding": "base64"}
+        ],
+    )
+    captured: dict[str, Any] = {}
+
+    async def fake_post(self: httpx.AsyncClient, url: str, **kwargs: Any) -> httpx.Response:
+        captured.update(kwargs.get("json") or {})
+        return httpx.Response(
+            200, json={"url": "example.vercel.app", "readyState": "READY"}, request=_REQUEST
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    live = settings.model_copy(update={"vercel_token": "vercel-test-token"})
+
+    await deploy_module.deploy(
+        council=_approved_council(),
+        product_id="prod-123",
+        product_name="Reconciliation Assistant",
+        workspace="product-1",
+        settings=live,
+        dry_run=False,
+    )
+
+    assert captured["projectSettings"]["framework"] is None

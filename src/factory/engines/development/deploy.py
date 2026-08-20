@@ -64,8 +64,20 @@ class DeployResult:
 _INFRA_STATUS = {401, 403, 429, 500, 502, 503, 504}
 
 
-def deploy_requires_approval(council: CouncilResult) -> None:
-    if not council.approved:
+def deploy_requires_approval(
+    council: CouncilResult | None, *, override_reason: str | None = None
+) -> None:
+    # An explicit human override on their own product is the one path allowed to
+    # bypass this gate -- see graph.py's `deploy_accepting_risk`, reached only from
+    # a human's own "defer/accept the risk" reply to a heal_exhausted escalation,
+    # never from the normal build/patch pipeline. `council` is deliberately left
+    # `None` on that path rather than forged as approved: this function's job is to
+    # gate *publishing*, not to keep a truthful historical record of what the
+    # Council actually said, but a fabricated `CouncilResult(approved=True)` would
+    # corrupt exactly that record everywhere else `council.approved` is read.
+    if override_reason is not None:
+        return
+    if council is None or not council.approved:
         raise DeployNotPermitted(
             "the Bug Council did not approve this build; deployment is not permitted"
         )
@@ -94,6 +106,45 @@ def _collect_files(workspace: str, settings: Settings) -> list[dict[str, str]]:
             }
         )
     return payload
+
+
+#: Vercel's zero-config FastAPI detection looks for a `FastAPI` instance named
+#: `app` at one of these filenames, at the project root or one level under one of
+#: the directories below (confirmed live and against Vercel's own docs, 2026-08).
+_FASTAPI_ENTRYPOINT_NAMES = frozenset(
+    {"app.py", "index.py", "server.py", "main.py", "wsgi.py", "asgi.py"}
+)
+_FASTAPI_ENTRYPOINT_DIRS = frozenset({"src", "app", "api"})
+
+
+def _has_fastapi_entrypoint(files: list[dict[str, str]]) -> bool:
+    """Real, live-confirmed root cause of a product's backend never actually
+    running once deployed: `deploy()` used to send `projectSettings.framework:
+    None` unconditionally, which explicitly tells Vercel not to detect a
+    framework at all -- disabling the exact zero-config FastAPI path that would
+    otherwise build `app/main.py` (or any of the other recognised entrypoints)
+    into a real Vercel Function. Confirmed live via the Deployments API on the
+    first product this factory ever shipped: `"functions": null, "builds": []`
+    -- every `/api/*` call the frontend made 404'd against static hosting,
+    because no backend was ever built, not because of a bug in the backend code
+    itself. `deploy()` serves both real MVP builds (which have one of these
+    entrypoints) and validation-only landing pages (pure static, no Python
+    backend at all -- see `LANDING_PAGE_SYSTEM`'s own "no backend business
+    logic" constraint), so this has to detect rather than assume: declaring
+    `framework: "fastapi"` for a page with no `app` instance would make Vercel's
+    build fail looking for one that was never generated.
+    """
+    for entry in files:
+        parts = entry["file"].split("/")
+        if len(parts) == 1 and parts[0] in _FASTAPI_ENTRYPOINT_NAMES:
+            return True
+        if (
+            len(parts) == 2
+            and parts[0] in _FASTAPI_ENTRYPOINT_DIRS
+            and parts[1] in _FASTAPI_ENTRYPOINT_NAMES
+        ):
+            return True
+    return False
 
 
 def _price_cents(price_usd: float) -> int:
@@ -137,15 +188,22 @@ def _runtime_env(
 
 async def deploy(
     *,
-    council: CouncilResult,
+    council: CouncilResult | None,
     product_id: str,
     product_name: str,
     workspace: str,
     settings: Settings,
     dry_run: bool,
     self_serve_price_usd: float | None = None,
+    override_reason: str | None = None,
 ) -> DeployResult:
-    deploy_requires_approval(council)
+    deploy_requires_approval(council, override_reason=override_reason)
+    if override_reason is not None:
+        log.warning(
+            "deploy.override",
+            product_id=product_id,
+            reason=override_reason[:300],
+        )
 
     if dry_run:
         log.info("deploy.dry_run", product=product_name, workspace=workspace)
@@ -168,24 +226,26 @@ async def deploy(
     if not files:
         return DeployResult(ok=False, url=None, detail="workspace contained no deployable files")
 
-    # UNVERIFIED AGAINST A LIVE VERCEL PROJECT: this assumes `env` on a no-linked-repo
-    # file-upload `POST /v13/deployments` call accepts a flat {"KEY": "value"} object
-    # the same way older deployment-create contracts did. Vercel's actual current
-    # contract may instead require a prior `POST /v10/projects/{id}/env` call against
-    # an existing project. Confirm against a real sandbox project before relying on
-    # this in production — see the plan's Phase 1 spike note.
+    # `env` on a no-linked-repo file-upload `POST /v13/deployments` call accepts a
+    # flat {"KEY": "value"} object -- confirmed live, the request is accepted
+    # without error. Whether the deployed function actually reads these values at
+    # runtime depends on `_has_fastapi_entrypoint` above finding a real backend to
+    # run them in -- see that function's docstring for why this was never
+    # exercised until now.
     project_name = product_name.lower().replace(" ", "-")[:52]
+    framework = "fastapi" if _has_fastapi_entrypoint(files) else None
     body = {
         "name": project_name,
         "files": files,
         "target": "production",
-        "projectSettings": {"framework": None},
+        "projectSettings": {"framework": framework},
         "env": _runtime_env(product_id, settings, self_serve_price_usd=self_serve_price_usd),
     }
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
             response = await client.post(
                 _VERCEL_ENDPOINT,
+                params={"skipAutoDetectionConfirmation": "1"},
                 json=body,
                 headers={"Authorization": f"Bearer {token}"},
             )

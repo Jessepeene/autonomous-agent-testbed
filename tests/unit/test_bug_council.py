@@ -164,6 +164,28 @@ def test_deploy_permits_approved_build() -> None:
     deploy_requires_approval(CouncilResult(approved=True, verdicts=[]))
 
 
+def test_deploy_refuses_unapproved_build_with_no_council_at_all() -> None:
+    """`council=None` is the shape `graph.py::deploy_accepting_risk` passes when
+    there was never a real Council verdict to reference -- must fail exactly like
+    an explicit rejection, not crash on a missing `.approved` attribute."""
+    with pytest.raises(DeployNotPermitted):
+        deploy_requires_approval(None)
+
+
+def test_override_reason_bypasses_the_gate_even_with_no_council() -> None:
+    """The one path allowed through without approval: a human's explicit override
+    on their own product (see `hitl/interrupts.py`'s DEFER reply). `council=None`
+    here is deliberate -- an override must never need a fabricated approved
+    verdict to satisfy this check."""
+    deploy_requires_approval(None, override_reason="MVP stage, fix before real launch")
+
+
+def test_override_reason_bypasses_the_gate_even_over_an_explicit_rejection() -> None:
+    deploy_requires_approval(
+        CouncilResult(approved=False, verdicts=[]), override_reason="accepted risk"
+    )
+
+
 # --- generated path safety --------------------------------------------------
 
 

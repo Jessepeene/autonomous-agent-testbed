@@ -12,18 +12,185 @@ time it's fixed, not batched up afterward.**
 
 ## Index
 
-1. [Gemini: unbounded thinking budget crowds out the JSON answer in `parse()`](#1-gemini-unbounded-thinking-budget-crowds-out-the-json-answer-in-parse)
-2. [Gemini: missing `thought_signature` breaks every multi-turn tool call](#2-gemini-missing-thought_signature-breaks-every-multi-turn-tool-call)
-3. [Anthropic: `effort` param unsupported by the Haiku 4.5 fallback model](#3-anthropic-effort-param-unsupported-by-the-haiku-45-fallback-model)
-4. [Dashboard container reports unhealthy despite working correctly](#4-dashboard-container-reports-unhealthy-despite-working-correctly)
-5. [DeepSeek could accidentally serve as fallback for unrelated tasks](#5-deepseek-could-accidentally-serve-as-fallback-for-unrelated-tasks)
-6. [DeepSeek sent Gemini-shaped tool schemas, not Anthropic-shaped](#6-deepseek-sent-gemini-shaped-tool-schemas-not-anthropic-shaped)
-7. [Gemini and DeepSeek spend silently mispriced](#7-gemini-and-deepseek-spend-silently-mispriced)
-8. [Real code generation was mocked in production](#8-real-code-generation-was-mocked-in-production)
+1. [Vercel deployments never actually built the Python backend](#1-vercel-deployments-never-actually-built-the-python-backend)
+2. [A "defer" reply to heal-exhaustion silently became patch guidance instead](#2-a-defer-reply-to-heal-exhaustion-silently-became-patch-guidance-instead)
+3. [Discovery's raw sources: HN contributed nothing, GitHub surfaced the wrong things](#3-discoverys-raw-sources-hn-contributed-nothing-github-surfaced-the-wrong-things)
+4. [Gemini: unbounded thinking budget crowds out the JSON answer in `parse()`](#4-gemini-unbounded-thinking-budget-crowds-out-the-json-answer-in-parse)
+5. [Gemini: missing `thought_signature` breaks every multi-turn tool call](#5-gemini-missing-thought_signature-breaks-every-multi-turn-tool-call)
+6. [Anthropic: `effort` param unsupported by the Haiku 4.5 fallback model](#6-anthropic-effort-param-unsupported-by-the-haiku-45-fallback-model)
+7. [Dashboard container reports unhealthy despite working correctly](#7-dashboard-container-reports-unhealthy-despite-working-correctly)
+8. [DeepSeek could accidentally serve as fallback for unrelated tasks](#8-deepseek-could-accidentally-serve-as-fallback-for-unrelated-tasks)
+9. [DeepSeek sent Gemini-shaped tool schemas, not Anthropic-shaped](#9-deepseek-sent-gemini-shaped-tool-schemas-not-anthropic-shaped)
+10. [Gemini and DeepSeek spend silently mispriced](#10-gemini-and-deepseek-spend-silently-mispriced)
+11. [Real code generation was mocked in production](#11-real-code-generation-was-mocked-in-production)
 
 ---
 
-## 1. Gemini: unbounded thinking budget crowds out the JSON answer in `parse()`
+## 1. Vercel deployments never actually built the Python backend
+
+**Found**: 2026-08-20, live QA of the first product this factory ever
+deployed to production — Jesse noticed login didn't work and there was no
+Google/OAuth option at all.
+
+**Severity**: Catastrophic in scope, only just discovered. Every product
+this factory has ever built would have had a completely non-functional
+backend once deployed — auth, payments, everything server-side. This was
+the first product to ever reach a real live deployment, so the bug was
+dormant and undetected until now.
+
+**Root cause**: `deploy.py::deploy()` sent `projectSettings: {"framework":
+None}` unconditionally on every deployment — explicitly telling Vercel not
+to attempt any framework detection at all. Confirmed live via the
+Deployments API: the first real deployment showed `"functions": null,
+"builds": []` — no Python serverless function was ever built, so every
+`/api/*` call the frontend made 404'd against static hosting. The generated
+code itself (`app/main.py` exporting a FastAPI `app` instance, static
+assets under `public/**`) already matched Vercel's documented zero-config
+FastAPI conventions exactly — the deploy code just never told Vercel to
+look.
+
+**Affected**: `src/factory/engines/development/deploy.py` (`deploy`, new
+`_has_fastapi_entrypoint`).
+
+**Fix**: Added `_has_fastapi_entrypoint(files)`, checking the real file
+list being uploaded against Vercel's documented entrypoint conventions
+(`app.py`/`index.py`/`server.py`/`main.py`/`wsgi.py`/`asgi.py` at the
+project root, or one level under `src/`/`app/`/`api/`). `deploy()` now
+declares `framework: "fastapi"` only when a real entrypoint is present,
+leaving `framework: None` for pure-static validation landing pages (which
+have no backend by design — see `LANDING_PAGE_SYSTEM`'s own "no backend
+business logic" constraint). Also added `skipAutoDetectionConfirmation=1`
+to the deployment request, so a rare mismatch between our declared
+framework and Vercel's own detection can't 400 an unattended pipeline
+waiting on interactive confirmation.
+
+**Verification**: 8 new unit tests in `test_deploy_env.py` covering
+detection at every documented location, the pure-static negative case, and
+that `deploy()` sends the correct `framework` value in each shape. Full
+suite green (1244 tests) on a genuine scratch Postgres before deploying.
+Live, definitive proof: redeployed the one real product affected and
+confirmed via the Vercel Deployments API that a real lambda now exists
+(`lambdaRuntimeStats: {"python":1}`, a `lambdas` entry with `readyState:
+"READY"`) — where the pre-fix deployment showed `functions: null, builds:
+[]` for the identical workspace.
+
+**Known residual gap, not fixed**: the deployed URL (every route on it,
+static or API) redirects through Vercel's own SSO login wall
+(`vercel.com/sso-api`) for any visitor not logged into the Vercel account
+that owns the project — confirmed live via `curl -I`. This is a separate,
+Vercel account-level Deployment Protection setting, untouched by this fix.
+The product's backend now genuinely works; it still isn't reachable by a
+real, anonymous visitor yet.
+
+**Status**: Fixed, deployed, commit pending.
+
+---
+
+## 2. A "defer" reply to heal-exhaustion silently became patch guidance instead
+
+**Found**: 2026-08-20, Jesse replied to a real heal-exhaustion escalation
+asking to defer a known security/performance issue and ship the MVP anyway
+to test market traction — the system queued another automated patch
+attempt using his own sentence as literal repair instructions instead.
+
+**Severity**: Real, and defeats the one thing a heal-exhaustion escalation
+exists for — letting a human make the final call. The escalation's own
+`reply_hint` only ever documented two outcomes ("Reply with guidance... or
+REJECT to retire this product"); there was no way to express "leave it,
+ship it, I accept the risk."
+
+**Root cause**: `hitl/interrupts.py::_act_on_product_reply` had exactly two
+branches: `_REJECT_WORD` (retire the product) or, for any other non-empty
+reply, treat it as guidance and queue another patch attempt. A deferral
+reply doesn't contain "reject," so it fell straight into the guidance
+path — a real business decision got fed to the coding agent as if it were
+a bug report.
+
+**Affected**: `src/factory/hitl/interrupts.py` (`_act_on_product_reply`,
+new `_DEFER_WORD`), `src/factory/engines/development/graph.py` (new
+`deploy_accepting_risk`), `src/factory/engines/development/deploy.py`
+(`deploy_requires_approval`/`deploy` now accept `council: CouncilResult |
+None` plus `override_reason`).
+
+**Fix**: Added a genuine third path. `DEFER` in a reply now bypasses Bug
+Council's approval gate for that one product, on that one human's explicit
+say-so (`council=None`, `override_reason=<their reply>` — never a
+fabricated approval, so `council.approved` stays a truthful historical
+record everywhere else it's read), deploys the current workspace exactly
+as it stands, and records the accepted risk as a durable `PREFERENCE`
+memory note. Updated the escalation's own `reply_hint` to actually document
+the option going forward.
+
+**Verification**: New `tests/integration/test_hitl_defer_reply.py` (4
+tests) plus 4 new `deploy_requires_approval`/override tests in
+`test_bug_council.py`. Full suite green (1231 tests) on scratch Postgres.
+Applied live to the one real product affected: it deployed successfully
+with the accepted risk noted, `heal_attempts` reset to 0, and — the whole
+bug this closes — no patch task queued.
+
+**Status**: Fixed, deployed, commit pending.
+
+---
+
+## 3. Discovery's raw sources: HN contributed nothing, GitHub surfaced the wrong things
+
+**Found**: 2026-08-20, digging into why Discovery's generator kept producing
+zero candidates even after bug #4's crash fix was live and cycles were
+running clean — the crash wasn't the whole story.
+
+**Severity**: Real, structural — not a crash, a silent quality problem.
+Discovery had effectively been mining startup ideas out of Steam/Proton
+compatibility bug trackers, with its one source that might have surfaced
+founder-relevant discussion contributing nothing at all.
+
+**Root cause, two independent bugs found together**:
+(a) `HackerNewsSource.fetch()` set `Signal.engagement` from the Algolia
+hit's `points` field — but `points` is a story-level field, `null` on
+every `tags=comment` hit (confirmed live: 100% of a real fetch). Every HN
+signal scored `engagement=0`, and `cluster_signals()`'s singleton-keep floor
+(`engagement >= 25`) made an HN singleton's survival structurally
+impossible no matter how resonant the comment. 36 real signals fetched per
+cycle, 0 ever reached a kept cluster.
+(b) `GitHubIssuesSource`'s search queries had a floor on `comments` but no
+ceiling, sorted by `comments` descending — which always surfaces the same
+handful of all-time-record megathreads (Cyberpunk/GTA V Proton
+compatibility, PyTorch op-coverage tracking) that permanently outrank
+anything a real, smaller-scale business pain point could ever accumulate.
+Confirmed live: an entire real cycle's top-12 clusters were 100%
+consumer/gaming/OSS threads, zero resembling a B2B pain point.
+
+**Affected**: `src/factory/engines/discovery/sources/hackernews.py`
+(`fetch`), `src/factory/engines/discovery/sources/github.py` (`_QUERIES`),
+`src/factory/engines/discovery/cluster.py` (`_SINGLETON_ENGAGEMENT_FLOOR`,
+new).
+
+**Fix**: HN now uses reply count (`len(hit["children"])`) as engagement —
+the one real per-comment signal this endpoint returns. GitHub's queries
+gained an upper bound (`comments:11..60` / `comments:6..60`), confirmed
+live to replace an entire cycle's Cyberpunk/PyTorch results with issues
+like a CI build-timeout limit and a billing-panel integration request.
+`cluster_signals()`'s singleton floor was lowered from a flat, uncalibrated
+25 to 10 — chosen from a real 120-comment HN sample, where only the two
+loudest replies (15, 11) cleared it, keeping the floor selective rather
+than a rubber stamp for whatever scale nothing could reach. Also added
+`discovery_verbose_logging` (off by default, temporary diagnostic), which
+logs the real top-12 clusters and every scored idea's niche/score/rejection
+reason each cycle.
+
+**Verification**: New `test_discovery_sources.py` (4 tests),
+`test_cluster_signals.py` (3 tests), `test_discovery_verbose_logging.py` (4
+tests). Full suite green (899 tests) on scratch Postgres. Live proof this
+mattered, not just correctness in isolation: the very next real cycle after
+deploy generated its first-ever surviving idea (score 0.669, cleared the
+0.55 threshold) from the exact GitHub cluster this fix was designed to
+surface ("Increase build timeout from 60 minutes") — the first surviving
+idea since production went live.
+
+**Status**: Fixed, deployed, commit pending.
+
+---
+
+## 4. Gemini: unbounded thinking budget crowds out the JSON answer in `parse()`
 
 **Found**: 2026-08-19, routine periodic check-in — `llm_calls` showed a
 `schema_violation` on an `analysis`/`discovery` call from a few hours
@@ -83,12 +250,12 @@ repro showing `thoughts_token_count=860`), then re-ran the exact previously
 
 ---
 
-## 2. Gemini: missing `thought_signature` breaks every multi-turn tool call
+## 5. Gemini: missing `thought_signature` breaks every multi-turn tool call
 
 **Found**: 2026-08-18, prompted by Jesse noticing the dashboard's provider-health
 panel showing `gemini: down`.
 
-**Severity**: Real, recurring, previously invisible (masked by bug #3's fix,
+**Severity**: Real, recurring, previously invisible (masked by bug #6's fix,
 which made every occurrence fail over successfully instead of crashing).
 
 **Root cause**: Gemini's newer models attach an opaque `thought_signature`
@@ -127,7 +294,7 @@ end-to-end, including the model continuing to a genuine second tool call.
 
 ---
 
-## 3. Anthropic: `effort` param unsupported by the Haiku 4.5 fallback model
+## 6. Anthropic: `effort` param unsupported by the Haiku 4.5 fallback model
 
 **Found**: 2026-08-18, routine "anything weird?" check-in — found by querying
 `llm_calls` for the day's `rejected` outcomes.
@@ -162,9 +329,9 @@ which is exactly how this shipped unnoticed). Verified live: a real
 
 ---
 
-## 4. Dashboard container reports unhealthy despite working correctly
+## 7. Dashboard container reports unhealthy despite working correctly
 
-**Found**: 2026-08-18, same check-in as #3 — `docker ps` showed
+**Found**: 2026-08-18, same check-in as #6 — `docker ps` showed
 `dashboard: unhealthy`.
 
 **Severity**: Cosmetic only. Real traffic through Caddy worked all day
@@ -190,9 +357,9 @@ probe `http://127.0.0.1:3000/login` instead of `http://localhost:3000/login`.
 
 ---
 
-## 5. DeepSeek could accidentally serve as fallback for unrelated tasks
+## 8. DeepSeek could accidentally serve as fallback for unrelated tasks
 
-**Found**: 2026-08-18, while investigating bug #7 (checking `llm_calls` for
+**Found**: 2026-08-18, while investigating bug #10 (checking `llm_calls` for
 pricing accuracy turned up an unrelated anomalous row).
 
 **Severity**: Real, live risk — not just theoretical. One real production
@@ -201,7 +368,7 @@ call already hit it.
 **Root cause**: `ProviderRegistry.alternatives()` returns every other
 *registered* provider on failover, with no concept of task-type fitness.
 Once DeepSeek became a third registered provider (for `CODE_REPAIR`, see
-bug #6's context), any Gemini-routed, failover-eligible task type
+bug #9's context), any Gemini-routed, failover-eligible task type
 (`ANALYSIS`, `ORCHESTRATION`, `COMPLIANCE`, `DISCOVERY`, `MARKETING_COPY`)
 could fail over to DeepSeek and send it a model name it had never heard of.
 Confirmed live: `provider=deepseek, model=gemini-pro-latest,
@@ -226,7 +393,7 @@ Postgres before deploying.
 
 ---
 
-## 6. DeepSeek sent Gemini-shaped tool schemas, not Anthropic-shaped
+## 9. DeepSeek sent Gemini-shaped tool schemas, not Anthropic-shaped
 
 **Found**: 2026-08-18, the very first real production `CODE_REPAIR` call
 after routing DeepSeek in — caught before it affected a real repair
@@ -256,7 +423,7 @@ steps, correct diagnosis, correct fix, independently verified passing.
 
 ---
 
-## 7. Gemini and DeepSeek spend silently mispriced
+## 10. Gemini and DeepSeek spend silently mispriced
 
 **Found**: 2026-08-18, Jesse asked directly: "is LLM spend accurate?"
 
@@ -296,7 +463,7 @@ affected total was a few cents.
 
 ---
 
-## 8. Real code generation was mocked in production
+## 11. Real code generation was mocked in production
 
 **Found**: 2026-08-18, go-live day, a few hours after `FACTORY_DRY_RUN` was
 flipped off — not caught as part of the go-live checklist itself.
