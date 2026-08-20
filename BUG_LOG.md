@@ -82,7 +82,7 @@ Vercel account-level Deployment Protection setting, untouched by this fix.
 The product's backend now genuinely works; it still isn't reachable by a
 real, anonymous visitor yet.
 
-**Status**: Fixed, deployed, commit pending.
+**Status**: Fixed, deployed, commit `3453459`.
 
 ---
 
@@ -128,7 +128,7 @@ Applied live to the one real product affected: it deployed successfully
 with the accepted risk noted, `heal_attempts` reset to 0, and — the whole
 bug this closes — no patch task queued.
 
-**Status**: Fixed, deployed, commit pending.
+**Status**: Fixed, deployed, commit `3453459`.
 
 ---
 
@@ -186,7 +186,7 @@ deploy generated its first-ever surviving idea (score 0.669, cleared the
 surface ("Increase build timeout from 60 minutes") — the first surviving
 idea since production went live.
 
-**Status**: Fixed, deployed, commit pending.
+**Status**: Fixed, deployed, commit `b0d8140`.
 
 ---
 
