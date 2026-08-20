@@ -300,6 +300,15 @@ class Settings(BaseSettings):
     # the fixed HN/GitHub/Reddit/Product Hunt sources. Off switch for operational
     # control -- e.g. if it turns out too costly or too noisy -- without a code change.
     discovery_scout_enabled: bool = True
+    # Temporary diagnostic aid, added while investigating why Discovery produced
+    # zero surviving ideas in its first days live: logs the actual top-12 clusters
+    # handed to the generator and every scored idea's niche/score/rejection_reason
+    # each cycle (see `discovery/graph.py::run`), so the pipeline's real behavior
+    # can be read straight from `docker compose logs` instead of re-running live
+    # reproduction scripts by hand. Off by default -- flip on in `.env` only while
+    # actively watching a stretch of cycles; meant to come back out once Discovery's
+    # behavior is understood, not to become a permanent log line.
+    discovery_verbose_logging: bool = False
     supervisor_tick_seconds: int = Field(default=15, ge=1)
     # The model is consulted on this cadence even when the deterministic route is
     # unambiguous — 40 ticks (10 min) is 6x faster than the hourly finance reconcile

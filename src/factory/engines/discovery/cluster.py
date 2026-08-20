@@ -46,6 +46,22 @@ _STOPWORDS: frozenset[str] = frozenset(
 
 _MIN_TOKENS = 4
 
+# A singleton cluster survives only with real, multi-party engagement -- "one loud
+# complaint with forty replies" per this module's own original framing below. In
+# practice this was never calibrated against either real source's actual scale:
+# GitHub's `engagement` (raw comment count) was, until recently, unbounded and
+# routinely reached into the thousands on perennial megathreads, so it cleared any
+# floor trivially; HN's was a flat 0 (a since-fixed bug -- `points` is null on every
+# comment-type Algolia hit, see `sources/hackernews.py`), so no HN singleton could
+# ever clear *any* positive floor. With both sources now reporting real, comparable
+# numbers (GitHub bounded to a 6-60 comment range, HN using real reply counts), 25
+# is still too high for HN's scale -- confirmed live, a 120-comment real sample
+# topped out at 15 replies, with only ~12% reaching even 3. 10 is chosen from that
+# same sample: rare enough to preserve real selectivity (only the two loudest of
+# 120 real comments cleared it) while remaining reachable, not a floor calibrated
+# for a scale nothing produced.
+_SINGLETON_ENGAGEMENT_FLOOR = 10
+
 
 @dataclass(slots=True)
 class Cluster:
@@ -87,8 +103,9 @@ def cluster_signals(
 ) -> list[Cluster]:
     """Greedy single-pass clustering, ordered by evidence weight.
 
-    Singleton clusters are kept only when highly engaged: one loud complaint with
-    forty replies is a signal, one quiet complaint is noise.
+    Singleton clusters are kept only when highly engaged (see
+    `_SINGLETON_ENGAGEMENT_FLOOR`): one loud complaint is a signal, one quiet
+    complaint is noise.
     """
     tokenized = [(signal, tokenize(signal.text)) for signal in signals]
     tokenized = [(s, t) for s, t in tokenized if len(t) >= _MIN_TOKENS]
@@ -108,6 +125,10 @@ def cluster_signals(
             best.signals.append(signal)
             best.keywords = best.keywords & tokens or best.keywords
 
-    kept = [c for c in clusters if c.size >= min_cluster_size or c.engagement >= 25]
+    kept = [
+        c
+        for c in clusters
+        if c.size >= min_cluster_size or c.engagement >= _SINGLETON_ENGAGEMENT_FLOOR
+    ]
     kept.sort(key=lambda c: (c.size, c.engagement), reverse=True)
     return kept

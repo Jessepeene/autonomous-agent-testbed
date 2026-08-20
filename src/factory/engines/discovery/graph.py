@@ -37,6 +37,39 @@ _DISCRIMINATOR_KEY = "factory.engines.discovery.score:DISCRIMINATOR_SYSTEM"
 _WEIGHTS_KEY = "factory.engines.discovery.score:SCORING_WEIGHTS"
 
 
+def _cluster_snapshot(clusters: list[Cluster]) -> list[dict[str, object]]:
+    """Diagnostic detail for `discovery_verbose_logging` -- exactly the top-12
+    clusters `generate_ideas` actually sees, not the full list `cluster_signals`
+    returns."""
+    return [
+        {
+            "rank": rank,
+            "size": cluster.size,
+            "engagement": cluster.engagement,
+            "sources": sorted({signal.source for signal in cluster.signals}),
+            "title": cluster.signals[0].title[:80],
+        }
+        for rank, cluster in enumerate(clusters[:12], start=1)
+    ]
+
+
+def _idea_snapshot(
+    ideas: list[ScoredIdea], kept: list[ScoredIdea], weights: dict[str, float]
+) -> list[dict[str, object]]:
+    """Diagnostic detail for `discovery_verbose_logging` -- every idea the
+    discriminator actually scored, kept or not, and why."""
+    kept_ids = {id(idea) for idea in kept}
+    return [
+        {
+            "niche": idea.target_niche,
+            "score": idea.weighted_score(weights),
+            "kept": id(idea) in kept_ids,
+            "rejection_reason": idea.rejection_reason,
+        }
+        for idea in ideas
+    ]
+
+
 def _evidence_count_for(idea: ScoredIdea, clusters: list[Cluster]) -> int:
     """How many raw signals corroborate this idea's cluster.
 
@@ -99,6 +132,8 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
         scouted=len(scouted),
         clusters=len(clusters),
     )
+    if ctx.settings.discovery_verbose_logging:
+        log.info("discovery.cluster_snapshot", clusters=_cluster_snapshot(clusters))
     if not clusters:
         return f"discovery: {len(signals)} signals produced no clusters"
 
@@ -142,6 +177,10 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
         memory_block=memory_block,
     )
     kept = score.survivors(scored, weights)
+    if ctx.settings.discovery_verbose_logging:
+        log.info(
+            "discovery.idea_snapshot", ideas=_idea_snapshot(scored.ideas, kept, weights)
+        )
 
     # Every discriminated idea is an outcome for all three keys that shaped it — a
     # trial on any one of them (generation, discrimination, or the weights) needs its

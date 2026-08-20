@@ -54,13 +54,21 @@ class HackerNewsSource:
                     if len(text) < 80:
                         continue
                     object_id = hit.get("objectID", "")
+                    # `points` is a story-level field in Algolia's index and is always
+                    # null on a `tags=comment` hit -- confirmed live against the real
+                    # API, 100% of real fetches -- so every comment silently scored
+                    # engagement=0 and could never survive `cluster_signals()`'s
+                    # singleton-keep threshold, no matter how resonant. Direct reply
+                    # count is the one real per-comment engagement signal this
+                    # endpoint actually returns.
+                    reply_count = len(hit.get("children") or [])
                     signals.append(
                         Signal(
                             title=hit.get("story_title") or query,
                             body=text[:4000],
                             url=f"https://news.ycombinator.com/item?id={object_id}",
                             source=self.name,
-                            engagement=int(hit.get("points") or 0),
+                            engagement=reply_count,
                         )
                     )
         log.info("discovery.fetched", source=self.name, count=len(signals))

@@ -18,9 +18,17 @@ _ENDPOINT = "https://api.github.com/search/issues"
 _LIMITER = RateLimiter(2.5)
 
 _QUERIES: tuple[str, ...] = (
-    'is:issue is:open label:"feature request" comments:>10',
-    'is:issue is:open "would be great if" comments:>5',
-    'is:issue is:open "any workaround" comments:>5',
+    # Comments has an upper bound as well as a floor -- `sort=comments` with an
+    # unbounded top end always drags in the same handful of all-time-record
+    # megathreads (perennial gaming/compatibility trackers, ML framework
+    # op-coverage issues), which permanently outrank anything a genuine,
+    # smaller-scale business pain point could ever accumulate. Confirmed live:
+    # capping at 60 replaced an entire cycle's worth of Cyberpunk/GTA V/PyTorch
+    # results with issues like a CI build-timeout limit and a billing-panel
+    # integration request.
+    'is:issue is:open label:"feature request" comments:11..60',
+    'is:issue is:open "would be great if" comments:6..60',
+    'is:issue is:open "any workaround" comments:6..60',
 )
 
 
