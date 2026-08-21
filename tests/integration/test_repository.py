@@ -237,6 +237,37 @@ async def test_pending_dev_retries_counts_build_mvp_and_patch_for_active_product
     assert await repository.count_pending_dev_retries(session) == 2
 
 
+async def test_used_idea_source_urls_returns_every_stored_url(session: AsyncSession) -> None:
+    from factory.state.schemas import ScoredIdea
+
+    def _idea(suffix: str, url: str) -> ScoredIdea:
+        base = _scored_idea()
+        return base.model_copy(
+            update={"target_niche": f"{base.target_niche} ({suffix})", "source_url": url}
+        )
+
+    assert await repository.upsert_idea(session, _idea("a", "https://a.test/1")) is not None
+    assert await repository.upsert_idea(session, _idea("b", "https://a.test/2")) is not None
+
+    assert await repository.used_idea_source_urls(session) == {
+        "https://a.test/1",
+        "https://a.test/2",
+    }
+
+
+async def test_used_idea_source_urls_strips_trailing_slashes(session: AsyncSession) -> None:
+    """Matches `discovery/graph.py::_exclude_already_mined`'s own normalisation --
+    a raw signal URL never has pydantic's `HttpUrl` trailing-slash addition."""
+    idea = _scored_idea().model_copy(update={"source_url": "https://a.test/1/"})
+    assert await repository.upsert_idea(session, idea) is not None
+
+    assert await repository.used_idea_source_urls(session) == {"https://a.test/1"}
+
+
+async def test_used_idea_source_urls_is_empty_with_no_ideas(session: AsyncSession) -> None:
+    assert await repository.used_idea_source_urls(session) == set()
+
+
 async def test_upsert_idea_persists_the_given_evidence_count(session: AsyncSession) -> None:
     idea_id = await repository.upsert_idea(session, _scored_idea(), evidence_count=7)
     assert idea_id is not None

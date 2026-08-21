@@ -470,6 +470,27 @@ async def tasks_in_flight_by_engine(session: AsyncSession) -> dict[str, int]:
 # ------------------------------------------------------------------------- ideas
 
 
+async def used_idea_source_urls(session: AsyncSession) -> set[str]:
+    """Every `source_url` any idea has ever been generated from, trailing slash
+    stripped -- matches `discovery/graph.py::_evidence_count_for`'s own
+    normalisation, the only other place this codebase already compares a
+    signal's URL against a stored idea's.
+
+    `upsert_idea`'s fingerprint dedup only catches a byte-for-byte repeat of
+    the *generated prose*, which near-never recurs -- an LLM naturally
+    rephrases the same evidence into different wording on every call. Real
+    bug, found live: the same real GitHub issue won the top-ranked cluster
+    slot 5 cycles running (nothing about its comment count changes hour to
+    hour), and the generator produced 5 differently-worded ideas from the
+    identical evidence, all 5 passing the fingerprint check and becoming 5
+    separate products. `source_url` is the one fact the generator is
+    required to copy verbatim rather than paraphrase, making it the actual
+    reliable signal for "have we already mined this."
+    """
+    rows = (await session.execute(select(Idea.source_url))).scalars().all()
+    return {url.rstrip("/") for url in rows}
+
+
 async def upsert_idea(
     session: AsyncSession,
     idea: ScoredIdea,

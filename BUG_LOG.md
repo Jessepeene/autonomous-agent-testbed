@@ -12,24 +12,144 @@ time it's fixed, not batched up afterward.**
 
 ## Index
 
-1. [Four products in a row failed billing the same way: the codegen prompt never named the Stripe key's env var](#1-four-products-in-a-row-failed-billing-the-same-way-the-codegen-prompt-never-named-the-stripe-keys-env-var)
-2. [Generated apps crashed on every route once deployed: an unconditional static-file mount](#2-generated-apps-crashed-on-every-route-once-deployed-an-unconditional-static-file-mount)
-3. [The one real live product was invisible behind Vercel's own SSO wall](#3-the-one-real-live-product-was-invisible-behind-vercels-own-sso-wall)
-4. [Vercel deployments never actually built the Python backend](#4-vercel-deployments-never-actually-built-the-python-backend)
-5. [A "defer" reply to heal-exhaustion silently became patch guidance instead](#5-a-defer-reply-to-heal-exhaustion-silently-became-patch-guidance-instead)
-6. [Discovery's raw sources: HN contributed nothing, GitHub surfaced the wrong things](#6-discoverys-raw-sources-hn-contributed-nothing-github-surfaced-the-wrong-things)
-7. [Gemini: unbounded thinking budget crowds out the JSON answer in `parse()`](#7-gemini-unbounded-thinking-budget-crowds-out-the-json-answer-in-parse)
-8. [Gemini: missing `thought_signature` breaks every multi-turn tool call](#8-gemini-missing-thought_signature-breaks-every-multi-turn-tool-call)
-9. [Anthropic: `effort` param unsupported by the Haiku 4.5 fallback model](#9-anthropic-effort-param-unsupported-by-the-haiku-45-fallback-model)
-10. [Dashboard container reports unhealthy despite working correctly](#10-dashboard-container-reports-unhealthy-despite-working-correctly)
-11. [DeepSeek could accidentally serve as fallback for unrelated tasks](#11-deepseek-could-accidentally-serve-as-fallback-for-unrelated-tasks)
-12. [DeepSeek sent Gemini-shaped tool schemas, not Anthropic-shaped](#12-deepseek-sent-gemini-shaped-tool-schemas-not-anthropic-shaped)
-13. [Gemini and DeepSeek spend silently mispriced](#13-gemini-and-deepseek-spend-silently-mispriced)
-14. [Real code generation was mocked in production](#14-real-code-generation-was-mocked-in-production)
+1. [Discovery generated the same idea 5 times from the same source, undetected](#1-discovery-generated-the-same-idea-5-times-from-the-same-source-undetected)
+2. [Bug-Council-rejected products always burned a full blind regeneration, even for one-line fixes](#2-bug-council-rejected-products-always-burned-a-full-blind-regeneration-even-for-one-line-fixes)
+3. [Four products in a row failed billing the same way: the codegen prompt never named the Stripe key's env var](#3-four-products-in-a-row-failed-billing-the-same-way-the-codegen-prompt-never-named-the-stripe-keys-env-var)
+4. [Generated apps crashed on every route once deployed: an unconditional static-file mount](#4-generated-apps-crashed-on-every-route-once-deployed-an-unconditional-static-file-mount)
+5. [The one real live product was invisible behind Vercel's own SSO wall](#5-the-one-real-live-product-was-invisible-behind-vercels-own-sso-wall)
+6. [Vercel deployments never actually built the Python backend](#6-vercel-deployments-never-actually-built-the-python-backend)
+7. [A "defer" reply to heal-exhaustion silently became patch guidance instead](#7-a-defer-reply-to-heal-exhaustion-silently-became-patch-guidance-instead)
+8. [Discovery's raw sources: HN contributed nothing, GitHub surfaced the wrong things](#8-discoverys-raw-sources-hn-contributed-nothing-github-surfaced-the-wrong-things)
+9. [Gemini: unbounded thinking budget crowds out the JSON answer in `parse()`](#9-gemini-unbounded-thinking-budget-crowds-out-the-json-answer-in-parse)
+10. [Gemini: missing `thought_signature` breaks every multi-turn tool call](#10-gemini-missing-thought_signature-breaks-every-multi-turn-tool-call)
+11. [Anthropic: `effort` param unsupported by the Haiku 4.5 fallback model](#11-anthropic-effort-param-unsupported-by-the-haiku-45-fallback-model)
+12. [Dashboard container reports unhealthy despite working correctly](#12-dashboard-container-reports-unhealthy-despite-working-correctly)
+13. [DeepSeek could accidentally serve as fallback for unrelated tasks](#13-deepseek-could-accidentally-serve-as-fallback-for-unrelated-tasks)
+14. [DeepSeek sent Gemini-shaped tool schemas, not Anthropic-shaped](#14-deepseek-sent-gemini-shaped-tool-schemas-not-anthropic-shaped)
+15. [Gemini and DeepSeek spend silently mispriced](#15-gemini-and-deepseek-spend-silently-mispriced)
+16. [Real code generation was mocked in production](#16-real-code-generation-was-mocked-in-production)
 
 ---
 
-## 1. Four products in a row failed billing the same way: the codegen prompt never named the Stripe key's env var
+## 1. Discovery generated the same idea 5 times from the same source, undetected
+
+**Found**: 2026-08-21, Jesse noticed it directly, looking at the pipeline
+once the dashboard finally became reachable: "basically the same idea 5
+times."
+
+**Severity**: Real waste, not a crash — 4 of the 5 products this factory
+has ever built were near-duplicates of each other, each one paying for a
+full real build (scaffold generation, Bug Council, deploy attempts) for
+what was, underneath the paraphrasing, the same opportunity already built.
+
+**Root cause**: `upsert_idea`'s dedup is a SHA256 fingerprint over the
+*generated prose* (`problem_statement` + `target_niche`). An LLM naturally
+rephrases the same input differently on every call, so this fingerprint
+almost never collides even when the underlying evidence is identical — it
+only catches a literal byte-for-byte resubmission, which near-never
+happens. Confirmed live: all 5 real ideas in the database carry the exact
+same `source_url`
+(`https://github.com/microsoft/appcenter/issues/427`) — the same GitHub
+issue won the top-ranked cluster slot 5 discovery cycles running (nothing
+about a GitHub issue's comment count changes meaningfully hour to hour),
+and the generator produced a fresh paraphrase from it each time, every one
+passing the fingerprint check and becoming a separate product.
+
+**Affected**: `src/factory/state/repository.py` (new
+`used_idea_source_urls`), `src/factory/engines/discovery/graph.py` (new
+`_exclude_already_mined`, wired into `run()`).
+
+**Fix**: `source_url` is the one fact the generator is required to copy
+verbatim rather than paraphrase ("Never invent one" — `GENERATOR_SYSTEM`),
+which makes it the one reliable "have we already mined this" signal
+available *before* ever paying for a generation call. `run()` now fetches
+every `source_url` any idea has ever used and drops any cluster containing
+a signal whose URL is already claimed, before clustering even reaches the
+generator — cheaper than the prose-fingerprint check too, since it skips
+the LLM call entirely for evidence already spent, rather than paying for a
+generation and discrimination call only to have the fingerprint (probably)
+not catch the duplicate anyway.
+
+**Verification**: New `tests/unit/test_discovery_dedup.py` (6 tests) and 3
+new repository-level tests for `used_idea_source_urls` in
+`test_repository.py`. Full suite green (1260 tests) on scratch Postgres
+before deploying. Not yet confirmed against a real live cycle producing a
+correctly-excluded duplicate (the next real cycle after deploy will
+naturally exercise this, since `appcenter#427` is still the top-ranked
+cluster).
+
+**Status**: Fixed, deployed, commit pending.
+
+---
+
+## 2. Bug-Council-rejected products always burned a full blind regeneration, even for one-line fixes
+
+**Found**: 2026-08-21, Jesse's own framing after entry #3: "in the future
+these types of easy fixes shouldn't result in human escalation... it's a
+smart system so it should easily be able to do stuff like this" — asked
+directly to look into why, structurally, not just fix the one bug.
+
+**Severity**: Not a correctness bug — a standing inefficiency that made
+entry #3 (and any future well-described Council finding) more expensive
+and more escalation-prone than it needed to be. Every one of the 4 stuck
+products burned 3 full blind regenerations before a human ever saw them,
+for a finding Council itself had already stated precisely.
+
+**Root cause**: `_should_repair_surgically` excluded every
+`council_rejection:*` category from targeted, in-place repair, forcing a
+full workspace regeneration instead — reasoning, per the original comment,
+that "the agent cannot re-run the Council, so it would be editing blind to
+the only opinion that decides the outcome." That reasoning doesn't
+actually hold up: a full regeneration is exactly as blind to Council's
+live opinion mid-attempt as a surgical edit is, since *both* paths only
+find out whether they worked via the same downstream `_verify_and_ship`
+(tests + a fresh Council pass) afterward. Meanwhile Council's own
+rejection already carries `healing.summary`/`ordered_steps` — the same
+quality of actionable guidance a human replying to an escalation would
+give, which is exactly what already makes the `guided` category reliable.
+A second, smaller gap compounded it: `attempt_repair`'s objective framing
+hard-coded "The test suite for this product is failing" for every category
+except `growth_seo` — false for a Council rejection (the suite already
+passed by the time Council runs), and false for `guided` too, risking the
+repair agent hunting for a nonexistent failure instead of acting on the
+real, precise guidance it was actually given.
+
+**Affected**: `src/factory/engines/development/graph.py`
+(`_should_repair_surgically`, `SURGICAL_CATEGORIES`'s docstring),
+`src/factory/engines/development/repair.py` (`attempt_repair`'s objective
+framing).
+
+**Fix**: `council_rejection:*` categories (checked via `.startswith()`,
+since the category string is dynamic — e.g.
+`"council_rejection:pricing,security"`) are now eligible for surgical
+repair, reusing the same safety net already proven for every other
+category: the last autonomous cycle before the heal-cycle ceiling always
+falls back to a full regeneration regardless of category, so a genuinely
+structural Council finding a targeted edit can't fix still gets one full
+rebuild attempt before escalating, same as today. `dependency_timeout`/
+`dependency_failure` (no sandbox network to retry an install) and
+`deploy_failure`/`repair_rejected` stay excluded — their exclusion reasoning
+was sound and unrelated to the one being fixed here. Added dedicated
+objective framing for `council_rejection:*` and `guided`, so neither is
+ever told the test suite is failing when it already passed.
+
+**Verification**: New tests in `test_surgical_repair.py`:
+`test_a_council_rejection_routes_to_a_surgical_repair` (both a single
+category and the real comma-joined multi-category shape),
+`test_a_council_rejection_still_regenerates_on_the_last_autonomous_cycle`
+(safety net preserved), `test_a_council_rejection_is_never_told_the_test_suite_is_failing`,
+`test_a_guided_patch_is_never_told_the_test_suite_is_failing`, and a
+regression guard confirming `test_failure`'s original framing survives
+unchanged. Full suite green (1260 tests) on scratch Postgres before
+deploying. Not yet confirmed against a real live Council rejection (none
+has occurred since deploy) — the next one will be the first real test of
+this path end-to-end.
+
+**Status**: Fixed, deployed, commit pending.
+
+---
+
+## 3. Four products in a row failed billing the same way: the codegen prompt never named the Stripe key's env var
 
 **Found**: 2026-08-21, Jesse noticed the pattern directly — five heal-exhaustion
 escalations about "pricing," and asked why a system that clearly knows what's
@@ -93,10 +213,10 @@ for repair, not yet confirmed fixed live (blocked on spend cap).
 
 ---
 
-## 2. Generated apps crashed on every route once deployed: an unconditional static-file mount
+## 4. Generated apps crashed on every route once deployed: an unconditional static-file mount
 
 **Found**: 2026-08-20, live end-to-end QA of the first product this factory
-ever deployed with a working backend (bug #4's fix made the backend
+ever deployed with a working backend (bug #6's fix made the backend
 actually run — this is what it hit next).
 
 **Severity**: Total, for every product this factory has ever generated.
@@ -141,9 +261,9 @@ green (1244 tests) on scratch Postgres before deploying the prompt change.
 
 ---
 
-## 3. The one real live product was invisible behind Vercel's own SSO wall
+## 5. The one real live product was invisible behind Vercel's own SSO wall
 
-**Found**: 2026-08-20, immediately after bug #4's fix — the deployed
+**Found**: 2026-08-20, immediately after bug #6's fix — the deployed
 product's URL redirected through `vercel.com/sso-api` to a login page for
 any visitor, confirmed live via `curl -I`.
 
@@ -181,7 +301,7 @@ no commit.
 
 ---
 
-## 4. Vercel deployments never actually built the Python backend
+## 6. Vercel deployments never actually built the Python backend
 
 **Found**: 2026-08-20, live QA of the first product this factory ever
 deployed to production — Jesse noticed login didn't work and there was no
@@ -241,7 +361,7 @@ real, anonymous visitor yet.
 
 ---
 
-## 5. A "defer" reply to heal-exhaustion silently became patch guidance instead
+## 7. A "defer" reply to heal-exhaustion silently became patch guidance instead
 
 **Found**: 2026-08-20, Jesse replied to a real heal-exhaustion escalation
 asking to defer a known security/performance issue and ship the MVP anyway
@@ -287,10 +407,10 @@ bug this closes — no patch task queued.
 
 ---
 
-## 6. Discovery's raw sources: HN contributed nothing, GitHub surfaced the wrong things
+## 8. Discovery's raw sources: HN contributed nothing, GitHub surfaced the wrong things
 
 **Found**: 2026-08-20, digging into why Discovery's generator kept producing
-zero candidates even after bug #7's crash fix was live and cycles were
+zero candidates even after bug #9's crash fix was live and cycles were
 running clean — the crash wasn't the whole story.
 
 **Severity**: Real, structural — not a crash, a silent quality problem.
@@ -345,7 +465,7 @@ idea since production went live.
 
 ---
 
-## 7. Gemini: unbounded thinking budget crowds out the JSON answer in `parse()`
+## 9. Gemini: unbounded thinking budget crowds out the JSON answer in `parse()`
 
 **Found**: 2026-08-19, routine periodic check-in — `llm_calls` showed a
 `schema_violation` on an `analysis`/`discovery` call from a few hours
@@ -405,12 +525,12 @@ repro showing `thoughts_token_count=860`), then re-ran the exact previously
 
 ---
 
-## 8. Gemini: missing `thought_signature` breaks every multi-turn tool call
+## 10. Gemini: missing `thought_signature` breaks every multi-turn tool call
 
 **Found**: 2026-08-18, prompted by Jesse noticing the dashboard's provider-health
 panel showing `gemini: down`.
 
-**Severity**: Real, recurring, previously invisible (masked by bug #9's fix,
+**Severity**: Real, recurring, previously invisible (masked by bug #11's fix,
 which made every occurrence fail over successfully instead of crashing).
 
 **Root cause**: Gemini's newer models attach an opaque `thought_signature`
@@ -449,7 +569,7 @@ end-to-end, including the model continuing to a genuine second tool call.
 
 ---
 
-## 9. Anthropic: `effort` param unsupported by the Haiku 4.5 fallback model
+## 11. Anthropic: `effort` param unsupported by the Haiku 4.5 fallback model
 
 **Found**: 2026-08-18, routine "anything weird?" check-in — found by querying
 `llm_calls` for the day's `rejected` outcomes.
@@ -484,7 +604,7 @@ which is exactly how this shipped unnoticed). Verified live: a real
 
 ---
 
-## 10. Dashboard container reports unhealthy despite working correctly
+## 12. Dashboard container reports unhealthy despite working correctly
 
 **Found**: 2026-08-18, same check-in as #6 — `docker ps` showed
 `dashboard: unhealthy`.
@@ -512,9 +632,9 @@ probe `http://127.0.0.1:3000/login` instead of `http://localhost:3000/login`.
 
 ---
 
-## 11. DeepSeek could accidentally serve as fallback for unrelated tasks
+## 13. DeepSeek could accidentally serve as fallback for unrelated tasks
 
-**Found**: 2026-08-18, while investigating bug #13 (checking `llm_calls` for
+**Found**: 2026-08-18, while investigating bug #15 (checking `llm_calls` for
 pricing accuracy turned up an unrelated anomalous row).
 
 **Severity**: Real, live risk — not just theoretical. One real production
@@ -523,7 +643,7 @@ call already hit it.
 **Root cause**: `ProviderRegistry.alternatives()` returns every other
 *registered* provider on failover, with no concept of task-type fitness.
 Once DeepSeek became a third registered provider (for `CODE_REPAIR`, see
-bug #12's context), any Gemini-routed, failover-eligible task type
+bug #14's context), any Gemini-routed, failover-eligible task type
 (`ANALYSIS`, `ORCHESTRATION`, `COMPLIANCE`, `DISCOVERY`, `MARKETING_COPY`)
 could fail over to DeepSeek and send it a model name it had never heard of.
 Confirmed live: `provider=deepseek, model=gemini-pro-latest,
@@ -548,7 +668,7 @@ Postgres before deploying.
 
 ---
 
-## 12. DeepSeek sent Gemini-shaped tool schemas, not Anthropic-shaped
+## 14. DeepSeek sent Gemini-shaped tool schemas, not Anthropic-shaped
 
 **Found**: 2026-08-18, the very first real production `CODE_REPAIR` call
 after routing DeepSeek in — caught before it affected a real repair
@@ -578,7 +698,7 @@ steps, correct diagnosis, correct fix, independently verified passing.
 
 ---
 
-## 13. Gemini and DeepSeek spend silently mispriced
+## 15. Gemini and DeepSeek spend silently mispriced
 
 **Found**: 2026-08-18, Jesse asked directly: "is LLM spend accurate?"
 
@@ -618,7 +738,7 @@ affected total was a few cents.
 
 ---
 
-## 14. Real code generation was mocked in production
+## 16. Real code generation was mocked in production
 
 **Found**: 2026-08-18, go-live day, a few hours after `FACTORY_DRY_RUN` was
 flipped off — not caught as part of the go-live checklist itself.

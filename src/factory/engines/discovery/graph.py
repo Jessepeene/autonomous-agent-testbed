@@ -70,6 +70,27 @@ def _idea_snapshot(
     ]
 
 
+def _exclude_already_mined(clusters: list[Cluster], used_urls: set[str]) -> list[Cluster]:
+    """Drop any cluster containing a signal whose URL already backs a stored idea.
+
+    `upsert_idea`'s fingerprint dedup only catches a byte-for-byte repeat of the
+    *generated prose*, which near-never happens -- the model rephrases the same
+    evidence differently on every call. Real bug, found live: the same GitHub
+    issue won the top cluster slot 5 cycles running and produced 5 differently
+    -worded "new" ideas, all 5 becoming separate products. `source_url` is the
+    one fact the generator must copy verbatim rather than paraphrase (never
+    invent one), so it is the one reliable "have we already mined this" signal
+    available before ever paying for a generation call. `used_urls` is expected
+    pre-normalised (trailing slash stripped) by the caller, matching
+    `_evidence_count_for`'s own convention below.
+    """
+    return [
+        cluster
+        for cluster in clusters
+        if not any(signal.url.rstrip("/") in used_urls for signal in cluster.signals)
+    ]
+
+
 def _evidence_count_for(idea: ScoredIdea, clusters: list[Cluster]) -> int:
     """How many raw signals corroborate this idea's cluster.
 
@@ -137,6 +158,15 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
     if not clusters:
         return f"discovery: {len(signals)} signals produced no clusters"
 
+    used_urls = await repository.used_idea_source_urls(session)
+    fresh_clusters = _exclude_already_mined(clusters, used_urls)
+    stale_count = len(clusters) - len(fresh_clusters)
+    if stale_count:
+        log.info("discovery.clusters_already_mined", stale=stale_count, fresh=len(fresh_clusters))
+    clusters = fresh_clusters
+    if not clusters:
+        return f"discovery: {len(signals)} signals produced only already-mined clusters"
+
     gen_text, gen_version = await learning_prompts.get_prompt(
         session, key=_GENERATOR_KEY, default=score.GENERATOR_SYSTEM
     )
@@ -178,9 +208,7 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
     )
     kept = score.survivors(scored, weights)
     if ctx.settings.discovery_verbose_logging:
-        log.info(
-            "discovery.idea_snapshot", ideas=_idea_snapshot(scored.ideas, kept, weights)
-        )
+        log.info("discovery.idea_snapshot", ideas=_idea_snapshot(scored.ideas, kept, weights))
 
     # Every discriminated idea is an outcome for all three keys that shaped it — a
     # trial on any one of them (generation, discrimination, or the weights) needs its

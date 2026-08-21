@@ -331,11 +331,15 @@ async def attempt_repair(
 ) -> RepairOutcome:
     """Run one bounded repair agent against the workspace.
 
-    ``category == "growth_seo"`` switches both the role and the objective framing:
-    GROWTH_ANALYST's own judgement that a LIVE product would benefit from an
-    organic-discoverability pass is not a test failure, and telling SEO_OPTIMIZER
-    "the test suite is failing" when it is not would be actively misleading about
-    why it is here. Every other category keeps WORKSPACE_SURGEON's original framing.
+    ``category`` switches both the role and the objective framing wherever the
+    generic "the test suite is failing" story would be actively false: telling
+    an agent it's fixing a failing test when it is not risks it hunting for a
+    problem that does not exist, or misreading real guidance as a test
+    traceback. ``growth_seo`` was the first case (GROWTH_ANALYST's own
+    judgement call, not a failure at all); ``council_rejection:*`` and
+    ``guided`` are the same shape of gap -- by the time either fires, the test
+    suite has already passed. Every other category keeps WORKSPACE_SURGEON's
+    original test-failure framing.
 
     Raises:
         RepairBlocked: the agent never got a fair attempt (outage, budget exhausted).
@@ -348,6 +352,26 @@ async def attempt_repair(
             "A growth analysis flagged this product for an SEO/organic-"
             "discoverability improvement pass -- there is no failing test.\n\n"
             f"What the analysis found:\n{healing}\n\n"
+            f"Verify your change with exactly this command when you are done:\n"
+            f"    {test_command}"
+        )
+    elif category.startswith("council_rejection:"):
+        role = get_role(RoleName.WORKSPACE_SURGEON)
+        objective = (
+            "The test suite already passes. Bug Council reviewed this product "
+            "afterward and did not approve it -- there is no failing test to "
+            "chase; fix exactly what Council found.\n\n"
+            f"What Council found:\n{healing}\n\n"
+            f"Verify your change with exactly this command when you are done:\n"
+            f"    {test_command}"
+        )
+    elif category == "guided":
+        role = get_role(RoleName.WORKSPACE_SURGEON)
+        objective = (
+            "The test suite already passes. A human reviewed this product and "
+            "gave you specific guidance -- there is no failing test to chase; "
+            "act on exactly what they said.\n\n"
+            f"Their guidance:\n{healing}\n\n"
             f"Verify your change with exactly this command when you are done:\n"
             f"    {test_command}"
         )

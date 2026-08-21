@@ -147,6 +147,80 @@ async def test_attempt_repair_passes_workspace_surgeons_max_context_chars(
     assert captured["cost_cap_usd"] == ctx.settings.repair_agent_cost_cap_usd
 
 
+# --- objective framing: never tell the agent a false story about why it's here ---
+
+
+async def _objective_for(
+    ctx: FactoryContext,
+    workspace: str,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    category: str,
+    healing: str,
+) -> str:
+    captured: dict[str, object] = {}
+
+    async def fake_run(self: object, **kwargs: object) -> AgentResult:
+        captured.update(kwargs)
+        return AgentResult(objective=str(kwargs.get("objective")), answer="", steps=0)
+
+    monkeypatch.setattr(repair.AgentRuntime, "run", fake_run)
+    await repair.attempt_repair(
+        ctx,
+        product_id="prod-1",
+        workspace=workspace,
+        test_command="pytest -q",
+        healing=healing,
+        recalled="",
+        category=category,
+    )
+    return str(captured["objective"])
+
+
+async def test_a_council_rejection_is_never_told_the_test_suite_is_failing(
+    ctx: FactoryContext, workspace: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """By the time Bug Council runs, the test suite has already passed -- telling
+    WORKSPACE_SURGEON otherwise risks it hunting for a nonexistent failure instead of
+    acting on Council's real finding."""
+    objective = await _objective_for(
+        ctx,
+        workspace,
+        monkeypatch,
+        category="council_rejection:security",
+        healing="STRIPE_API_KEY is never read from the environment.",
+    )
+    assert "test suite for this product is failing" not in objective
+    assert "Bug Council" in objective
+    assert "STRIPE_API_KEY is never read from the environment." in objective
+
+
+async def test_a_guided_patch_is_never_told_the_test_suite_is_failing(
+    ctx: FactoryContext, workspace: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    objective = await _objective_for(
+        ctx,
+        workspace,
+        monkeypatch,
+        category="guided",
+        healing="Read STRIPE_API_KEY, not STRIPE_SECRET_KEY.",
+    )
+    assert "test suite for this product is failing" not in objective
+    assert "human" in objective.lower()
+    assert "Read STRIPE_API_KEY, not STRIPE_SECRET_KEY." in objective
+
+
+async def test_a_real_test_failure_keeps_its_original_framing(
+    ctx: FactoryContext, workspace: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard: the new category-specific branches must not swallow the
+    one case the generic framing is actually true for."""
+    objective = await _objective_for(
+        ctx, workspace, monkeypatch, category="test_failure", healing="1 failed"
+    )
+    assert "test suite for this product is failing" in objective
+
+
 # --- the guards: green suite != fixed bug ---------------------------------------
 
 
@@ -330,17 +404,37 @@ async def test_a_test_failure_routes_to_a_surgical_repair(ctx: FactoryContext) -
     assert await _routes(ctx, _FakeProduct(), "test_failure") is True
 
 
-@pytest.mark.parametrize(
-    "category",
-    ["dependency_failure", "dependency_timeout", "deploy_failure", "council_rejection:security"],
-)
+@pytest.mark.parametrize("category", ["dependency_failure", "dependency_timeout", "deploy_failure"])
 async def test_failures_a_surgical_repair_cannot_fix_regenerate_instead(
     ctx: FactoryContext, category: str
 ) -> None:
     """A sandbox with no network cannot run pip; a deploy failure is not a workspace
-    bug; and the agent cannot re-run the Bug Council, so it would edit blind to the
-    only opinion that decides a council rejection."""
+    bug -- neither is something an in-place edit could ever address."""
     assert await _routes(ctx, _FakeProduct(), category) is False
+
+
+@pytest.mark.parametrize(
+    "category", ["council_rejection:security", "council_rejection:pricing,security"]
+)
+async def test_a_council_rejection_routes_to_a_surgical_repair(
+    ctx: FactoryContext, category: str
+) -> None:
+    """Real bug, found live: 4 separate products burned a full blind regeneration on
+    every one of 3 attempts for the identical, narrowly-mechanical Council finding
+    (wrong Stripe key env var name), because council_rejection was never eligible for
+    a targeted repair -- despite Council's own healing text already saying exactly
+    what to change. Every category shape is checked: a single blocked category and
+    multiple comma-joined ones (see graph.py's `f"council_rejection:{','.join(...)}"`)."""
+    assert await _routes(ctx, _FakeProduct(), category) is True
+
+
+async def test_a_council_rejection_still_regenerates_on_the_last_autonomous_cycle(
+    ctx: FactoryContext,
+) -> None:
+    """Unlike `guided`, a council rejection is an autonomous retry -- the same
+    two-surgical-attempts-then-rebuild ceiling applies to it as to test_failure."""
+    last = _FakeProduct(heal_attempts=dev_graph.MAX_HEAL_CYCLES - 1)
+    assert await _routes(ctx, last, "council_rejection:security") is False
 
 
 async def test_a_product_with_no_recorded_test_command_regenerates(

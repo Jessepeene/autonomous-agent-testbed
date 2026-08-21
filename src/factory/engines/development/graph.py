@@ -84,18 +84,34 @@ MAX_HEAL_CYCLES = 3
 #: the surgeon is never editing blind to a check it can't re-ask. A wrong
 #: replacement simply heals again, bounded by `MAX_HEAL_CYCLES`.
 #:
+#: `council_rejection:*` (checked separately, see `_should_repair_surgically` --
+#: not a member of this set because the category string is dynamic, e.g.
+#: "council_rejection:pricing,security"): a targeted repair given Council's own
+#: `healing.summary`/`ordered_steps` as guidance -- the same information a human
+#: reading the escalation would get, and the exact reasoning that already made
+#: `guided` reliable. The original exclusion here reasoned this would be
+#: "editing blind to the only opinion that decides the outcome," but every
+#: surgical repair already goes through the *same* full `_verify_and_ship`
+#: (tests + a fresh Council review) afterward regardless of category -- a full
+#: regeneration is exactly as blind to Council's live opinion mid-attempt as a
+#: surgical one is. Found live: 4 separate products stuck on the identical,
+#: narrowly-mechanical Council finding (wrong Stripe key env var name),
+#: burning a full blind regeneration on each of 3 attempts before escalating,
+#: when Council's own finding text already said precisely what to change.
+#:
 #: Everything else is deliberately absent. `dependency_timeout`/`dependency_failure`
 #: cannot be fixed by an agent whose sandbox has no network -- an install that
 #: failed for a *real* package needs to actually retry the install, not guess at an
-#: edit; `deploy_failure` is not a workspace bug at all; `council_rejection:*` is
-#: plausible future work but the agent cannot re-run the Council, so it would be
-#: editing blind to the only opinion that decides the outcome.
+#: edit; `deploy_failure` is not a workspace bug at all; `repair_rejected` (a prior
+#: surgical attempt's own output already rejected as unusable) goes straight to a
+#: full rebuild rather than surgically retrying against a workspace already shown
+#: to fail the same way for the same reason.
 #: `contract_incomplete`: a codegen contract fact the system prompt asked for but
-#: the generated code doesn't actually satisfy (PRODUCT_PRICE_CENTS never read,
-#: client_reference_id never set, the beacon/interest URL never wired, or the
-#: privacy page missing/unlinked) -- see contract.py. Same shape as
-#: `seo_incomplete`: a small, well-defined addition, and the check is free and
-#: deterministic to re-run after the edit.
+#: the generated code doesn't actually satisfy (STRIPE_API_KEY or
+#: PRODUCT_PRICE_CENTS never read, client_reference_id never set, the
+#: beacon/interest URL never wired, or the privacy page missing/unlinked) -- see
+#: contract.py. Same shape as `seo_incomplete`: a small, well-defined addition,
+#: and the check is free and deterministic to re-run after the edit.
 SURGICAL_CATEGORIES = frozenset(
     {
         "test_failure",
@@ -656,12 +672,12 @@ async def _should_repair_surgically(
     than a clean rebuild -- the fallback is always today's full regeneration, which
     remains the only operation that can recover an arbitrarily damaged workspace.
     """
-    if category not in SURGICAL_CATEGORIES:
+    if category not in SURGICAL_CATEGORIES and not category.startswith("council_rejection:"):
         # A dependency failure cannot be fixed by an agent whose sandbox has no
         # network and therefore cannot run pip at all; a deploy failure is not a
-        # workspace bug; a council rejection is plausible future work but the agent
-        # cannot re-run the Council, so it would be editing blind to the only opinion
-        # that matters.
+        # workspace bug. `council_rejection:*` is checked separately -- see
+        # SURGICAL_CATEGORIES' own docstring for why it's eligible despite not
+        # being a literal member (the category string is dynamic).
         return False
     if not product.test_command:
         # Built before test_command was recorded. Guessing a default would have the
