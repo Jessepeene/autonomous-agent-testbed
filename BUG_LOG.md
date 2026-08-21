@@ -78,7 +78,7 @@ correctly-excluded duplicate (the next real cycle after deploy will
 naturally exercise this, since `appcenter#427` is still the top-ranked
 cluster).
 
-**Status**: Fixed, deployed, commit pending.
+**Status**: Fixed, deployed, commit `bc893b3`.
 
 ---
 
@@ -145,7 +145,7 @@ deploying. Not yet confirmed against a real live Council rejection (none
 has occurred since deploy) — the next one will be the first real test of
 this path end-to-end.
 
-**Status**: Fixed, deployed, commit pending.
+**Status**: Fixed, deployed, commit `bc893b3`.
 
 ---
 
