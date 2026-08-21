@@ -88,7 +88,7 @@ fixtures across `test_codegen_contract.py`/`test_seo_gate.py` updated to
 read `STRIPE_API_KEY` so "fully compliant" stays truthfully compliant. Full
 suite green (1246 tests) on scratch Postgres before deploying.
 
-**Status**: Fixed, deployed, commit pending. The 4 real products are queued
+**Status**: Fixed, deployed, commit `fb63f43`. The 4 real products are queued
 for repair, not yet confirmed fixed live (blocked on spend cap).
 
 ---
@@ -137,7 +137,7 @@ with a real token, login → 200, and the actual core feature
 scheduler) → 200 with mathematically correct shard balancing. Full suite
 green (1244 tests) on scratch Postgres before deploying the prompt change.
 
-**Status**: Fixed, deployed, commit pending.
+**Status**: Fixed, deployed, commit `fb63f43`.
 
 ---
 
