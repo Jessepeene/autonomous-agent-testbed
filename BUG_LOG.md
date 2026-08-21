@@ -12,21 +12,176 @@ time it's fixed, not batched up afterward.**
 
 ## Index
 
-1. [Vercel deployments never actually built the Python backend](#1-vercel-deployments-never-actually-built-the-python-backend)
-2. [A "defer" reply to heal-exhaustion silently became patch guidance instead](#2-a-defer-reply-to-heal-exhaustion-silently-became-patch-guidance-instead)
-3. [Discovery's raw sources: HN contributed nothing, GitHub surfaced the wrong things](#3-discoverys-raw-sources-hn-contributed-nothing-github-surfaced-the-wrong-things)
-4. [Gemini: unbounded thinking budget crowds out the JSON answer in `parse()`](#4-gemini-unbounded-thinking-budget-crowds-out-the-json-answer-in-parse)
-5. [Gemini: missing `thought_signature` breaks every multi-turn tool call](#5-gemini-missing-thought_signature-breaks-every-multi-turn-tool-call)
-6. [Anthropic: `effort` param unsupported by the Haiku 4.5 fallback model](#6-anthropic-effort-param-unsupported-by-the-haiku-45-fallback-model)
-7. [Dashboard container reports unhealthy despite working correctly](#7-dashboard-container-reports-unhealthy-despite-working-correctly)
-8. [DeepSeek could accidentally serve as fallback for unrelated tasks](#8-deepseek-could-accidentally-serve-as-fallback-for-unrelated-tasks)
-9. [DeepSeek sent Gemini-shaped tool schemas, not Anthropic-shaped](#9-deepseek-sent-gemini-shaped-tool-schemas-not-anthropic-shaped)
-10. [Gemini and DeepSeek spend silently mispriced](#10-gemini-and-deepseek-spend-silently-mispriced)
-11. [Real code generation was mocked in production](#11-real-code-generation-was-mocked-in-production)
+1. [Four products in a row failed billing the same way: the codegen prompt never named the Stripe key's env var](#1-four-products-in-a-row-failed-billing-the-same-way-the-codegen-prompt-never-named-the-stripe-keys-env-var)
+2. [Generated apps crashed on every route once deployed: an unconditional static-file mount](#2-generated-apps-crashed-on-every-route-once-deployed-an-unconditional-static-file-mount)
+3. [The one real live product was invisible behind Vercel's own SSO wall](#3-the-one-real-live-product-was-invisible-behind-vercels-own-sso-wall)
+4. [Vercel deployments never actually built the Python backend](#4-vercel-deployments-never-actually-built-the-python-backend)
+5. [A "defer" reply to heal-exhaustion silently became patch guidance instead](#5-a-defer-reply-to-heal-exhaustion-silently-became-patch-guidance-instead)
+6. [Discovery's raw sources: HN contributed nothing, GitHub surfaced the wrong things](#6-discoverys-raw-sources-hn-contributed-nothing-github-surfaced-the-wrong-things)
+7. [Gemini: unbounded thinking budget crowds out the JSON answer in `parse()`](#7-gemini-unbounded-thinking-budget-crowds-out-the-json-answer-in-parse)
+8. [Gemini: missing `thought_signature` breaks every multi-turn tool call](#8-gemini-missing-thought_signature-breaks-every-multi-turn-tool-call)
+9. [Anthropic: `effort` param unsupported by the Haiku 4.5 fallback model](#9-anthropic-effort-param-unsupported-by-the-haiku-45-fallback-model)
+10. [Dashboard container reports unhealthy despite working correctly](#10-dashboard-container-reports-unhealthy-despite-working-correctly)
+11. [DeepSeek could accidentally serve as fallback for unrelated tasks](#11-deepseek-could-accidentally-serve-as-fallback-for-unrelated-tasks)
+12. [DeepSeek sent Gemini-shaped tool schemas, not Anthropic-shaped](#12-deepseek-sent-gemini-shaped-tool-schemas-not-anthropic-shaped)
+13. [Gemini and DeepSeek spend silently mispriced](#13-gemini-and-deepseek-spend-silently-mispriced)
+14. [Real code generation was mocked in production](#14-real-code-generation-was-mocked-in-production)
 
 ---
 
-## 1. Vercel deployments never actually built the Python backend
+## 1. Four products in a row failed billing the same way: the codegen prompt never named the Stripe key's env var
+
+**Found**: 2026-08-21, Jesse noticed the pattern directly — five heal-exhaustion
+escalations about "pricing," and asked why a system that clearly knows what's
+wrong needs a human to fix something so evidently mechanical.
+
+**Severity**: Real and systemic — every one of the 4 non-`Shardline` products
+this factory has ever built hit this identically. Every checkout attempt on
+any of them would 503 with "Billing is not configured," permanently, with
+no way to self-heal.
+
+**Root cause**: Not what the plain-language escalation summaries said. Each
+one described "a fixed, unchangeable" price — the real bug was one level
+underneath that: all 4 generated backends correctly read
+`PRODUCT_PRICE_CENTS` and correctly used it for the Checkout amount, but
+read the Stripe secret key from `STRIPE_SECRET_KEY` — the name Stripe's own
+documentation uses — instead of `STRIPE_API_KEY`, the only name
+`deploy.py::_runtime_env` actually sets. `SYSTEM_PROMPT` names
+`PRODUCT_PRICE_CENTS` and `PRODUCT_ID` explicitly, literally, every time —
+but for the Stripe key it only ever said "reading the key from an
+environment variable," never naming it. The model filled that gap with a
+plausible guess, the same wrong guess, all 4 times. Because the key read as
+empty at runtime, `create_checkout_session` failed closed before ever
+reaching the price logic — a human summarizing Bug Council's finding
+reasonably described the practical effect ("the price can't actually take
+effect") as "hard-coded," which sent the investigation in the wrong
+direction until the real generated code was read directly.
+
+**Affected**: `src/factory/engines/development/scaffold/generator.py`
+(`SYSTEM_PROMPT`), `src/factory/engines/development/contract.py`
+(`missing_contract_requirements`, new `_STRIPE_KEY_ENV_READ_RE`).
+
+**Fix**: Two layers, matching this file's own emerging pattern (entry #2 is
+the same shape of fix for a different fact). `SYSTEM_PROMPT` now names
+`STRIPE_API_KEY` explicitly. `missing_contract_requirements` now also
+checks for a real read of it — the same cheap, deterministic,
+pre-Bug-Council check already used for `PRODUCT_PRICE_CENTS` — so a future
+regression gets caught as `contract_incomplete`, which is a surgical-repair
+category: fixable by the system itself in one targeted attempt, not a
+5th human escalation. Also added an explicit constraint against hard-coding
+a copyright year (e.g. "© 2024") for the same underlying reason — a fact
+the model can't know from training data alone needs to either be omitted or
+computed, not guessed.
+
+**Unstuck live**: Replied to all 4 open heal-exhaustion interrupts with the
+precise fix as guidance, through the normal reply pipeline (not a risk
+override — this is a real, understood, fixable bug, not a deliberate
+accepted risk). Queued as guided `patch_product` tasks; execution is
+currently paused behind the daily LLM spend cap (today's real usage put the
+trailing 24h total just over $10), Jesse's explicit choice to let it clear
+naturally rather than raise the cap.
+
+**Verification**: New tests in `test_codegen_contract.py`
+(`test_a_missing_stripe_api_key_read_is_flagged`,
+`test_a_bare_getenv_call_also_satisfies_the_stripe_key_check`), existing
+fixtures across `test_codegen_contract.py`/`test_seo_gate.py` updated to
+read `STRIPE_API_KEY` so "fully compliant" stays truthfully compliant. Full
+suite green (1246 tests) on scratch Postgres before deploying.
+
+**Status**: Fixed, deployed, commit pending. The 4 real products are queued
+for repair, not yet confirmed fixed live (blocked on spend cap).
+
+---
+
+## 2. Generated apps crashed on every route once deployed: an unconditional static-file mount
+
+**Found**: 2026-08-20, live end-to-end QA of the first product this factory
+ever deployed with a working backend (bug #4's fix made the backend
+actually run — this is what it hit next).
+
+**Severity**: Total, for every product this factory has ever generated.
+Not the deferred security issue Jesse had explicitly accepted — a distinct,
+new crash that took down literally every route, including `/health`.
+
+**Root cause**: Every generated MVP's `app/main.py` ends with
+`app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")`
+to self-serve the frontend from `public/`. Vercel serves `public/**`
+automatically from its own CDN, entirely separately from the FastAPI
+function, and the deployed function's bundle does not necessarily contain
+`public/` at the same relative path the source tree has it. The mount
+call is unconditional and runs at *import time*, so a missing directory
+raises before any route can ever be served. Reproduced live in a matching
+Python 3.12 container: `RuntimeError: Directory '/var/task/public' does
+not exist` — `/var/task` is Vercel's real Lambda code path. The scaffold
+system prompt never mentioned Vercel or its static-asset convention at
+all, so the model reasonably defaulted to a normal-FastAPI pattern that
+happens to be exactly wrong for this deployment target.
+
+**Affected**: `src/factory/engines/development/scaffold/generator.py`
+(`SYSTEM_PROMPT`); the one already-deployed product's own
+`app/main.py` (patched directly, see below).
+
+**Fix**: Added an explicit hard constraint to `SYSTEM_PROMPT` telling the
+model Vercel serves `public/**` itself and to guard any self-mount with
+`if STATIC_DIR.is_dir():` so it only ever runs where the directory
+genuinely exists (local dev / the pytest suite) — future generated apps
+should no longer hit this. Patched the one real affected product's
+existing `app/main.py` with the same guard directly, since regenerating
+the whole app via the LLM for a one-line fix wasn't warranted.
+
+**Verification**: Reproduced the crash live pre-fix in a container matching
+Vercel's actual Python 3.12 runtime. Redeployed the patched product and
+confirmed a complete real flow end-to-end: `/health` → 200, signup → 201
+with a real token, login → 200, and the actual core feature
+(`/api/shards/plan`, a longest-processing-time-first bin-packing
+scheduler) → 200 with mathematically correct shard balancing. Full suite
+green (1244 tests) on scratch Postgres before deploying the prompt change.
+
+**Status**: Fixed, deployed, commit pending.
+
+---
+
+## 3. The one real live product was invisible behind Vercel's own SSO wall
+
+**Found**: 2026-08-20, immediately after bug #4's fix — the deployed
+product's URL redirected through `vercel.com/sso-api` to a login page for
+any visitor, confirmed live via `curl -I`.
+
+**Severity**: Real — a "live" product that only its own operator could
+actually see defeats the entire point of shipping it to test market
+traction.
+
+**Root cause**: Not a code bug. `GET /v9/projects/{id}` showed
+`"ssoProtection": {"deploymentType": "all_except_custom_domains"}` — a
+Vercel account/project setting that gates every deployment URL except a
+real attached custom domain, protecting Preview Deployments by default.
+No custom domain was attached yet (the `domain_required` interrupt that
+exists for exactly this was still open), so every route on the raw
+`*.vercel.app` URL required a Vercel login.
+
+**Affected**: Vercel project configuration only, no application code.
+
+**Fix**: `PATCH /v9/projects/{id}` with `{"ssoProtection": null}`,
+disabling the protection directly (Jesse's explicit choice over attaching
+a domain, given as a faster path to a testable public URL right now).
+
+**Verification**: Live: `curl` against the deployment root before the
+change returned a 302 to `vercel.com/sso-api`; after, a genuine 200 with
+the real page content, no login required.
+
+**Known residual gap, not fixed**: this was disabled on one project only,
+and disables protection for *all* deployments on it, including previews —
+a real security-posture tradeoff made once, deliberately, not a new
+default. Every future product's Vercel project will need the same manual
+step (or a real custom domain, which is exempt by design) until this is
+automated in `deploy.py` itself.
+
+**Status**: Fixed live via the Vercel API. No application code changed,
+no commit.
+
+---
+
+## 4. Vercel deployments never actually built the Python backend
 
 **Found**: 2026-08-20, live QA of the first product this factory ever
 deployed to production — Jesse noticed login didn't work and there was no
@@ -86,7 +241,7 @@ real, anonymous visitor yet.
 
 ---
 
-## 2. A "defer" reply to heal-exhaustion silently became patch guidance instead
+## 5. A "defer" reply to heal-exhaustion silently became patch guidance instead
 
 **Found**: 2026-08-20, Jesse replied to a real heal-exhaustion escalation
 asking to defer a known security/performance issue and ship the MVP anyway
@@ -132,10 +287,10 @@ bug this closes — no patch task queued.
 
 ---
 
-## 3. Discovery's raw sources: HN contributed nothing, GitHub surfaced the wrong things
+## 6. Discovery's raw sources: HN contributed nothing, GitHub surfaced the wrong things
 
 **Found**: 2026-08-20, digging into why Discovery's generator kept producing
-zero candidates even after bug #4's crash fix was live and cycles were
+zero candidates even after bug #7's crash fix was live and cycles were
 running clean — the crash wasn't the whole story.
 
 **Severity**: Real, structural — not a crash, a silent quality problem.
@@ -190,7 +345,7 @@ idea since production went live.
 
 ---
 
-## 4. Gemini: unbounded thinking budget crowds out the JSON answer in `parse()`
+## 7. Gemini: unbounded thinking budget crowds out the JSON answer in `parse()`
 
 **Found**: 2026-08-19, routine periodic check-in — `llm_calls` showed a
 `schema_violation` on an `analysis`/`discovery` call from a few hours
@@ -250,12 +405,12 @@ repro showing `thoughts_token_count=860`), then re-ran the exact previously
 
 ---
 
-## 5. Gemini: missing `thought_signature` breaks every multi-turn tool call
+## 8. Gemini: missing `thought_signature` breaks every multi-turn tool call
 
 **Found**: 2026-08-18, prompted by Jesse noticing the dashboard's provider-health
 panel showing `gemini: down`.
 
-**Severity**: Real, recurring, previously invisible (masked by bug #6's fix,
+**Severity**: Real, recurring, previously invisible (masked by bug #9's fix,
 which made every occurrence fail over successfully instead of crashing).
 
 **Root cause**: Gemini's newer models attach an opaque `thought_signature`
@@ -294,7 +449,7 @@ end-to-end, including the model continuing to a genuine second tool call.
 
 ---
 
-## 6. Anthropic: `effort` param unsupported by the Haiku 4.5 fallback model
+## 9. Anthropic: `effort` param unsupported by the Haiku 4.5 fallback model
 
 **Found**: 2026-08-18, routine "anything weird?" check-in — found by querying
 `llm_calls` for the day's `rejected` outcomes.
@@ -329,7 +484,7 @@ which is exactly how this shipped unnoticed). Verified live: a real
 
 ---
 
-## 7. Dashboard container reports unhealthy despite working correctly
+## 10. Dashboard container reports unhealthy despite working correctly
 
 **Found**: 2026-08-18, same check-in as #6 — `docker ps` showed
 `dashboard: unhealthy`.
@@ -357,9 +512,9 @@ probe `http://127.0.0.1:3000/login` instead of `http://localhost:3000/login`.
 
 ---
 
-## 8. DeepSeek could accidentally serve as fallback for unrelated tasks
+## 11. DeepSeek could accidentally serve as fallback for unrelated tasks
 
-**Found**: 2026-08-18, while investigating bug #10 (checking `llm_calls` for
+**Found**: 2026-08-18, while investigating bug #13 (checking `llm_calls` for
 pricing accuracy turned up an unrelated anomalous row).
 
 **Severity**: Real, live risk — not just theoretical. One real production
@@ -368,7 +523,7 @@ call already hit it.
 **Root cause**: `ProviderRegistry.alternatives()` returns every other
 *registered* provider on failover, with no concept of task-type fitness.
 Once DeepSeek became a third registered provider (for `CODE_REPAIR`, see
-bug #9's context), any Gemini-routed, failover-eligible task type
+bug #12's context), any Gemini-routed, failover-eligible task type
 (`ANALYSIS`, `ORCHESTRATION`, `COMPLIANCE`, `DISCOVERY`, `MARKETING_COPY`)
 could fail over to DeepSeek and send it a model name it had never heard of.
 Confirmed live: `provider=deepseek, model=gemini-pro-latest,
@@ -393,7 +548,7 @@ Postgres before deploying.
 
 ---
 
-## 9. DeepSeek sent Gemini-shaped tool schemas, not Anthropic-shaped
+## 12. DeepSeek sent Gemini-shaped tool schemas, not Anthropic-shaped
 
 **Found**: 2026-08-18, the very first real production `CODE_REPAIR` call
 after routing DeepSeek in — caught before it affected a real repair
@@ -423,7 +578,7 @@ steps, correct diagnosis, correct fix, independently verified passing.
 
 ---
 
-## 10. Gemini and DeepSeek spend silently mispriced
+## 13. Gemini and DeepSeek spend silently mispriced
 
 **Found**: 2026-08-18, Jesse asked directly: "is LLM spend accurate?"
 
@@ -463,7 +618,7 @@ affected total was a few cents.
 
 ---
 
-## 11. Real code generation was mocked in production
+## 14. Real code generation was mocked in production
 
 **Found**: 2026-08-18, go-live day, a few hours after `FACTORY_DRY_RUN` was
 flipped off — not caught as part of the go-live checklist itself.

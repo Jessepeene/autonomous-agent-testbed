@@ -16,6 +16,7 @@ _PRODUCT_ID = "prod-1"
 _GOOD_BACKEND_PY = (
     "import os\n"
     "def create_checkout():\n"
+    "    stripe.api_key = os.environ['STRIPE_API_KEY']\n"
     "    price = int(os.environ['PRODUCT_PRICE_CENTS'])\n"
     "    return stripe.checkout.Session.create(\n"
     "        client_reference_id=os.environ['PRODUCT_ID'],\n"
@@ -75,6 +76,28 @@ def test_the_env_var_name_inside_a_comment_does_not_satisfy_the_check() -> None:
     sources["app/main.py"] = "# TODO: read PRODUCT_PRICE_CENTS from the environment\n"
     missing = _missing(sources)
     assert any("PRODUCT_PRICE_CENTS" in item for item in missing)
+
+
+def test_a_missing_stripe_api_key_read_is_flagged() -> None:
+    """Real bug, found live: four separate products read STRIPE_SECRET_KEY (the
+    name Stripe's own docs use) instead of STRIPE_API_KEY, the only name the
+    deploy pipeline actually sets -- billing failed closed every time, four
+    times, before this was ever caught."""
+    sources = dict(_GOOD_REAL_MVP_SOURCES)
+    sources["app/main.py"] = _GOOD_BACKEND_PY.replace(
+        "os.environ['STRIPE_API_KEY']", "os.environ['STRIPE_SECRET_KEY']"
+    )
+    missing = _missing(sources)
+    assert any("STRIPE_API_KEY" in item for item in missing)
+
+
+def test_a_bare_getenv_call_also_satisfies_the_stripe_key_check() -> None:
+    sources = dict(_GOOD_REAL_MVP_SOURCES)
+    sources["app/main.py"] = _GOOD_BACKEND_PY.replace(
+        "os.environ['STRIPE_API_KEY']", 'os.getenv("STRIPE_API_KEY")'
+    )
+    missing = _missing(sources)
+    assert not any("STRIPE_API_KEY" in item for item in missing)
 
 
 def test_a_missing_client_reference_id_is_flagged() -> None:
@@ -190,6 +213,6 @@ def test_a_workspace_with_no_html_files_skips_html_only_checks() -> None:
 
 def test_multiple_gaps_are_all_reported_at_once() -> None:
     missing = _missing({"app/main.py": "print('nothing here')"})
-    # PRODUCT_PRICE_CENTS + client_reference_id; no HTML files at all, so the
-    # beacon/privacy checks are skipped rather than also flagged.
-    assert len(missing) == 2
+    # PRODUCT_PRICE_CENTS + STRIPE_API_KEY + client_reference_id; no HTML files
+    # at all, so the beacon/privacy checks are skipped rather than also flagged.
+    assert len(missing) == 3

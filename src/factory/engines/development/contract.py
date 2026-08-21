@@ -2,12 +2,13 @@
 second-earliest step, right after `seo.py`.
 
 Both codegen prompts (`SYSTEM_PROMPT`, `LANDING_PAGE_SYSTEM`) *ask* for several
-load-bearing facts to be true: the real MVP must read its Checkout price from
-`PRODUCT_PRICE_CENTS` and attribute payments via `client_reference_id`, both
-prompts must wire the analytics beacon to the product's own URL, and both must
-link a privacy page. A prompt asking for something is not the same as it being
-there — same reasoning as `seo.py`'s own module docstring: a question with a
-checkable answer must not depend on a model's mood.
+load-bearing facts to be true: the real MVP must read its Stripe key from
+`STRIPE_API_KEY` and its Checkout price from `PRODUCT_PRICE_CENTS`, and
+attribute payments via `client_reference_id`; both prompts must wire the
+analytics beacon to the product's own URL, and both must link a privacy page.
+A prompt asking for something is not the same as it being there — same
+reasoning as `seo.py`'s own module docstring: a question with a checkable
+answer must not depend on a model's mood.
 
 Deliberately regex/substring matching, not AST parsing, matching `seo.py`'s own
 established precedent (see its docstring: checks are kept to what's cheap and
@@ -37,6 +38,18 @@ import re
 #: must not satisfy this.
 _PRICE_ENV_READ_RE = re.compile(
     r"""os\.environ\[\s*["']PRODUCT_PRICE_CENTS["']\s*\]|os\.getenv\(\s*["']PRODUCT_PRICE_CENTS["']"""
+)
+#: Same shape as `_PRICE_ENV_READ_RE`, added after a real, repeated live failure:
+#: `SYSTEM_PROMPT` never used to name the Stripe key's exact environment variable
+#: (just "reading the key from an environment variable"), and the model
+#: consistently guessed `STRIPE_SECRET_KEY` -- the name Stripe's own docs use --
+#: instead of `STRIPE_API_KEY`, the only name `deploy.py::_runtime_env` ever
+#: actually sets. Four separate products hit this identically: the key read as
+#: empty at runtime, so billing failed closed on every checkout attempt. The
+#: prompt now names it explicitly too; this check exists so a regression is
+#: caught here, cheaply, before ever reaching Bug Council.
+_STRIPE_KEY_ENV_READ_RE = re.compile(
+    r"""os\.environ\[\s*["']STRIPE_API_KEY["']\s*\]|os\.getenv\(\s*["']STRIPE_API_KEY["']"""
 )
 _CLIENT_REFERENCE_RE = re.compile(r"client_reference_id")
 _PRIVACY_LINK_RE = re.compile(r"""<a\b[^>]*href\s*=\s*["'][^"']*privacy[^"']*["']""", re.IGNORECASE)
@@ -72,6 +85,13 @@ def missing_contract_requirements(
                 "PRODUCT_PRICE_CENTS is never read from the environment anywhere in "
                 "the backend -- the Checkout amount must come from it, never be "
                 "hard-coded"
+            )
+        if not _STRIPE_KEY_ENV_READ_RE.search(python_blob):
+            missing.append(
+                "STRIPE_API_KEY is never read from the environment anywhere in the "
+                "backend -- that exact name, not STRIPE_SECRET_KEY or any other "
+                "guess, is the only one the deploy pipeline actually sets, so "
+                "billing silently fails closed without it"
             )
         if not _CLIENT_REFERENCE_RE.search(python_blob):
             missing.append(

@@ -27,8 +27,12 @@ The MVP must include, as actual files with real contents:
 - A FastAPI backend with a /health endpoint and the core feature endpoints.
 - A minimal single-page frontend (plain HTML/CSS/JS, no build step).
 - Token-based authentication with password hashing. Never store plaintext passwords.
-- Stripe Checkout billing wiring, reading the key from an environment variable. Every
-  Checkout Session you create must set client_reference_id to the exact value of the
+- Stripe Checkout billing wiring, reading the secret key from the STRIPE_API_KEY
+  environment variable — that exact name, not STRIPE_SECRET_KEY or any other guess.
+  Observed live, four separate times: STRIPE_API_KEY is the only name the deploy
+  pipeline ever actually sets, so a plausible-sounding but wrong name (e.g. the name
+  Stripe's own docs use) reads as empty at runtime and every checkout attempt fails
+  closed. Every Checkout Session you create must set client_reference_id to the exact value of the
   PRODUCT_ID environment variable, read at request time. Never hard-code it, never
   omit it — it is the only way a payment can be attributed back to this product. The
   Checkout Session's price must be read from the PRODUCT_PRICE_CENTS environment
@@ -75,6 +79,23 @@ orjson, and similar) — an old exact pin can predate the prebuilt wheel for Pyt
 live: "pydantic==2.6.4" forced a from-source build of pydantic-core that failed \
 trying to install a Rust toolchain. Use a lower-bound range instead, so pip resolves \
 a release recent enough to ship a Python 3.13 wheel.
+- This deploys to Vercel, which serves everything under public/** (index.html, \
+privacy.html, sitemap.xml, robots.txt) automatically from its own CDN, separately \
+from the FastAPI function — never app.mount("/", StaticFiles(directory=...)) to \
+serve them yourself. The deployed function's bundle does not necessarily contain \
+public/ at the same relative path your source tree has it, so an unconditional \
+mount raises RuntimeError at import time, which takes down every route, not just \
+requests for a static file. Observed live: `RuntimeError: Directory \
+'/var/task/public' does not exist`, breaking /health along with the entire app. If \
+the pytest suite needs the app to also serve those files locally, guard the mount \
+so it only runs where the directory actually exists (e.g. `if STATIC_DIR.is_dir():`).
+- Never write a literal year (a copyright notice, "as of 2024", etc.) anywhere in \
+generated HTML or Python — training data has a cutoff, so a hard-coded year is \
+wrong the moment it's read, on every product. A footer copyright line either omits \
+the year entirely ("© Acme Inc.") or computes it, e.g. a tiny inline \
+`<script>document.getElementById("year").textContent = new Date().getFullYear()</script>` \
+for a static page, or `datetime.now().year` read at request time for anything the \
+backend renders.
 
 Request/response validation:
 - Define an explicit Pydantic model for every request body and response — never a \

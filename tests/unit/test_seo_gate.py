@@ -111,6 +111,7 @@ _COMPLETE_HTML = (
 
 _COMPLETE_BACKEND_PY = (
     "import os\n"
+    "stripe_api_key = os.environ['STRIPE_API_KEY']\n"
     "price_cents = int(os.environ['PRODUCT_PRICE_CENTS'])\n"
     "client_reference_id = os.environ['PRODUCT_ID']\n"
 )
