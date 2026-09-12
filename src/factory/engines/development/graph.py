@@ -612,6 +612,47 @@ state.\
 """
 
 
+async def _ensure_deps_for_repair(
+    ctx: FactoryContext, workspace: str, *, product_id: str
+) -> None:
+    """Make sure the repair agent has a toolchain before it is told it has one.
+
+    Moving the `.deps` clear to install time is not sufficient on its own: a
+    workspace that was regenerated (`clear_workspace` + `write_plan`) has no `.deps`
+    at all until a verification run installs one, so the first repair after a
+    regeneration still met an empty environment. Observed live -- a product's
+    workspace had been rewritten hours earlier and every repair since found no
+    pytest.
+
+    Best-effort by design. A failure here is not a repair failure: the agent simply
+    works without being able to run the suite, exactly as it did before, and
+    `_verify_and_ship` remains the authoritative gate either way. So this never
+    raises and never consumes a heal cycle.
+    """
+    deps = resolve_workspace(workspace, ctx.settings) / ".deps"
+    if deps.exists():
+        return
+    if not ctx.sandbox.available:
+        return
+    log.info("development.repair_deps_missing", product_id=product_id, workspace=workspace)
+    try:
+        result = await ctx.sandbox.execute(
+            "python -m pip install --quiet --no-input --target=/workspace/.deps "
+            "-r requirements.txt",
+            workspace=workspace,
+            network=True,
+        )
+    except Exception as exc:  # never turn an environment hiccup into a repair failure
+        log.warning("development.repair_deps_install_failed", detail=str(exc)[:200])
+        return
+    log.info(
+        "development.repair_deps_installed",
+        product_id=product_id,
+        exit_code=result.exit_code,
+        timed_out=result.timed_out,
+    )
+
+
 async def _review_live_product(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
     """Walk one LIVE product with a real browser and commission a fix for anything
     genuinely wrong -- the Development department's standing product oversight.
@@ -1009,10 +1050,21 @@ async def _patch_surgically(
     product_id = product.id
     test_command = product.test_command or ""
 
-    # `clear_workspace` used to wipe `.deps` on every cycle as a side effect of
-    # wiping everything. Nothing regenerates here, so it has to be explicit -- see
-    # clear_installed_deps for why a stale one silently defeats dependency fixes.
-    repair.clear_installed_deps(workspace, ctx.settings)
+    # `.deps` is deliberately NOT cleared here any more -- that moved to just
+    # before `_verify_and_ship`'s install, which is the only place it matters.
+    #
+    # Clearing it here stripped the agent's toolchain moments before telling it
+    # "dependencies are already installed; the test command sees them" (its own
+    # operating rules) and forbidding `pip install` (no network, by design). The
+    # agent then found no pytest, could not install it, and spent its remaining
+    # budget searching the filesystem -- `find / -name 'pytest*'`, `ls -la
+    # /workspace/.deps`. Every repair on every product was affected.
+    #
+    # The reason for clearing is real but belongs at install time: pip with
+    # `--target` and no `--upgrade` skips files already present, so a stale tree
+    # would silently swallow a genuine requirements.txt bump. That is a property of
+    # the install, not of the repair, so it is enforced there.
+    await _ensure_deps_for_repair(ctx, workspace, product_id=product_id)
     repair.take_snapshot(workspace, ctx.settings)
 
     try:
@@ -1160,6 +1212,13 @@ async def _verify_and_ship(
     # gone by the time the test container starts. Installing into /workspace and
     # pointing PYTHONPATH there for the test run is what makes the install actually
     # visible to it.
+    # Cleared here, not before the repair agent ran: pip with `--target` and no
+    # `--upgrade` skips files already present, so a stale tree would silently
+    # swallow a genuine requirements.txt bump and the suite would fail identically
+    # with nothing in the log explaining why. This is the only moment that matters,
+    # and doing it earlier left the repair agent with no toolchain -- see
+    # `_ensure_deps_for_repair`.
+    repair.clear_installed_deps(workspace, ctx.settings)
     install = await ctx.sandbox.execute(
         "python -m pip install --quiet --no-input --target=/workspace/.deps -r requirements.txt",
         workspace=workspace,
