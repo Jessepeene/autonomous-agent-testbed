@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { useFactoryStream } from "@/hooks/use-factory-stream";
 import type { ProductStage } from "@/hooks/use-factory-stream";
+import { ProductDetailModal } from "@/components/dashboard/ProductDetailModal";
 import { Clock } from "lucide-react";
 import { motion } from "motion/react";
 
@@ -18,6 +20,7 @@ const STAGES: { id: ProductStage; name: string }[] = [
 
 export function PortfolioPipeline() {
   const { products } = useFactoryStream();
+  const [openProductId, setOpenProductId] = useState<string | null>(null);
 
   const timeAgo = (date: Date) => {
     const min = Math.floor((new Date().getTime() - date.getTime()) / 60000);
@@ -55,7 +58,8 @@ export function PortfolioPipeline() {
                   <motion.div
                     layoutId={`card-${product.id}`}
                     key={product.id}
-                    className="bg-white rounded-lg border border-slate-200 shadow-sm p-3 relative overflow-hidden group"
+                    onClick={() => setOpenProductId(product.id)}
+                    className="bg-white rounded-lg border border-slate-200 shadow-sm p-3 relative overflow-hidden group cursor-pointer hover:border-indigo-300 hover:shadow-md transition-all"
                   >
                     <div className="flex justify-between items-start mb-2">
                       <div>
@@ -105,6 +109,13 @@ export function PortfolioPipeline() {
           );
         })}
       </div>
+
+      {openProductId && (
+        <ProductDetailModal
+          productId={openProductId}
+          onClose={() => setOpenProductId(null)}
+        />
+      )}
     </div>
   );
 }

@@ -145,6 +145,28 @@ class AgentResult:
     def succeeded(self) -> bool:
         return self.stopped_because == "completed"
 
+    @property
+    def used_tools(self) -> bool:
+        """Whether the agent touched anything real at all. `succeeded` means
+        only "the model emitted a final turn with no tool calls and non-empty
+        text" -- a confident, fully hallucinated answer with zero tool calls
+        satisfies it exactly as well as one backed by real tool use. Tier 1
+        finding #1/#2/#16 of the system-wide verification plan: this is the
+        generalization of the one check `development/repair.py::attempt_repair`
+        already made (`if not result.invocations or not changed`) into shared
+        infrastructure, so every other `spawn()` caller can apply the same
+        "evidence, not self-report" discipline instead of trusting `succeeded`
+        alone.
+        """
+        return bool(self.invocations)
+
+    def used_tool(self, *names: str) -> bool:
+        """Whether at least one of `names` was actually, successfully called --
+        stronger than `used_tools` for a caller that only trusts the answer if
+        a *specific* tool backs it (e.g. entity resolution only trusts an
+        "I investigated" claim if `http` was actually invoked)."""
+        return any(inv.name in names and inv.ok for inv in self.invocations)
+
     def summary(self) -> str:
         tools = ", ".join(sorted({i.name for i in self.invocations})) or "none"
         return f"{self.steps} step(s), tools used: {tools}, stopped: {self.stopped_because}"

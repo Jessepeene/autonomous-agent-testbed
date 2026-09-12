@@ -8,10 +8,12 @@ import {
   Network,
   Banknote,
   Megaphone,
+  KeyRound,
   LogOut,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useFactoryStream } from "@/hooks/use-factory-stream";
+import { useIntegrations } from "@/hooks/use-integrations";
 
 interface SidebarProps {
   activeTab: string;
@@ -21,6 +23,7 @@ interface SidebarProps {
 export function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
   const router = useRouter();
   const { health, metrics } = useFactoryStream();
+  const { alerts } = useIntegrations();
   const openInterrupts = metrics?.open_interrupts ?? 0;
 
   const tabs = [
@@ -30,7 +33,23 @@ export function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
     { id: "finance", label: "Finance & Spend", icon: Banknote },
     { id: "growth", label: "Growth & Outreach", icon: Megaphone },
     { id: "learning", label: "Learning Trials", icon: TerminalSquare },
-    { id: "interrupts", label: "Escalations", icon: AlertTriangle, badge: openInterrupts },
+    {
+      id: "interrupts",
+      label: "Escalations",
+      icon: AlertTriangle,
+      badge: openInterrupts,
+      badgeColor: "rose",
+    },
+    {
+      id: "integrations",
+      label: "Integrations",
+      icon: KeyRound,
+      badge: alerts.length,
+      // Sky, not rose -- an open alert here is informational (a quota was hit),
+      // never a decision the factory is blocked waiting on, so it must never
+      // read with the same urgency as an Escalations badge.
+      badgeColor: "sky",
+    },
   ];
 
   async function handleLogout() {
@@ -73,7 +92,13 @@ export function Sidebar({ activeTab, setActiveTab }: SidebarProps) {
                 {tab.label}
               </div>
               {!!tab.badge && (
-                <span className="flex h-5 w-5 items-center justify-center rounded-full bg-rose-500/20 text-[10px] font-bold text-rose-400 border border-rose-500/20">
+                <span
+                  className={`flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-bold border ${
+                    "badgeColor" in tab && tab.badgeColor === "sky"
+                      ? "bg-sky-500/20 text-sky-400 border-sky-500/20"
+                      : "bg-rose-500/20 text-rose-400 border-rose-500/20"
+                  }`}
+                >
                   {tab.badge}
                 </span>
               )}

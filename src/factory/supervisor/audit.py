@@ -15,6 +15,8 @@ holds, independent of whether the metric's own query would ever notice it broke.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from factory.hitl import interrupts
@@ -23,6 +25,20 @@ from factory.state import repository
 from factory.state.schemas import InterruptReason, ScoredIdea
 
 log = get_logger(__name__)
+
+#: Past this many days with no product changing status at all, "quiet" stops
+#: being a plausible description of a healthy factory and starts looking like
+#: "stuck" -- worth a human's attention the way an owner who hasn't seen a
+#: single order all week would start asking questions.
+_STUCK_FACTORY_DAYS = 3
+#: Several *different* products all hitting a heal cycle within a day is a
+#: pattern worth naming out loud -- one product cycling repeatedly is routine.
+_HEAL_SPIKE_PRODUCT_THRESHOLD = 3
+#: How many multiples of the trailing week's daily average today's spend has
+#: to clear before it's worth a look -- independent of and much looser than
+#: `daily_llm_spend_cap_usd`'s hard breaker (orchestrator.py), which already
+#: stops real work; this is a softer, earlier "does this look right" signal.
+_SPEND_SPIKE_MULTIPLIER = 3.0
 
 #: Same literal as `discovery/graph.py`/`discovery/score.py`'s own copy -- this
 #: codebase's convention is each module holds its own copy of an allowlist key
@@ -110,3 +126,68 @@ async def check_scoring_contract_drift(session: AsyncSession) -> bool:
     )
     log.warning("audit.scoring_contract_drift", tunable_parameter_id=row.id)
     return True
+
+
+async def check_business_health(session: AsyncSession) -> list[str]:
+    """Tier 0 finding #0g, system-wide verification plan: the other two checks
+    in this module each re-verify one specific load-bearing invariant. This is
+    the more general instinct neither one covers -- a founder periodically
+    stepping back from the day-to-day and asking "does the business, taken as
+    a whole, look healthy," rather than checking one specific fact. Three
+    plain, deterministic signals, same spirit as the checks above: no LLM
+    judgement anywhere in this function. Returns the concerns found (empty if
+    none), and raises exactly one interrupt covering all of them together --
+    several unrelated-looking oddities on the same day are worth reading as
+    one report, not three separate pings.
+    """
+    concerns: list[str] = []
+    now = datetime.now(UTC)
+
+    last_activity = await repository.most_recent_product_activity(session)
+    if last_activity is not None:
+        idle_days = (now - last_activity).days
+        if idle_days >= _STUCK_FACTORY_DAYS:
+            concerns.append(
+                f"No product has changed status in {idle_days} day(s) "
+                f"(last activity: {last_activity.isoformat()})."
+            )
+
+    recent_heals = await repository.products_with_recent_heal_attempts(
+        session, since=now - timedelta(hours=24)
+    )
+    if len(recent_heals) >= _HEAL_SPIKE_PRODUCT_THRESHOLD:
+        concerns.append(
+            f"{len(recent_heals)} different products hit a heal cycle in the last 24h "
+            "-- possibly a systemic cause rather than unrelated bugs."
+        )
+
+    from factory.observability.costs import total_usd
+
+    today_usd = await total_usd(session, hours=24)
+    trailing_usd = await total_usd(session, hours=24 * 8)
+    prior_week_usd = trailing_usd - today_usd
+    baseline_usd = prior_week_usd / 7
+    if baseline_usd > 0 and today_usd > baseline_usd * _SPEND_SPIKE_MULTIPLIER:
+        concerns.append(
+            f"Today's LLM spend (${today_usd:.2f}) is over {_SPEND_SPIKE_MULTIPLIER:g}x the "
+            f"trailing week's daily average (${baseline_usd:.2f}), independent of the hard "
+            "spend cap."
+        )
+
+    if not concerns:
+        return concerns
+
+    detail = "A few things looked statistically unusual today, worth a glance:\n\n" + "\n".join(
+        f"- {c}" for c in concerns
+    )
+    await interrupts.request(
+        session,
+        reason=InterruptReason.DATA_INTEGRITY,
+        subject=f"Business-health check, {now.date().isoformat()}",
+        detail=detail,
+        headline="🔎 Business health signals",
+        reply_hint="No reply needed — informational only, but worth a look when you have time.",
+        needs_reply=False,
+    )
+    log.info("audit.business_health_concerns", count=len(concerns))
+    return concerns

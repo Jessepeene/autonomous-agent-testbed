@@ -47,18 +47,36 @@ log = get_logger(__name__)
 #: which is where the failure actually is.
 MAX_RESULT_CHARS = 6_000
 
-#: Outcomes that mean "the agent never got a fair attempt" rather than "the repair
-#: failed". These must not consume a heal cycle -- see `RepairBlocked`.
+#: Outcomes that mean the agent genuinely never got to run: something in the
+#: environment stopped it before it could work on the problem. Deferring costs
+#: nothing and the next attempt may well succeed, so these must not consume a heal
+#: cycle -- see `RepairBlocked`.
 BLOCKED_REASONS = frozenset(
     {
         "no_provider",
         "provider_error",
-        "deadline",
+        "not_permitted",
+    }
+)
+
+#: Outcomes that mean the agent ran, worked, and used up its entire budget without
+#: finishing. Deliberately NOT in BLOCKED_REASONS despite being listed there
+#: originally: deferring these produces an infinite loop, because the next attempt
+#: starts from the same rolled-back workspace with the same budget and gets the same
+#: result. Observed live -- one real patch reached 43 attempts over nine hours,
+#: repeatedly spending a full agent run to hit `step_limit` at 8 steps and roll back,
+#: never counting a heal cycle and so never escalating to a human.
+#:
+#: These consume a heal cycle instead, so a repair the surgical path cannot do
+#: within budget eventually escalates as HEAL_EXHAUSTED -- which is the honest
+#: outcome: it needs a bigger tool or a person, not a 44th identical try.
+EXHAUSTED_REASONS = frozenset(
+    {
         "step_limit",
         "cost_cap",
+        "deadline",
         "empty_response",
         "truncated",
-        "not_permitted",
     }
 )
 
@@ -68,12 +86,17 @@ _WEAKENER = re.compile(r"@pytest\.mark\.(skip|xfail)\b|pytest\.(skip|xfail)\(")
 
 
 class RepairBlocked(RuntimeError):
-    """The repair could not be attempted for a reason the product did not cause.
+    """The repair was never actually attempted -- the environment stopped it first.
 
-    A provider outage, an exhausted step/cost budget, or a truncated response says
-    nothing about whether the code is fixable -- so the caller defers the task rather
-    than burning one of its three heal cycles. Mirrors `CampaignApprovalPending`,
-    which `supervisor/graph.py` already defers for the same reason.
+    A provider outage or a refused spawn says nothing about whether the code is
+    fixable, so the caller defers the task rather than burning one of its three
+    heal cycles. Mirrors `CampaignApprovalPending`, which `supervisor/graph.py`
+    already defers for the same reason.
+
+    Note what is deliberately *not* here any more: an exhausted step or cost
+    budget. That is an agent which ran, worked, and did not finish -- retrying it
+    unchanged is guaranteed to reach the same place, so it is a real failed attempt
+    (see EXHAUSTED_REASONS), not a blocked one.
     """
 
 
@@ -419,6 +442,26 @@ async def attempt_repair(
     if result.stopped_because in BLOCKED_REASONS:
         raise RepairBlocked(
             f"repair agent stopped early ({result.stopped_because}) after {result.steps} step(s)"
+        )
+    if result.stopped_because in EXHAUSTED_REASONS:
+        # Ran and spent its whole budget without finishing. Returned as a real
+        # rejected outcome rather than raised as RepairBlocked, so it consumes a
+        # heal cycle and the product can eventually escalate -- see
+        # EXHAUSTED_REASONS for the 43-attempt loop this prevents.
+        log.info(
+            "repair.budget_exhausted",
+            product_id=product_id,
+            stopped=result.stopped_because,
+            steps=result.steps,
+        )
+        return RepairOutcome(
+            changed_files=set(),
+            answer=result.answer,
+            summary=result.summary(),
+            rejected_because=(
+                f"the repair agent used its entire budget without finishing "
+                f"({result.stopped_because} after {result.steps} step(s))"
+            ),
         )
 
     after = _read_tree(resolve_workspace(workspace, ctx.settings))

@@ -27,6 +27,7 @@ from factory.engines.marketing.providers.base import (
     Provenance,
     ProvenanceKind,
     ProviderAuthError,
+    ProviderQuotaExceeded,
     ProviderRequestError,
     usable_person_email,
 )
@@ -98,14 +99,18 @@ class ApolloProvider:
             # 401/403: the key is present (`available` already checked that) but
             # being refused -- invalid, expired, or the plan/credits do not cover
             # this call. 400/422: the request itself is malformed -- a bug in how
-            # this module builds it, not an account problem. Anything else (429
-            # rate limit, 5xx) is left as today's graceful degrade: log and return
-            # empty, since it may well resolve on its own before anyone needs to
-            # act on it.
+            # this module builds it, not an account problem. 429: a metered quota
+            # or rate limit, surfaced as an IntegrationAlert (leads.py) rather
+            # than blocking anything -- nothing here needs a human decision, just
+            # visibility. Anything else (5xx) is left as today's graceful
+            # degrade: log and return empty, since it may well resolve on its
+            # own before anyone needs to act on it.
             if response.status_code in (401, 403):
                 raise ProviderAuthError(self.name, response.status_code, detail)
             if response.status_code in (400, 422):
                 raise ProviderRequestError(self.name, response.status_code, detail)
+            if response.status_code == 429:
+                raise ProviderQuotaExceeded(self.name, detail)
             return []
 
         body_json = response.json()

@@ -58,6 +58,10 @@ async def scout_signals(ctx: FactoryContext, session: AsyncSession, task: Task) 
             engine=EngineName.DISCOVERY,
             task_id=task.id,
         ),
+        # This is DISCOVERY_SCOUT's one legitimate call site: it is the only place
+        # that can supply the cycle's own task_id, which `submit_signal` requires to
+        # drain findings back into this cycle. See CALL_SITE_SCOPED_ROLES.
+        from_own_call_site=True,
     )
     rows = await repository.drain_scout_signals(session, task.id)
     log.info(

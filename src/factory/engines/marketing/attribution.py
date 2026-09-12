@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from factory.learning import prompts as learning_prompts
 from factory.logging import get_logger
 from factory.state import repository
 
@@ -31,11 +32,17 @@ ATTRIBUTION_WINDOW_DAYS = 14
 class ReconciliationReport:
     checked: int = 0
     attributed: int = 0
+    #: Sender-identity outcomes recorded this run, success and timeout combined —
+    #: see the two passes below and `learning/allowlist.py`'s comment on why this
+    #: key's outcome can't be scored synchronously the way the content prompt's is.
+    identity_episodes: int = 0
 
 
 async def reconcile(session: AsyncSession) -> ReconciliationReport:
     """Attribute each product's first unattributed revenue event to its most recent
-    outreach touch within the attribution window, if any."""
+    outreach touch within the attribution window, if any -- and, as a side effect,
+    score the SENDER_IDENTITY version active on that touch (a real conversion) and
+    on any touch that aged out of the window unconverted (a real non-conversion)."""
     report = ReconciliationReport()
     entries = await repository.first_revenue_ledger_entries_needing_attribution(session)
     for entry in entries:
@@ -64,4 +71,25 @@ async def reconcile(session: AsyncSession) -> ReconciliationReport:
             outreach_log_id=touch.id,
             ledger_entry_id=entry.id,
         )
+        if touch.sender_identity_version_id:
+            await learning_prompts.record_outcome(
+                session, tunable_parameter_id=touch.sender_identity_version_id, success=True
+            )
+            report.identity_episodes += 1
+
+    # A send this old could never be matched to a ledger entry above anyway (the
+    # window check in `last_outreach_touch` already excludes it), so there's no
+    # race between this pass recording a failure and the loop above recording a
+    # late success for the same row.
+    timed_out = await repository.outreach_needing_identity_timeout(
+        session, older_than_days=ATTRIBUTION_WINDOW_DAYS
+    )
+    for row in timed_out:
+        assert row.sender_identity_version_id is not None  # query guarantees this
+        await learning_prompts.record_outcome(
+            session, tunable_parameter_id=row.sender_identity_version_id, success=False
+        )
+        await repository.mark_identity_outcome_recorded(session, row.id)
+        report.identity_episodes += 1
+
     return report

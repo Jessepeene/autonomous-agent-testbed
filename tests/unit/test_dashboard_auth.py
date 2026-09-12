@@ -9,6 +9,7 @@ integration one.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -110,6 +111,208 @@ async def test_resolve_rejects_a_wrong_token(monkeypatch: pytest.MonkeyPatch) ->
         response = await client.post(
             "/dashboard/interrupts/some-id/resolve",
             json={"response": "approve"},
+            headers={"Authorization": "Bearer wrong-token"},
+        )
+
+    assert response.status_code == 401
+
+
+async def test_integrations_refuses_when_no_token_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DASHBOARD_AUTH_TOKEN", raising=False)
+
+    async with await _client() as client:
+        response = await client.get("/dashboard/integrations")
+
+    assert response.status_code == 503
+
+
+async def test_integrations_rejects_a_wrong_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DASHBOARD_AUTH_TOKEN", "correct-horse-battery-staple")
+
+    async with await _client() as client:
+        response = await client.get(
+            "/dashboard/integrations", headers={"Authorization": "Bearer wrong-token"}
+        )
+
+    assert response.status_code == 401
+
+
+async def test_write_credential_refuses_when_no_token_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DASHBOARD_AUTH_TOKEN", raising=False)
+
+    async with await _client() as client:
+        response = await client.post(
+            "/dashboard/integrations/credentials/hunter_api_key", json={"value": "x"}
+        )
+
+    assert response.status_code == 503
+
+
+async def test_write_credential_rejects_a_wrong_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DASHBOARD_AUTH_TOKEN", "correct-horse-battery-staple")
+
+    async with await _client() as client:
+        response = await client.post(
+            "/dashboard/integrations/credentials/hunter_api_key",
+            json={"value": "x"},
+            headers={"Authorization": "Bearer wrong-token"},
+        )
+
+    assert response.status_code == 401
+
+
+async def test_write_credential_rejects_a_key_outside_the_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DASHBOARD_AUTH_TOKEN", "correct-horse-battery-staple")
+
+    async with await _client() as client:
+        response = await client.post(
+            "/dashboard/integrations/credentials/not_a_real_credential",
+            json={"value": "x"},
+            headers={"Authorization": "Bearer correct-horse-battery-staple"},
+        )
+
+    assert response.status_code == 404
+
+
+async def test_write_credential_rejects_a_non_editable_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DATABASE_URL is in the catalog (so it shows real configured/masked
+    status) but must never be writable from here -- see the catalog's own
+    docstring for why."""
+    monkeypatch.setenv("DASHBOARD_AUTH_TOKEN", "correct-horse-battery-staple")
+
+    async with await _client() as client:
+        response = await client.post(
+            "/dashboard/integrations/credentials/database_url",
+            json={"value": "postgresql+asyncpg://evil"},
+            headers={"Authorization": "Bearer correct-horse-battery-staple"},
+        )
+
+    assert response.status_code == 404
+
+
+async def test_write_credential_refuses_without_env_file_path_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DASHBOARD_AUTH_TOKEN", "correct-horse-battery-staple")
+    monkeypatch.delenv("ENV_FILE_PATH", raising=False)
+
+    async with await _client() as client:
+        response = await client.post(
+            "/dashboard/integrations/credentials/hunter_api_key",
+            json={"value": "x"},
+            headers={"Authorization": "Bearer correct-horse-battery-staple"},
+        )
+
+    assert response.status_code == 503
+
+
+async def test_write_credential_saves_to_the_configured_env_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("", encoding="utf-8")
+    monkeypatch.setenv("DASHBOARD_AUTH_TOKEN", "correct-horse-battery-staple")
+    monkeypatch.setenv("ENV_FILE_PATH", str(env_path))
+
+    async with await _client() as client:
+        response = await client.post(
+            "/dashboard/integrations/credentials/hunter_api_key",
+            json={"value": "new-key-value"},
+            headers={"Authorization": "Bearer correct-horse-battery-staple"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {"status": "saved", "restart_required": True}
+    assert env_path.read_text(encoding="utf-8") == "HUNTER_API_KEY=new-key-value\n"
+
+
+async def test_resolve_integration_alert_refuses_when_no_token_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DASHBOARD_AUTH_TOKEN", raising=False)
+
+    async with await _client() as client:
+        response = await client.post("/dashboard/integrations/alerts/some-id/resolve")
+
+    assert response.status_code == 503
+
+
+async def test_create_custom_credential_refuses_when_no_token_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DASHBOARD_AUTH_TOKEN", raising=False)
+
+    async with await _client() as client:
+        response = await client.post(
+            "/dashboard/integrations/credentials", json={"key": "MY_KEY", "value": "x"}
+        )
+
+    assert response.status_code == 503
+
+
+async def test_create_custom_credential_rejects_a_wrong_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DASHBOARD_AUTH_TOKEN", "correct-horse-battery-staple")
+
+    async with await _client() as client:
+        response = await client.post(
+            "/dashboard/integrations/credentials",
+            json={"key": "MY_KEY", "value": "x"},
+            headers={"Authorization": "Bearer wrong-token"},
+        )
+
+    assert response.status_code == 401
+
+
+async def test_product_detail_refuses_when_no_token_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DASHBOARD_AUTH_TOKEN", raising=False)
+
+    async with await _client() as client:
+        response = await client.get("/dashboard/products/some-id")
+
+    assert response.status_code == 503
+
+
+async def test_product_detail_rejects_a_wrong_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DASHBOARD_AUTH_TOKEN", "correct-horse-battery-staple")
+
+    async with await _client() as client:
+        response = await client.get(
+            "/dashboard/products/some-id", headers={"Authorization": "Bearer wrong-token"}
+        )
+
+    assert response.status_code == 401
+
+
+async def test_generate_design_brief_refuses_when_no_token_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("DASHBOARD_AUTH_TOKEN", raising=False)
+
+    async with await _client() as client:
+        response = await client.post("/dashboard/products/some-id/design-brief/generate")
+
+    assert response.status_code == 503
+
+
+async def test_generate_design_brief_rejects_a_wrong_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DASHBOARD_AUTH_TOKEN", "correct-horse-battery-staple")
+
+    async with await _client() as client:
+        response = await client.post(
+            "/dashboard/products/some-id/design-brief/generate",
             headers={"Authorization": "Bearer wrong-token"},
         )
 

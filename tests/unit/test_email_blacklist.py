@@ -179,6 +179,36 @@ async def test_send_refuses_without_sender_identity(live_settings: Settings) -> 
     transport.assert_not_called()
 
 
+async def test_from_address_override_is_used_over_settings(live_settings: Settings) -> None:
+    """`outreach.py::send_to_lead` composes a per-send display name around the fixed
+    mailbox -- the override must reach Mailgun's payload, not the bare setting."""
+    identity = live_settings.model_copy(update={"outbound_from_address": "alex@mg.example.com"})
+    with patch.object(email_module, "_mailgun_send") as transport:
+        result = await send_email(
+            to="allowed@example.org",
+            subject="s",
+            body="b",
+            settings=identity,
+            from_address="Jordan Kim <alex@mg.example.com>",
+        )
+    assert result.sent is True
+    payload = transport.call_args.args[0]
+    assert payload["from"] == "Jordan Kim <alex@mg.example.com>"
+
+
+async def test_from_address_falls_back_to_settings_when_omitted(live_settings: Settings) -> None:
+    """A caller that doesn't need per-send identity (e.g. a transactional email)
+    still gets the bare mailbox, unchanged from before this parameter existed."""
+    identity = live_settings.model_copy(update={"outbound_from_address": "alex@mg.example.com"})
+    with patch.object(email_module, "_mailgun_send") as transport:
+        result = await send_email(
+            to="allowed@example.org", subject="s", body="b", settings=identity
+        )
+    assert result.sent is True
+    payload = transport.call_args.args[0]
+    assert payload["from"] == "alex@mg.example.com"
+
+
 async def test_send_refuses_without_mailgun_configured(settings: Settings) -> None:
     """Dry run off but no Mailgun credentials — must refuse, not raise."""
     unconfigured = settings.model_copy(update={"factory_dry_run": False})

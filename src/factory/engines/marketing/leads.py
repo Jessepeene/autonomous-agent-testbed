@@ -55,6 +55,7 @@ from factory.engines.marketing.providers import (
     LeadProvider,
     LeadSearchPlan,
     ProviderAuthError,
+    ProviderQuotaExceeded,
     ProviderRequestError,
     QualificationBrief,
     WebsiteContactProvider,
@@ -279,7 +280,20 @@ async def refine_sourcing_strategy(
             task_id=task_id,
         ),
     )
-    if not result.succeeded or not result.answer.strip():
+    # Tier 1 finding #16, system-wide verification plan: `result.succeeded`
+    # alone means only "the model emitted a final turn with no tool calls and
+    # non-empty text" -- an agent that claims to have "tested it against the
+    # contact-database tools" without ever actually calling
+    # find_leads_hunter/find_leads_apollo/web_search satisfied that exactly as
+    # well as one that genuinely refined the plan. Lower stakes than the LIA/
+    # entity-resolution findings (bounded by the caller's own cost caps, and
+    # this already falls back to the draft on any other failure mode), but the
+    # same gap.
+    if (
+        not result.succeeded
+        or not result.used_tool("find_leads_hunter", "find_leads_apollo", "web_search")
+        or not result.answer.strip()
+    ):
         return draft
 
     try:
@@ -364,6 +378,15 @@ async def ingest(
     if used >= quota:
         log.warning("leads.quota_reached", used=used, quota=quota)
         report.quota_blocked = True
+        await repository.raise_integration_alert(
+            session,
+            provider="lead_provider_monthly_quota",
+            message=(
+                f"Rolling 30-day lead quota reached ({used}/{quota}) -- "
+                "LEAD_PROVIDER_MONTHLY_QUOTA blocks new lead sourcing until older leads "
+                "age out of the window, or the quota is raised."
+            ),
+        )
         return report
     limit = min(limit, quota - used)
 
@@ -407,6 +430,16 @@ async def ingest(
             )
             if report.request_problem is None:
                 report.request_problem = str(exc)
+            continue
+        except ProviderQuotaExceeded as exc:
+            # Not a credential/request problem -- nothing here needs a human
+            # decision, just visibility, so this surfaces as an
+            # IntegrationAlert (dashboard Integrations page) rather than the
+            # `_escalate_lead_sourcing_problem` Interrupt path below.
+            log.warning("leads.provider_quota_exceeded", provider=provider.name)
+            await repository.raise_integration_alert(
+                session, provider=provider.name, message=str(exc)
+            )
             continue
         except Exception as exc:
             log.warning("leads.provider_failed", provider=provider.name, detail=str(exc)[:200])

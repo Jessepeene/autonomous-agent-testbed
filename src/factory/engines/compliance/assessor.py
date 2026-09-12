@@ -27,6 +27,7 @@ from factory.state.schemas import (
     ValidatedIdea,
 )
 from factory.supervisor.context import FactoryContext
+from factory.verification.grounding import claim_loosely_in_source
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -57,6 +58,13 @@ company would reasonably expect professional contact about this category of tool
 
 Set passed=false whenever any limb fails. Failing is the correct, safe outcome — a \
 weak justification that lets an email go out is worse than a missed prospect.
+
+Finally, step back from the three limbs above and apply one holistic check: even if \
+each limb technically holds, would a careful, experienced compliance reviewer \
+actually sign off on contacting this specific person? Set \
+would_a_careful_reviewer_approve=false whenever something about the case as a whole \
+gives you pause even though no single limb outright fails -- and say specifically \
+what in reviewer_concern.
 
 Then set status: APPROVED only if all three limbs hold and the data is clearly \
 professional; FLAG_FOR_REVIEW when the case is arguable but genuinely uncertain; \
@@ -134,7 +142,38 @@ async def assess_lead(
         log.warning("compliance.assessment_failed", detail=str(exc)[:300])
         return _refuse(f"assessment could not be completed: {exc}")
 
-    return finalise_lead_assessment(assessment, settings=settings)
+    return _apply_grounding_check(finalise_lead_assessment(assessment, settings=settings), lead)
+
+
+def _apply_grounding_check(
+    assessment: ComplianceAssessment, lead: LeadRecord
+) -> ComplianceAssessment:
+    """Tier 1 finding #3, system-wide verification plan: the LIA's legal
+    reasoning is otherwise never checked against anything real, only
+    thresholded on its own self-reported confidence and reviewer sign-off
+    (see `finalise_lead_assessment` above). This is a real, if partial, layer
+    -- a structural check, not a semantic one: it confirms `role_utility_link`
+    is at least *about* the role/company it was given (catching an argument
+    that reasons about a different lead entirely -- a hallucination, or a
+    correlation slip upstream of `assess_leads`'s own ref-integrity check),
+    never proof the legal conclusion itself is correct. Only touches an
+    already-`APPROVED` verdict, same "softer signal, escalate rather than
+    reject" posture as the reviewer-signoff check.
+    """
+    if assessment.status is not ComplianceStatus.APPROVED or assessment.lia_verdict is None:
+        return assessment
+    verdict = assessment.lia_verdict
+    grounded = claim_loosely_in_source(
+        lead.job_title, verdict.role_utility_link
+    ) or claim_loosely_in_source(lead.company, verdict.role_utility_link)
+    if grounded:
+        return assessment
+    log.info(
+        "compliance.role_utility_link_not_grounded",
+        job_title=lead.job_title[:100],
+        company=lead.company[:100],
+    )
+    return assessment.model_copy(update={"status": ComplianceStatus.FLAG_FOR_REVIEW})
 
 
 def finalise_lead_assessment(
@@ -150,6 +189,16 @@ def finalise_lead_assessment(
         return _refuse("assessor returned no LIA verdict")
     if not assessment.lia_verdict.passed:
         return assessment.model_copy(update={"status": ComplianceStatus.REJECTED})
+    if not assessment.lia_verdict.would_a_careful_reviewer_approve:
+        # A softer signal than a failed limb -- the facts check out, but the
+        # model itself would hesitate to sign this -- so this escalates to a
+        # human (same failure mode as the confidence check below) rather than
+        # auto-rejecting outright.
+        log.info(
+            "compliance.reviewer_signoff_failed",
+            concern=assessment.lia_verdict.reviewer_concern[:200],
+        )
+        return assessment.model_copy(update={"status": ComplianceStatus.FLAG_FOR_REVIEW})
     if assessment.confidence < settings.compliance_min_confidence:
         log.info(
             "compliance.low_confidence",
@@ -249,14 +298,15 @@ async def assess_leads(
         ]
 
     results: list[ComplianceAssessment] = []
-    for ref in refs:
+    for ref, lead in zip(refs, leads, strict=True):
         matched = by_ref.get(ref)
         if matched is None:
             # A simple, isolated omission: everything else in the batch checked out,
             # so only this prospect — not the whole chunk — is refused.
             results.append(_refuse("no assessment was returned for this prospect"))
             continue
-        results.append(finalise_lead_assessment(matched.to_assessment(), settings=settings))
+        finalised = finalise_lead_assessment(matched.to_assessment(), settings=settings)
+        results.append(_apply_grounding_check(finalised, lead))
     return results
 
 
@@ -295,6 +345,9 @@ async def assess_idea(
         f"- target niche: {idea.target_niche}\n"
         f"- monetization: {idea.monetization_hypothesis}\n"
         f"- evidence source: {idea.source_url}\n"
+        f"- corroborating evidence: {idea.evidence_count} independent raw signal(s) "
+        "mentioned this same pain point (a cheap, deterministic corroboration count, "
+        "not a claim this factory is asking you to re-verify)\n"
         f"{prior_context}\n"
         "Assess whether this may be built and sold."
     )
@@ -347,5 +400,6 @@ def _refuse(reason: str) -> ComplianceAssessment:
             necessity="not established — assessment did not complete",
             balancing_test="not established — assessment did not complete",
             passed=False,
+            would_a_careful_reviewer_approve=False,
         ),
     )

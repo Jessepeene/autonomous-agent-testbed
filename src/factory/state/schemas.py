@@ -81,6 +81,19 @@ class TaskKind(StrEnum):
     #: Polls Vercel for DNS verification status on an attached domain. A pure API
     #: check, no LLM call -- see EVALUATE_AB_TEST, same shape.
     VERIFY_DOMAIN = "verify_domain"
+    #: Generates and caches a `DesignBrief` for one already-live product that
+    #: doesn't have one yet. Enqueued by the dashboard (`api/dashboard.py`),
+    #: not the tick loop itself -- the API only ever writes intent, the loop
+    #: does the real work. See development/design_brief.py.
+    GENERATE_DESIGN_BRIEF = "generate_design_brief"
+    #: Spawns AUDITOR against one LIVE product with a real browser -- it opens the
+    #: page, uses it the way a visitor would (submits the form, follows the call to
+    #: action), and commissions a patch for anything genuinely wrong. Distinct from
+    #: the deterministic `audit-live-products` maintenance slug, which only asks
+    #: "does the URL answer" and reads markup: a form that silently fails on submit
+    #: is invisible to every check that never presses the button. See
+    #: development/graph.py::_review_live_product.
+    REVIEW_LIVE_PRODUCT = "review_live_product"
 
 
 class TaskStatus(StrEnum):
@@ -157,6 +170,31 @@ class InterruptReason(StrEnum):
     #: nothing ever asked again and nothing ever told a human -- observed live.
     #: See marketing/graph.py and supervisor/scheduler.py.
     LEAD_SOURCING_STALLED = "lead_sourcing_stalled"
+    #: A model provider itself is rejecting requests (quota/credit exhaustion, a
+    #: permanent 4xx, a sustained 5xx) -- a billing/infrastructure problem, never
+    #: a legal or content question. Previously fell through to the generic
+    #: exhausted-retries handler in `supervisor/graph.py::_run_engine`, which
+    #: raised it as LEGAL_UNCERTAINTY with a subject that embedded the failing
+    #: task's id -- meaning every fresh task hitting the *same* persistent
+    #: provider outage got its own "new" subject, defeating `interrupts.request`'s
+    #: duplicate-open-subject collapse entirely. Observed live: 40 separate
+    #: LEGAL_UNCERTAINTY interrupts over 14 days, all the same Anthropic credit
+    #: exhaustion, several with `plain_language_error`'s own explanation call
+    #: failing too (every provider was down at once) and dumping a raw,
+    #: unedited exception at the human instead. See PROVIDER_OUTAGE's own
+    #: handler for why its subject is built from the provider/status instead.
+    PROVIDER_OUTAGE = "provider_outage"
+    #: A task failed `max_task_attempts` times for a reason with no more specific
+    #: handler -- the generic last-resort escalation in
+    #: `supervisor/graph.py::_run_engine`. Previously raised as LEGAL_UNCERTAINTY,
+    #: which is what a human actually saw in the Telegram `[LEGAL_UNCERTAINTY]`
+    #: prefix for what is nearly always a technical failure. Same complaint, and
+    #: same fix, as HEAL_EXHAUSTED and PROVIDER_OUTAGE above: the two remaining
+    #: genuine uses of LEGAL_UNCERTAINTY (a flagged idea in `compliance/graph.py`,
+    #: an uncertain LIA in `compliance/lia.py`) are real legal questions, and
+    #: diluting that label with technical failures is what made a human stop
+    #: trusting it.
+    TASK_EXHAUSTED = "task_exhausted"
 
 
 class ComplianceStatus(StrEnum):
@@ -299,6 +337,18 @@ class ScoredIdea(Contract):
     requires_human_sales: bool = False
     requires_human_onboarding: bool = False
     self_serve_price_usd: Annotated[float, Field(ge=0.0, le=100_000.0)] = 0.0
+    #: Holistic veto, independent of the five scored dimensions above: an idea can
+    #: score adequately on every individual axis while being, taken as a whole,
+    #: obviously not a real business (an experienced operator would object on
+    #: sight even though nothing above technically scored low). See
+    #: `discovery.score.passes_gut_check`. Defaulted to True (no veto), same
+    #: precedent and same reasoning as `defensibility` above:
+    #: `learning/prompts.py::get_prompt` can serve a stale DISCRIMINATOR_SYSTEM
+    #: that predates this field, and a missing gut check must never silently
+    #: veto every idea -- it must do nothing until the served prompt actually
+    #: asks for it.
+    gut_check_passed: bool = True
+    gut_check_reasoning: str = Field(default="", max_length=500)
 
     @classmethod
     def default_weights(cls) -> dict[str, float]:
@@ -352,6 +402,19 @@ class LIAVerdict(Contract):
     necessity: str = Field(min_length=20, max_length=1000)
     balancing_test: str = Field(min_length=20, max_length=1000)
     passed: bool
+    #: Holistic sign-off, independent of the three limbs above and of `passed`
+    #: itself: a justification can be well-grounded in the right facts (the
+    #: three limbs correctly reference the real job_title/company) while still
+    #: not being a decision a careful compliance officer would actually stand
+    #: behind. Tier 0 of the system-wide verification plan -- the same
+    #: distinction `bug_council.py`'s QUALITY reviewer draws between "grounded
+    #: in the right file" and "actually a good idea," applied here to a legal
+    #: judgement instead of a code review. Required, not defaulted, unlike
+    #: `ScoredIdea.gut_check_passed`: this prompt is never tunable (see
+    #: `learning/allowlist.py::MUTABLE_KEYS`, which excludes every LIA prompt
+    #: by omission), so there is no stale-served-prompt risk to default around.
+    would_a_careful_reviewer_approve: bool
+    reviewer_concern: str = Field(default="", max_length=500)
 
 
 class ComplianceAssessment(Contract):
@@ -483,6 +546,11 @@ class ReviewCategory(StrEnum):
     DEPENDENCIES = "dependencies"
     PRIVILEGE = "privilege"
     SECRETS = "secrets"
+    #: The one reviewer with a holistic "would I show this to a customer"
+    #: mandate rather than a narrow technical one -- see bug_council.py's
+    #: REVIEWER_PROMPTS entry for why this category exists at all (a
+    #: hardcoded stale copyright year trips none of the other five).
+    QUALITY = "quality"
 
 
 class ReviewFinding(Contract):

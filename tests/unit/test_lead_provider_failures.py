@@ -22,6 +22,7 @@ from factory.engines.marketing.providers.apollo import ApolloProvider
 from factory.engines.marketing.providers.base import (
     LeadSearchPlan,
     ProviderAuthError,
+    ProviderQuotaExceeded,
     ProviderRequestError,
 )
 from factory.engines.marketing.providers.hunter import HunterProvider, find_email
@@ -82,11 +83,11 @@ async def test_apollo_raises_request_error_on_400_and_422(
     assert excinfo.value.status_code == status
 
 
-@pytest.mark.parametrize("status", [429, 500, 503])
+@pytest.mark.parametrize("status", [500, 503])
 async def test_apollo_degrades_gracefully_on_transient_failures(
     settings: Settings, monkeypatch: pytest.MonkeyPatch, status: int
 ) -> None:
-    """429/5xx may resolve on their own -- these must not raise, unlike the
+    """5xx may resolve on its own -- this must not raise, unlike the
     diagnosable cases above, matching the existing graceful-degrade behaviour."""
 
     async def fake_post(self: httpx.AsyncClient, url: str, **kwargs: Any) -> httpx.Response:
@@ -97,6 +98,24 @@ async def test_apollo_degrades_gracefully_on_transient_failures(
     result = await _apollo(settings).search(_plan())
 
     assert result == []
+
+
+async def test_apollo_raises_quota_exceeded_on_429(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unlike a 5xx, a 429 is diagnosable (a metered quota or rate limit) and
+    worth surfacing -- as a dashboard IntegrationAlert (leads.py), not a
+    blind retry-and-hope."""
+
+    async def fake_post(self: httpx.AsyncClient, url: str, **kwargs: Any) -> httpx.Response:
+        return httpx.Response(429, text="rate limit exceeded", request=_REQUEST)
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    with pytest.raises(ProviderQuotaExceeded) as excinfo:
+        await _apollo(settings).search(_plan())
+
+    assert excinfo.value.provider == "apollo.io"
 
 
 # --- HunterProvider --------------------------------------------------------------------
@@ -144,6 +163,22 @@ async def test_hunter_degrades_gracefully_on_transient_failures(
     result = await _hunter(settings).search(_plan())
 
     assert result == []
+
+
+async def test_hunter_raises_quota_exceeded_on_429(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_get(self: httpx.AsyncClient, url: str, **kwargs: Any) -> httpx.Response:
+        return httpx.Response(
+            429, text="reached the limit for the number of searches", request=_HUNTER_REQUEST
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+    with pytest.raises(ProviderQuotaExceeded) as excinfo:
+        await _hunter(settings).search(_plan())
+
+    assert excinfo.value.provider == "hunter.io"
 
 
 async def test_hunter_stops_after_the_first_domain_once_auth_fails(
@@ -212,6 +247,23 @@ async def test_find_email_raises_request_error_on_400_and_422(
         )
 
     assert excinfo.value.status_code == status
+
+
+async def test_find_email_raises_quota_exceeded_on_429(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_get(self: httpx.AsyncClient, url: str, **kwargs: Any) -> httpx.Response:
+        return httpx.Response(429, text="rate limited", request=_HUNTER_FINDER_REQUEST)
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+
+    with pytest.raises(ProviderQuotaExceeded):
+        await find_email(
+            "Ada",
+            "Lovelace",
+            "acme-books.test",
+            settings=settings.model_copy(update={"hunter_api_key": "hunter-test-key"}),
+        )
 
 
 async def test_find_email_returns_none_without_a_key(settings: Settings) -> None:

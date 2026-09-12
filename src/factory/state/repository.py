@@ -25,11 +25,13 @@ from factory.state.orm import (
     ABTest,
     CampaignApproval,
     ChannelExperiment,
+    CustomCredential,
     Customer,
     DunningEvent,
     EntityVerdictRow,
     HealAttempt,
     Idea,
+    IntegrationAlert,
     Interrupt,
     Lead,
     LedgerEntry,
@@ -430,7 +432,31 @@ async def count_pending_tasks(
     *,
     kind: TaskKind | None = None,
 ) -> int:
-    stmt = select(func.count()).select_from(Task).where(Task.status == TaskStatus.PENDING.value)
+    """Tasks that could actually be claimed right now.
+
+    The `not_before` filter matches `claim_next_task`'s exactly, and that
+    agreement is load-bearing. Without it a *deferred* task -- one waiting on a
+    campaign approval, a tripped provider, or validation capacity -- still counts
+    as pending, so the Orchestrator's snapshot reports work that by construction
+    cannot move. It then sees a queue that never drains, concludes the factory is
+    deadlocked, and escalates.
+
+    Observed live: 45 "Factory is stuck" escalations in three hours, every one of
+    them counting 16 discovery tasks that had been deliberately deferred and could
+    not run for another 30 days. The provider circuit breaker makes this sharper
+    still -- pausing a provider defers its tasks, which under the old count looked
+    exactly like a stall and would have had the breaker trigger the very alarm
+    storm it exists to prevent.
+    """
+    now = _now()
+    stmt = (
+        select(func.count())
+        .select_from(Task)
+        .where(
+            Task.status == TaskStatus.PENDING.value,
+            (Task.not_before.is_(None)) | (Task.not_before <= now),
+        )
+    )
     if engine is not None:
         stmt = stmt.where(Task.engine == engine.value)
     if kind is not None:
@@ -699,10 +725,35 @@ async def record_heal_attempt(
     healing_text: str,
     failed_categories: list[str],
 ) -> str:
+    """``attempt_number`` is the caller's *cycle* counter, which is not unique over
+    a product's lifetime -- and this table's `uq_heal_attempts_product_attempt`
+    requires that it is.
+
+    `_heal` derives it from `product.heal_attempts`, which
+    `_verify_and_ship` resets to 0 on every successful ship (so MAX_HEAL_CYCLES
+    counts attempts within *this* repair cycle, which is what it should count).
+    A product that heals, ships, and later needs healing again therefore starts a
+    second cycle at 1 and collides with the first cycle's row. Latent until a
+    product actually did that: observed live as a `UniqueViolationError` that
+    escaped `_patch`'s `product_lock` as a `PendingRollbackError`, taking down the
+    whole task with it.
+
+    Resolved here rather than at the call site because the cycle counter is
+    correct for its own purpose -- only the stored row needs to be unique. The
+    caller's number is honoured when it does not collide, so the common case still
+    reads 1, 2, 3.
+    """
+    highest = (
+        await session.execute(
+            select(func.max(HealAttempt.attempt_number)).where(
+                HealAttempt.product_id == product_id
+            )
+        )
+    ).scalar()
     row = HealAttempt(
         product_id=product_id,
         task_id=task_id,
-        attempt_number=attempt_number,
+        attempt_number=max(attempt_number, (highest or 0) + 1),
         healing_text=healing_text[:6000],
         failed_categories=failed_categories,
     )
@@ -761,6 +812,24 @@ async def products_with_idea(
         .limit(limit)
     )
     return [(product, idea) for product, idea in (await session.execute(stmt)).all()]
+
+
+async def get_product_with_idea(
+    session: AsyncSession, product_id: str
+) -> tuple[Product, Idea] | None:
+    """Single-row version of `products_with_idea` -- the dashboard's product
+    detail view needs one product's business plan (niche/problem/monetization
+    all live on `Idea`, not `Product`), not the whole portfolio list."""
+    stmt = (
+        select(Product, Idea)
+        .join(Idea, Idea.id == Product.idea_id)
+        .where(Product.id == product_id)
+    )
+    row = (await session.execute(stmt)).first()
+    if row is None:
+        return None
+    product, idea = row
+    return product, idea
 
 
 async def set_growth_reviewed(session: AsyncSession, product_id: str) -> None:
@@ -1098,6 +1167,12 @@ async def set_lead_qualification_brief(
 ) -> None:
     await session.execute(
         update(Product).where(Product.id == product_id).values(lead_qualification_brief=brief_json)
+    )
+
+
+async def set_design_brief(session: AsyncSession, product_id: str, brief_json: str) -> None:
+    await session.execute(
+        update(Product).where(Product.id == product_id).values(design_brief=brief_json)
     )
 
 
@@ -1601,6 +1676,7 @@ async def record_outreach(
     suppressed_reason: str | None = None,
     id: str | None = None,
     unsubscribe_token: str | None = None,
+    sender_identity_version_id: str | None = None,
 ) -> str:
     """``id`` may be pre-generated by the caller (see `marketing/outreach.py`) so the
     same id can be handed to the deliverability provider as a tracking variable
@@ -1610,7 +1686,10 @@ async def record_outreach(
     email is actually going out: the token embedded in the sent message and the
     token stored here must be the same value, or `GET /u/{token}` can never resolve
     it. Only generate one here when the caller has none to give (e.g. a `blocked`
-    row that was never sent to anyone)."""
+    row that was never sent to anyone).
+
+    ``sender_identity_version_id`` should only ever be passed for a ``status="sent"``
+    row — see `marketing/outreach.py::send_to_lead`."""
     entry = OutreachLog(
         id=id or new_id(),
         lead_id=lead_id,
@@ -1619,6 +1698,7 @@ async def record_outreach(
         status=status,
         suppressed_reason=suppressed_reason,
         unsubscribe_token=unsubscribe_token or secrets.token_urlsafe(32),
+        sender_identity_version_id=sender_identity_version_id,
     )
     session.add(entry)
     await session.flush()
@@ -1720,6 +1800,22 @@ async def latest_ledger_entry(session: AsyncSession) -> LedgerEntry | None:
     codebase to report instead."""
     stmt = select(LedgerEntry).order_by(LedgerEntry.created_at.desc()).limit(1)
     return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def ledger_amounts_by_kind(
+    session: AsyncSession, *, kind: str, since: datetime
+) -> list[tuple[datetime, int]]:
+    """(created_at, amount_cents) for every real ledger row of ``kind`` at or
+    after ``since``, oldest first -- the raw series
+    `finance/anomaly.py::detect_anomaly` buckets into daily totals itself,
+    rather than pushing date-bucketing (and its per-database-dialect syntax)
+    into SQL."""
+    stmt = (
+        select(LedgerEntry.created_at, LedgerEntry.amount_cents)
+        .where(LedgerEntry.kind == kind, LedgerEntry.created_at >= since)
+        .order_by(LedgerEntry.created_at.asc())
+    )
+    return [(row.created_at, row.amount_cents) for row in (await session.execute(stmt)).all()]
 
 
 async def append_ledger(
@@ -2158,6 +2254,95 @@ async def resolve_interrupt(session: AsyncSession, interrupt_id: str, response: 
     )
 
 
+# ------------------------------------------------------------- integration alerts
+
+
+async def raise_integration_alert(
+    session: AsyncSession, *, provider: str, message: str
+) -> str | None:
+    """Record a usage-limit/quota/account signal from a third-party integration.
+
+    Same collapse-into-the-existing-open-row shape as `open_interrupt` above,
+    and for the same reason: a provider that keeps hitting the same limit on
+    every retry must not spam a fresh row each time. Returns `None` when an
+    identical (provider, message) alert is already open -- the caller does
+    not need to distinguish "raised" from "already known," see
+    `hitl.interrupts.request`'s identical shrug at its own `None` return.
+    """
+    stmt = (
+        pg_insert(IntegrationAlert)
+        .values(provider=provider, message=message[:2000], status="open")
+        .on_conflict_do_nothing(
+            index_elements=[
+                IntegrationAlert.provider,
+                IntegrationAlert.message,
+                IntegrationAlert.status,
+            ],
+            index_where=text("status = 'open'"),
+        )
+        .returning(IntegrationAlert.id)
+    )
+    row = (await session.execute(stmt)).scalar_one_or_none()
+    return str(row) if row is not None else None
+
+
+async def list_open_integration_alerts(
+    session: AsyncSession, *, limit: int = 50
+) -> list[IntegrationAlert]:
+    stmt = (
+        select(IntegrationAlert)
+        .where(IntegrationAlert.status == "open")
+        .order_by(IntegrationAlert.created_at.desc())
+        .limit(limit)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def count_open_integration_alerts(session: AsyncSession) -> int:
+    stmt = (
+        select(func.count())
+        .select_from(IntegrationAlert)
+        .where(IntegrationAlert.status == "open")
+    )
+    return int((await session.execute(stmt)).scalar_one())
+
+
+async def create_custom_credential(session: AsyncSession, key: str) -> str | None:
+    """Register a dashboard-added credential key. Idempotent, same shape as
+    `enqueue_task`'s upsert: re-adding an already-known key (the value may
+    have just been updated in `.env`) is a no-op here, not a duplicate row --
+    `None` return just means "already registered", not an error."""
+    stmt = (
+        pg_insert(CustomCredential)
+        .values(key=key)
+        .on_conflict_do_nothing(index_elements=[CustomCredential.key])
+        .returning(CustomCredential.id)
+    )
+    result = await session.execute(stmt)
+    row = result.scalar_one_or_none()
+    return str(row) if row is not None else None
+
+
+async def list_custom_credentials(session: AsyncSession) -> list[CustomCredential]:
+    stmt = select(CustomCredential).order_by(CustomCredential.created_at)
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def resolve_integration_alert(session: AsyncSession, alert_id: str) -> bool:
+    """True if an open alert with this id existed and was resolved -- lets the
+    dashboard endpoint 404 on a stale/unknown id instead of silently no-op'ing,
+    same reasoning as `api/dashboard.py::resolve_interrupt`."""
+    result = cast(
+        "CursorResult[Any]",
+        await session.execute(
+            update(IntegrationAlert)
+            .where(IntegrationAlert.id == alert_id, IntegrationAlert.status == "open")
+            .values(status="resolved", resolved_at=_now())
+        ),
+    )
+    return result.rowcount > 0
+
+
 # ---------------------------------------------------------------------- llm calls
 
 
@@ -2367,6 +2552,33 @@ async def orphaned_approved_ideas(session: AsyncSession) -> list[Idea]:
     return list((await session.execute(stmt)).scalars().all())
 
 
+async def most_recent_product_activity(session: AsyncSession) -> datetime | None:
+    """The single most recent `Product.updated_at` across every product, or
+    `None` if there are no products yet. `supervisor/audit.py`'s business-
+    health sweep uses this to notice "nothing has moved in the whole factory
+    for days" -- a signal a founder watching the day-to-day would pick up on
+    long before it shows up in any per-engine metric."""
+    stmt = select(func.max(Product.updated_at))
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def products_with_recent_heal_attempts(
+    session: AsyncSession, *, since: datetime
+) -> list[str]:
+    """Distinct `product_id`s with at least one `HealAttempt` row at or after
+    `since`. Counting distinct *products*, not raw attempt rows, on purpose:
+    one product legitimately cycling through several heals is routine, but
+    several unrelated products all hitting a heal cycle in the same short
+    window is the kind of pattern a human operator would notice and suspect a
+    systemic cause for, not four coincidental unrelated bugs."""
+    stmt = (
+        select(HealAttempt.product_id)
+        .where(HealAttempt.created_at >= since)
+        .distinct()
+    )
+    return [row[0] for row in (await session.execute(stmt)).all()]
+
+
 # --------------------------------------------------------------- entity verdicts
 
 
@@ -2421,6 +2633,37 @@ async def record_complaint(session: AsyncSession, outreach_log_id: str) -> None:
     await session.execute(
         update(OutreachLog).where(OutreachLog.id == outreach_log_id).values(complained_at=_now())
     )
+
+
+async def mark_identity_outcome_recorded(session: AsyncSession, outreach_log_id: str) -> None:
+    """Stamped only by the sender-identity timeout path (`marketing/attribution.py`)
+    so a send that ages past the attribution window is never scored twice."""
+    await session.execute(
+        update(OutreachLog)
+        .where(OutreachLog.id == outreach_log_id)
+        .values(identity_outcome_recorded_at=_now())
+    )
+
+
+async def outreach_needing_identity_timeout(
+    session: AsyncSession, *, older_than_days: int
+) -> list[OutreachLog]:
+    """Sent, non-bounced sends that scored a sender-identity version, aged past the
+    attribution window with no conversion, and haven't been scored yet. A bounced
+    send is excluded — the recipient never saw the name, so a bounce isn't a naming
+    failure. A late conversion after this point is impossible: `last_outreach_touch`'s
+    own window means a send this old could never be matched to a ledger entry anyway,
+    so there's no race with the success path in `attribution.py::reconcile`."""
+    cutoff = _now() - timedelta(days=older_than_days)
+    stmt = select(OutreachLog).where(
+        OutreachLog.status == "sent",
+        OutreachLog.sender_identity_version_id.is_not(None),
+        OutreachLog.identity_outcome_recorded_at.is_(None),
+        OutreachLog.converted_at.is_(None),
+        OutreachLog.bounced_at.is_(None),
+        OutreachLog.sent_at <= cutoff,
+    )
+    return list((await session.execute(stmt)).scalars().all())
 
 
 async def deliverability_counts(

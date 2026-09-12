@@ -17,10 +17,14 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from factory.engines.marketing.attribution import reconcile
+from factory.engines.marketing.attribution import ATTRIBUTION_WINDOW_DAYS, reconcile
+from factory.learning import prompts as learning_prompts
+from factory.learning.store import episode_counts
 from factory.state import repository
-from factory.state.orm import Base, Lead, OutreachLog
+from factory.state.orm import Base, HealAttempt, Lead, OutreachLog
 from factory.state.schemas import ScoredIdea
+
+_SENDER_IDENTITY_KEY = "factory.engines.marketing.outreach:SENDER_IDENTITY"
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -123,6 +127,47 @@ async def test_a_multi_cycle_heal_sequence_leaves_a_correct_audit_trail(
     assert rows[0].resolved_at is not None
     assert rows[1].attempt_number == 2
     assert rows[1].outcome == "healed"
+
+
+async def test_a_second_heal_cycle_does_not_collide_with_the_first(
+    session: AsyncSession,
+) -> None:
+    """`_heal` derives attempt_number from `product.heal_attempts`, which
+    `_verify_and_ship` resets to 0 on every successful ship -- so a product that
+    heals, ships, and later needs healing again starts its second cycle at 1 and
+    collides with the first cycle's row under
+    `uq_heal_attempts_product_attempt`. Observed live as a UniqueViolationError
+    that escaped `_patch`'s product_lock as a PendingRollbackError and took the
+    whole task down with it."""
+    product_id = await _make_product(session, "Reconciliation Assistant")
+
+    # First cycle: one attempt, resolved when the product shipped.
+    await repository.record_heal_attempt(
+        session,
+        product_id=product_id,
+        task_id=None,
+        attempt_number=1,
+        healing_text="first cycle",
+        failed_categories=["test_failure"],
+    )
+    await repository.resolve_pending_heal_attempts(session, product_id, "healed")
+
+    # Second cycle, months later: the counter has been reset, so the caller asks
+    # for attempt 1 again.
+    second = await repository.record_heal_attempt(
+        session,
+        product_id=product_id,
+        task_id=None,
+        attempt_number=1,
+        healing_text="second cycle, after a later regression",
+        failed_categories=["repair_rejected"],
+    )
+    await session.commit()
+
+    assert second is not None
+    row = await session.get(HealAttempt, second)
+    assert row is not None
+    assert row.attempt_number == 2, "the stored number must stay unique per product"
 
 
 async def test_escalation_resolves_the_final_attempt_as_escalated(
@@ -370,3 +415,130 @@ async def test_a_second_revenue_row_for_the_same_product_is_not_reconciled_again
     row = await session.get(OutreachLog, outreach_id)
     assert row is not None
     assert row.ledger_entry_id is not None
+
+
+# --- sender-identity outcome recording -------------------------------------------
+
+
+async def test_a_converted_touch_records_a_success_episode_for_its_identity(
+    session: AsyncSession,
+) -> None:
+    product_id = await _make_product(session, "Reconciliation Assistant")
+    lead = _lead("ada@example.test")
+    session.add(lead)
+    await session.flush()
+    _, identity_version = await learning_prompts.get_prompt(
+        session, key=_SENDER_IDENTITY_KEY, default="Alex Reyes"
+    )
+    await session.commit()
+
+    sent_at = datetime.now(UTC) - timedelta(days=3)
+    outreach_id = await repository.record_outreach(
+        session,
+        lead_id=lead.id,
+        subject="A tool for reconciliation",
+        status="sent",
+        product_id=product_id,
+        sender_identity_version_id=identity_version,
+    )
+    await session.execute(
+        OutreachLog.__table__.update().where(OutreachLog.id == outreach_id).values(sent_at=sent_at)
+    )
+    await repository.append_ledger(
+        session,
+        external_event_id="evt_identity_1",
+        kind="revenue",
+        amount_cents=4900,
+        product_id=product_id,
+    )
+    await session.commit()
+
+    report = await reconcile(session)
+    await session.commit()
+
+    assert report.attributed == 1
+    assert report.identity_episodes == 1
+    successes, total = await episode_counts(session, identity_version)
+    assert (successes, total) == (1, 1)
+
+
+async def test_an_unconverted_touch_past_the_window_records_a_failure_episode_once(
+    session: AsyncSession,
+) -> None:
+    product_id = await _make_product(session, "Reconciliation Assistant")
+    lead = _lead("ada@example.test")
+    session.add(lead)
+    await session.flush()
+    _, identity_version = await learning_prompts.get_prompt(
+        session, key=_SENDER_IDENTITY_KEY, default="Alex Reyes"
+    )
+    await session.commit()
+
+    sent_at = datetime.now(UTC) - timedelta(days=ATTRIBUTION_WINDOW_DAYS + 1)
+    outreach_id = await repository.record_outreach(
+        session,
+        lead_id=lead.id,
+        subject="A tool for reconciliation",
+        status="sent",
+        product_id=product_id,
+        sender_identity_version_id=identity_version,
+    )
+    await session.execute(
+        OutreachLog.__table__.update().where(OutreachLog.id == outreach_id).values(sent_at=sent_at)
+    )
+    await session.commit()
+
+    report = await reconcile(session)
+    await session.commit()
+
+    assert report.identity_episodes == 1
+    row = await session.get(OutreachLog, outreach_id)
+    assert row is not None
+    assert row.identity_outcome_recorded_at is not None
+    successes, total = await episode_counts(session, identity_version)
+    assert (successes, total) == (0, 1)
+
+    # Running reconcile again must not double-count the same timed-out send.
+    second_report = await reconcile(session)
+    assert second_report.identity_episodes == 0
+    successes, total = await episode_counts(session, identity_version)
+    assert (successes, total) == (0, 1)
+
+
+async def test_a_bounced_touch_past_the_window_is_not_scored_as_a_naming_failure(
+    session: AsyncSession,
+) -> None:
+    """A bounced message never reached the recipient, so its sender name was never
+    seen -- it must not count against the identity either way."""
+    product_id = await _make_product(session, "Reconciliation Assistant")
+    lead = _lead("ada@example.test")
+    session.add(lead)
+    await session.flush()
+    _, identity_version = await learning_prompts.get_prompt(
+        session, key=_SENDER_IDENTITY_KEY, default="Alex Reyes"
+    )
+    await session.commit()
+
+    sent_at = datetime.now(UTC) - timedelta(days=ATTRIBUTION_WINDOW_DAYS + 1)
+    outreach_id = await repository.record_outreach(
+        session,
+        lead_id=lead.id,
+        subject="A tool for reconciliation",
+        status="sent",
+        product_id=product_id,
+        sender_identity_version_id=identity_version,
+    )
+    await session.execute(
+        OutreachLog.__table__.update()
+        .where(OutreachLog.id == outreach_id)
+        .values(
+            sent_at=sent_at, bounced_at=datetime.now(UTC) - timedelta(days=ATTRIBUTION_WINDOW_DAYS)
+        )
+    )
+    await session.commit()
+
+    report = await reconcile(session)
+
+    assert report.identity_episodes == 0
+    successes, total = await episode_counts(session, identity_version)
+    assert (successes, total) == (0, 0)

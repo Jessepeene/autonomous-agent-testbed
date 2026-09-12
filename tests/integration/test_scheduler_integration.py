@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from factory.hitl.telegram import NullNotifier
@@ -34,7 +35,7 @@ from factory.sandbox.disabled import DisabledSandbox
 from factory.settings import EngineName, Settings
 from factory.state import db as db_module
 from factory.state import repository
-from factory.state.orm import Base
+from factory.state.orm import Base, Task
 from factory.state.schemas import ProductStatus, ScoredIdea, TaskKind, TaskStatus
 from factory.supervisor.context import FactoryContext
 from factory.supervisor.scheduler import Scheduler
@@ -194,6 +195,92 @@ async def test_every_live_product_gets_its_own_harvest_task(
     await session.commit()
 
     assert await repository.count_pending_tasks(session, EngineName.MARKETING) == 2
+
+
+async def test_every_live_product_gets_a_daily_browser_review(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """Deliberately on this unconditional sweep rather than `backlog.py`'s
+    CATALOGUE: that one is only enqueued from `graph.py::_backlog`, reached solely
+    on IDLE_BACKLOG/HOLD_DISCOVERY, so a *busy* factory would never review its
+    live products at all -- exactly when a shipped defect is most likely to be
+    missed."""
+    product_id = await _make_live_product(session, "Reconciliation Assistant")
+    await session.commit()
+
+    ctx = _ctx(enabled={EngineName.DEVELOPMENT}, workspace_root=tmp_path)
+    scheduler = Scheduler(ctx, graph=None)
+
+    await scheduler._schedule_periodic(session)
+    await session.commit()
+
+    reviews = (
+        (
+            await session.execute(
+                select(Task).where(Task.kind == TaskKind.REVIEW_LIVE_PRODUCT.value)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(reviews) == 1
+    assert reviews[0].product_id == product_id
+
+
+async def test_the_live_review_is_not_duplicated_within_the_same_day(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    await _make_live_product(session, "Reconciliation Assistant")
+    await session.commit()
+
+    ctx = _ctx(enabled={EngineName.DEVELOPMENT}, workspace_root=tmp_path)
+    scheduler = Scheduler(ctx, graph=None)
+
+    await scheduler._schedule_periodic(session)
+    await scheduler._schedule_periodic(session)
+    await session.commit()
+
+    reviews = (
+        (
+            await session.execute(
+                select(Task).where(Task.kind == TaskKind.REVIEW_LIVE_PRODUCT.value)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(reviews) == 1
+
+
+async def test_a_deferred_task_does_not_count_as_pending_work(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """`count_pending_tasks` backs the Orchestrator's snapshot, and a task deferred
+    into the future cannot be claimed -- counting it makes the queue look like it
+    never drains. Observed live: 45 "Factory is stuck" escalations in three hours,
+    every one counting 16 tasks deliberately deferred for 30 days. The provider
+    circuit breaker sharpens this: pausing a provider defers its tasks, which under
+    the old count looked exactly like a stall."""
+    task_id = await repository.enqueue_task(
+        session,
+        kind=TaskKind.RECONCILE_REVENUE,
+        engine=EngineName.FINANCE,
+        idempotency_key="deferred-not-pending",
+        payload={},
+    )
+    assert task_id is not None
+    assert await repository.count_pending_tasks(session, EngineName.FINANCE) == 1
+
+    await repository.defer_task(
+        session, task_id, not_before=datetime.now(UTC) + timedelta(days=30)
+    )
+    await session.commit()
+
+    assert await repository.count_pending_tasks(session, EngineName.FINANCE) == 0
+    # And it is genuinely unclaimable, which is the property the count must match.
+    assert (
+        await repository.claim_next_task(session, worker_id="w", engines=[EngineName.FINANCE])
+    ) is None
 
 
 async def test_housekeeping_runs_all_cadences_together(

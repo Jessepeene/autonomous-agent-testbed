@@ -141,6 +141,7 @@ async def send_email(
     subject: str,
     body: str,
     settings: Settings | None = None,
+    from_address: str | None = None,
     unsubscribe_url: str | None = None,
     tracking_id: str | None = None,
 ) -> SendResult:
@@ -153,6 +154,12 @@ async def send_email(
     caller ahead of the row's own insert — see ``outreach.py::send_to_lead``), so
     Mailgun's webhook can report a bounce or complaint against the exact send that
     caused it.
+
+    ``from_address`` overrides ``settings.outbound_from_address`` when given — e.g.
+    ``outreach.py::send_to_lead`` composes a display name from the learning loop
+    around the fixed mailbox. Callers that don't need per-send identity (e.g.
+    transactional confirmation emails) can omit it and get the bare mailbox as
+    before.
     """
     settings = settings or get_settings()
     recipient = to.strip().lower()
@@ -169,7 +176,7 @@ async def send_email(
         return SendResult(False, f"recipient matches blacklist rule {rule!r}")
 
     # 2. Sender identity is a legal requirement, not a nicety.
-    from_address = settings.outbound_from_address
+    from_address = from_address or settings.outbound_from_address
     if not from_address:
         return SendResult(False, "OUTBOUND_FROM_ADDRESS is not configured")
 

@@ -5,6 +5,7 @@ import { FinanceSpend } from "./views/FinanceSpend";
 import { GrowthOutreach } from "./views/GrowthOutreach";
 import { LearningLoop } from "./views/LearningLoop";
 import { Interrupts } from "./views/Interrupts";
+import { Integrations } from "./views/Integrations";
 
 interface MainContentProps {
   activeTab: string;
@@ -20,6 +21,7 @@ export function MainContent({ activeTab }: MainContentProps) {
       {activeTab === "growth" && <GrowthOutreach />}
       {activeTab === "learning" && <LearningLoop />}
       {activeTab === "interrupts" && <Interrupts />}
+      {activeTab === "integrations" && <Integrations />}
     </div>
   );
 }

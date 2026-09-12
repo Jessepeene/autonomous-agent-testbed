@@ -95,6 +95,25 @@ def jaccard(left: frozenset[str], right: frozenset[str]) -> float:
     return intersection / len(left | right)
 
 
+def find_cluster_for_source_url(clusters: list[Cluster], source_url: str) -> Cluster | None:
+    """The cluster an idea's ``source_url`` actually came from, or ``None`` if
+    it matches no real signal in any cluster -- shared by `discovery/graph.py
+    ::_evidence_count_for` and `discovery/score.py::discriminate` (Tier 2
+    finding #7, system-wide verification plan), so both "how many signals
+    corroborate this idea" and "what did the raw evidence actually say" trace
+    back through the identical match, rather than two independently
+    maintained copies of the same lookup silently drifting apart. Trailing
+    slash tolerant, matching `_evidence_count_for`'s own established
+    convention -- pydantic's `HttpUrl` normalisation can add one a raw
+    signal URL never had.
+    """
+    target = source_url.rstrip("/")
+    for cluster in clusters:
+        if any(signal.url.rstrip("/") == target for signal in cluster.signals):
+            return cluster
+    return None
+
+
 def cluster_signals(
     signals: list[Signal],
     *,

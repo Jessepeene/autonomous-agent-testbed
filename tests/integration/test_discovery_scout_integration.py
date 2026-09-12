@@ -59,6 +59,26 @@ async def _reset_global_engine() -> AsyncIterator[None]:
     await db_module.dispose_engine()
 
 
+@pytest.fixture(autouse=True)
+def _stub_http_get_for_signal_grounding(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`submit_signal` now fetches the real URL and checks the quote against
+    it (Tier 2 finding #9, system-wide verification plan) -- stubbed here so
+    every test in this file that submits `_submit_signal_turn`'s default
+    quote (or a variant it also carries) is grounded without a real network
+    call. Tests exercising the grounding check itself override this per-test.
+    """
+    from factory.tools import builtin
+
+    async def fake_http_get(url: str) -> dict[str, object]:
+        return {
+            "status_code": 200,
+            "url": url,
+            "body": "<html>I spent hours manually reconciling this every single week.</html>",
+        }
+
+    monkeypatch.setattr(builtin, "http_get", fake_http_get)
+
+
 def _ctx(*, workspace_root: Path, gemini: FakeProvider, **overrides: object) -> FactoryContext:
     settings = Settings(
         database_url=DATABASE_URL,
@@ -168,16 +188,24 @@ async def test_submit_signal_records_a_row_scoped_to_task_id(
     session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from factory.settings import get_settings
+    from factory.tools import builtin
     from factory.tools.discovery import submit_signal
 
     monkeypatch.setenv("DATABASE_URL", DATABASE_URL or "")
     monkeypatch.setenv("GEMINI_API_KEY", "test-key")
     get_settings.cache_clear()
 
+    quote = "We still do this in a spreadsheet every Friday."
+
+    async def fake_http_get(url: str) -> dict[str, object]:
+        return {"status_code": 200, "url": url, "body": f"<html>{quote}</html>"}
+
+    monkeypatch.setattr(builtin, "http_get", fake_http_get)
+
     result = await submit_signal(
         task_id="task-x",
         title="Manual invoice reconciliation",
-        quote="We still do this in a spreadsheet every Friday.",
+        quote=quote,
         url="https://example.test/review/1",
         source_label="g2_reviews",
         engagement=3,
@@ -188,6 +216,40 @@ async def test_submit_signal_records_a_row_scoped_to_task_id(
     assert len(rows) == 1
     assert rows[0].source == "g2_reviews"
     assert rows[0].engagement == 3
+
+    get_settings.cache_clear()
+
+
+async def test_submit_signal_rejects_a_quote_not_actually_on_the_page(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tier 2 finding #9, system-wide verification plan: DISCOVERY_SCOUT has
+    the identical `http` tool and identical hallucination risk as
+    `marketing/providers/website.py`'s extraction, which already has this
+    exact backstop."""
+    from factory.settings import get_settings
+    from factory.tools import builtin
+    from factory.tools.discovery import submit_signal
+
+    monkeypatch.setenv("DATABASE_URL", DATABASE_URL or "")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    get_settings.cache_clear()
+
+    async def fake_http_get(url: str) -> dict[str, object]:
+        return {"status_code": 200, "url": url, "body": "<html>completely unrelated content</html>"}
+
+    monkeypatch.setattr(builtin, "http_get", fake_http_get)
+
+    result = await submit_signal(
+        task_id="task-z",
+        title="Manual invoice reconciliation",
+        quote="A sentence that was never actually on this page.",
+        url="https://example.test/review/1",
+        source_label="g2_reviews",
+    )
+
+    assert "error" in result
+    assert await repository.drain_scout_signals(session, "task-z") == []
 
     get_settings.cache_clear()
 

@@ -155,6 +155,15 @@ async def plain_language_error(
     with no code access. An escalation must never be blocked by this call: on
     any `LLMError` this falls back to a truncated, clearly-labelled version of
     the raw text instead of raising.
+
+    The returned text always carries a raw excerpt alongside the paraphrase
+    (Tier 3 finding #12, system-wide verification plan) -- a real incident
+    this session found a paraphrase mischaracterizing a wrong-env-var-name bug
+    as "hardcoded price," with no raw text anywhere a human could check it
+    against without independently querying the database. The excerpt is the
+    *tail* of the raw text, not the head: a stack trace or test-failure dump's
+    most specific, actionable line (the actual assertion or exception) is
+    almost always at the end, with setup/collection noise at the start.
     """
     try:
         result = await ctx.llm.parse(
@@ -168,7 +177,7 @@ async def plain_language_error(
     except LLMError as exc:
         log.warning("hitl.plain_language_failed", detail=str(exc)[:200])
         return f"(Technical detail, unedited): {raw_text[:500]}"
-    return result.explanation
+    return f"{result.explanation}\n\n(Raw detail, for reference): {raw_text[-500:]}"
 
 
 async def deliver_pending(session: AsyncSession, notifier: Notifier) -> int:

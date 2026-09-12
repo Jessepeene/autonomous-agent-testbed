@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from factory.agents.roles import AgentRole, RoleName, get_role
+from factory.agents.roles import CALL_SITE_SCOPED_ROLES, AgentRole, RoleName, get_role
 from factory.agents.runtime import AgentResult, AgentRuntime
 from factory.llm.providers.base import ProviderRefusal
 from factory.llm.router import model_for
@@ -50,8 +50,23 @@ def resolve_role(name: str) -> AgentRole:
         raise RoleNotPermitted(f"unknown agent role {name!r}") from exc
 
 
-def can_spawn(ctx: FactoryContext, role: AgentRole) -> tuple[bool, str]:
-    """Whether this role can run right now, given the factory's actual capabilities."""
+def can_spawn(
+    ctx: FactoryContext, role: AgentRole, *, from_own_call_site: bool = False
+) -> tuple[bool, str]:
+    """Whether this role can run right now, given the factory's actual capabilities.
+
+    ``from_own_call_site`` is the authorisation a scoped role's one legitimate
+    caller passes to say "I am that caller" -- see CALL_SITE_SCOPED_ROLES.
+    """
+    if role.name in CALL_SITE_SCOPED_ROLES and not from_own_call_site:
+        # These roles are only correct inside the one caller that supplies what they
+        # depend on -- a held product lock and a workspace snapshot (WORKSPACE_SURGEON,
+        # SEO_OPTIMIZER), a Discovery cycle's own task_id (DISCOVERY_SCOUT), or a
+        # private registry holding a live browser page (AUDITOR). They are already
+        # filtered out of `role_catalogue()`, but that only means the Orchestrator is
+        # never *shown* them -- it does not stop a model emitting the name anyway, and
+        # until this guard existed `resolve_role` would happily hand one over.
+        return False, f"{role.name.value} may only run from its own call site, not a generic spawn"
     if "sandbox" in role.tool_categories and not ctx.docker_available:
         return False, "role needs a sandbox and no Docker daemon is reachable"
     if role.mutating and ctx.dry_run:
@@ -63,15 +78,22 @@ async def spawn(
     ctx: FactoryContext,
     session: AsyncSession | None,
     request: SpawnRequest,
+    *,
+    from_own_call_site: bool = False,
 ) -> AgentResult:
     """Create, run, and discard one ephemeral agent.
 
     Anything the agent concludes is written to memory before the result is returned,
     so the next agent that faces the same situation starts from what this one learned
     rather than rediscovering it.
+
+    ``from_own_call_site=True`` is how a CALL_SITE_SCOPED_ROLES role's one legitimate
+    caller authorises itself (currently `discovery/scout.py`, which supplies the
+    task_id DISCOVERY_SCOUT's `submit_signal` requires). Defaults to False so an
+    Orchestrator-chosen role can never reach one.
     """
     role = resolve_role(request.role)
-    permitted, reason = can_spawn(ctx, role)
+    permitted, reason = can_spawn(ctx, role, from_own_call_site=from_own_call_site)
     if not permitted:
         log.info("agent.spawn_refused", role=role.name.value, reason=reason)
         return AgentResult(
@@ -116,7 +138,15 @@ async def spawn(
     except ProviderRefusal:
         raise
 
-    if session is not None and result.succeeded and result.answer.strip():
+    # `result.used_tools`, not just `result.succeeded`: Tier 1 finding #1 of the
+    # system-wide verification plan. `succeeded` means only "the model emitted a
+    # final turn with no tool calls and non-empty text" -- a fully hallucinated
+    # answer with zero tool calls satisfied it exactly as well as one backed by
+    # real investigation, and this was the *only* gate before a lesson became
+    # permanent shared memory every future agent recalls as established fact.
+    # Every role (`agents/roles.py`) has at least one real tool category, so
+    # this never blocks a role that was designed to be tool-free -- none are.
+    if session is not None and result.succeeded and result.used_tools and result.answer.strip():
         await memory_store.remember(
             session,
             content=result.answer[: memory_store.MAX_MEMORY_CHARS],

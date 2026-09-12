@@ -26,16 +26,22 @@ async def test_returns_the_llms_explanation_on_success(
         ),
     )
 
+    raw_text = "AssertionError: assert 400 == 200\nSignature verification failed"
     result = await plain_language_error(
         ctx,
-        "AssertionError: assert 400 == 200\nSignature verification failed",
+        raw_text,
         context="Automated repair on 'Checkout Tool' did not converge.",
     )
 
-    assert result == (
+    assert result.startswith(
         "The checkout flow's Stripe signature check keeps failing, which usually "
         "means the webhook secret is misconfigured."
     )
+    # Tier 3 finding #12: the raw text is always still there too, so a human
+    # who suspects the paraphrase mischaracterized the real error has
+    # something to check it against.
+    assert "(Raw detail, for reference)" in result
+    assert raw_text in result
     # The raw text and the context both reached the model.
     call = gemini_fake.calls[-1]
     assert "AssertionError" in call["prompt"]

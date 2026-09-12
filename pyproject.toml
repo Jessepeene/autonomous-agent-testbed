@@ -74,5 +74,8 @@ warn_unreachable = true
 disallow_untyped_decorators = false
 
 [[tool.mypy.overrides]]
-module = ["google.genai.*", "stripe.*", "telegram.*", "langgraph.*"]
+# `playwright.*` is an optional extra (see [project.optional-dependencies]),
+# installed in the Docker image but not in a plain dev/test environment -- the one
+# module that imports it does so lazily, inside a function, for exactly that reason.
+module = ["google.genai.*", "stripe.*", "telegram.*", "langgraph.*", "playwright.*"]
 ignore_missing_imports = true

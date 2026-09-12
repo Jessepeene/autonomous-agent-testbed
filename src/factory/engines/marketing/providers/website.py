@@ -47,6 +47,7 @@ from factory.logging import get_logger
 from factory.settings import EngineName, Settings, TaskType
 from factory.state import repository
 from factory.supervisor.context import FactoryContext
+from factory.verification.grounding import claim_in_source, claim_loosely_in_source
 
 log = get_logger(__name__)
 
@@ -261,16 +262,6 @@ def _strip_html(html: str) -> str:
     return extractor.text()
 
 
-def _normalize(text: str) -> str:
-    return " ".join(text.split()).lower()
-
-
-def _found_in_source(value: str, source_text: str) -> bool:
-    """Whitespace/case-insensitive substring check -- the backstop against the
-    model inventing a contact that was never actually on the page (hallucination,
-    or a prompt-injection attempt in the scraped text). Ported as-is from
-    `reference files/lead_scout.py::_found_in_source`."""
-    return _normalize(value) in _normalize(source_text)
 
 
 def _domain_from_url(url: str) -> str | None:
@@ -433,8 +424,8 @@ async def _fetch_page_text(
 class WebsiteContactProvider:
     """Search the web for a product's audience, scrape their own contact/team
     pages or an industry directory, extract candidates via an LLM (holding every
-    extraction to `_found_in_source`), and fall back to Hunter's Email Finder only
-    when a named lead's page carries no email at all."""
+    extraction to `verification.grounding.claim_in_source`), and fall back to
+    Hunter's Email Finder only when a named lead's page carries no email at all."""
 
     name = "web:search_scrape"
 
@@ -625,10 +616,11 @@ class WebsiteContactProvider:
         `reference files/lead_scout.py::_enrich_email`, including the domain-
         ownership guards that prevented a real, wrong send in production.
 
-        `find_email` raises `ProviderAuthError`/`ProviderRequestError` on a
-        rejected key/malformed request -- deliberately left unhandled here so
-        they propagate to `search()`'s caller exactly like a Serper rejection
-        does, matching every other provider in this codebase."""
+        `find_email` raises `ProviderAuthError`/`ProviderRequestError`/
+        `ProviderQuotaExceeded` on a rejected key/malformed request/exhausted
+        quota -- deliberately left unhandled here so they propagate to
+        `search()`'s caller exactly like a Serper rejection does, matching
+        every other provider in this codebase."""
         split = _split_name(name)
         domain = _domain_from_url(source_url)
         if not split or not domain:
@@ -645,13 +637,23 @@ class WebsiteContactProvider:
     ) -> LeadCandidate | None:
         if lead.confidence < _MIN_CONFIDENCE:
             return None
-        if not _found_in_source(lead.company, page_text):
+        if not claim_in_source(lead.company, page_text):
             return None
-        if lead.name and not _found_in_source(lead.name, page_text):
+        if lead.name and not claim_in_source(lead.name, page_text):
             return None
-        if lead.email and not _found_in_source(lead.email, page_text):
+        if lead.email and not claim_in_source(lead.email, page_text):
             return None
         if not lead.name:
+            return None
+        # Tier 1 finding #4, system-wide verification plan: job_title was the
+        # one field extracted with no grounding check at all, despite being
+        # precisely the field the LIA uses to argue "role-to-utility link"
+        # (compliance/assessor.py). A loose match, not `claim_in_source`'s
+        # exact one: unlike company/name/email, a title is routinely
+        # paraphrased ("Head of Finance" vs. the page's own "Finance Lead"),
+        # so requiring a byte-exact substring would false-negative on most
+        # genuinely correct extractions.
+        if lead.job_title and not claim_loosely_in_source(lead.job_title, page_text):
             return None
         split = _split_name(lead.name)
         if split is None:

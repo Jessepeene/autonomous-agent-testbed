@@ -9,9 +9,38 @@ reasoning as `seo.py`'s own tests.
 
 from __future__ import annotations
 
-from factory.engines.development.contract import missing_contract_requirements
+import pytest
+
+from factory.engines.development.contract import _env_read_pattern, missing_contract_requirements
 
 _PRODUCT_ID = "prod-1"
+
+
+# --- the shared env-read pattern, all three real Python idioms -------------------
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        'os.environ["X"]',
+        "os.environ['X']",
+        'os.getenv("X")',
+        'os.getenv("X", "default")',
+        'os.environ.get("X")',
+        'os.environ.get("X", "default")',
+    ],
+)
+def test_env_read_pattern_matches_every_real_python_idiom(snippet: str) -> None:
+    """Real bug, found live: the pattern originally covered only the first two
+    idioms. `os.environ.get(...)` -- what the model actually wrote -- silently
+    never matched, false-positiving a fully correct product into an
+    unnecessary heal cycle and a real human escalation."""
+    assert _env_read_pattern("X").search(snippet)
+
+
+def test_env_read_pattern_does_not_match_a_bare_mention() -> None:
+    assert not _env_read_pattern("X").search("# TODO: read X from the environment")
+
 
 _GOOD_BACKEND_PY = (
     "import os\n"
@@ -69,6 +98,22 @@ def test_a_bare_getenv_call_also_satisfies_the_price_check() -> None:
     assert not any("PRODUCT_PRICE_CENTS" in item for item in missing)
 
 
+def test_an_os_environ_get_call_also_satisfies_the_price_check() -> None:
+    """Real bug, found live: the original regex only covered `os.environ[...]`
+    and `os.getenv(...)`, missing the equally common, equally correct
+    `os.environ.get(...)` idiom entirely -- which is what the model actually
+    wrote. A product whose Stripe key and price were both wired correctly
+    got a false-positive `contract_incomplete` rejection, burned an
+    unnecessary heal cycle on it, and escalated to a human over a bug that
+    was never there."""
+    sources = dict(_GOOD_REAL_MVP_SOURCES)
+    sources["app/main.py"] = _GOOD_BACKEND_PY.replace(
+        "os.environ['PRODUCT_PRICE_CENTS']", 'os.environ.get("PRODUCT_PRICE_CENTS")'
+    )
+    missing = _missing(sources)
+    assert not any("PRODUCT_PRICE_CENTS" in item for item in missing)
+
+
 def test_the_env_var_name_inside_a_comment_does_not_satisfy_the_check() -> None:
     """The whole point of requiring an actual read pattern, not a bare substring
     match: a model that merely left a TODO must still be caught."""
@@ -95,6 +140,15 @@ def test_a_bare_getenv_call_also_satisfies_the_stripe_key_check() -> None:
     sources = dict(_GOOD_REAL_MVP_SOURCES)
     sources["app/main.py"] = _GOOD_BACKEND_PY.replace(
         "os.environ['STRIPE_API_KEY']", 'os.getenv("STRIPE_API_KEY")'
+    )
+    missing = _missing(sources)
+    assert not any("STRIPE_API_KEY" in item for item in missing)
+
+
+def test_an_os_environ_get_call_also_satisfies_the_stripe_key_check() -> None:
+    sources = dict(_GOOD_REAL_MVP_SOURCES)
+    sources["app/main.py"] = _GOOD_BACKEND_PY.replace(
+        "os.environ['STRIPE_API_KEY']", 'os.environ.get("STRIPE_API_KEY")'
     )
     missing = _missing(sources)
     assert not any("STRIPE_API_KEY" in item for item in missing)

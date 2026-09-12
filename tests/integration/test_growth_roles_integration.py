@@ -399,6 +399,10 @@ async def test_start_ab_test_action_starts_and_then_refuses_a_second(
     get_settings.cache_clear()
 
     product_id = await _make_live_product(session, "tool-start-ab")
+    # Finding #11: start_ab_test_action now refuses on real near-zero traffic --
+    # seed enough page views for the "should proceed" path this test exercises.
+    for _ in range(5):
+        await repository.record_page_view(session, product_id=product_id, path="/")
     await session.commit()
 
     first = await start_ab_test_action(product_id, "Emphasize speed", "Emphasize price")
@@ -406,6 +410,39 @@ async def test_start_ab_test_action_starts_and_then_refuses_a_second(
 
     second = await start_ab_test_action(product_id, "Another angle", "Yet another angle")
     assert second["started"] is False
+
+    get_settings.cache_clear()
+
+
+async def test_start_ab_test_action_refuses_on_real_near_zero_traffic(
+    session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tier 2 finding #11, system-wide verification plan: GROWTH_ANALYST is
+    prompted to check `read_product_growth` before deciding to test, but
+    nothing re-derived that the decision actually matched what that call
+    returned -- an agent's own "traffic looks sufficient" claim was never
+    checked against the real page-view count. No page views are seeded here,
+    so this must refuse regardless of what the caller claims."""
+    from factory.settings import get_settings
+    from factory.tools.growth import start_ab_test_action
+
+    monkeypatch.setenv("DATABASE_URL", DATABASE_URL or "")
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    get_settings.cache_clear()
+
+    product_id = await _make_live_product(session, "tool-start-ab-no-traffic")
+    await session.commit()
+
+    result = await start_ab_test_action(product_id, "Emphasize speed", "Emphasize price")
+
+    assert result["started"] is False
+    assert "traffic" in result["reason"]
+    ab_tests = (
+        (await session.execute(select(ABTest).where(ABTest.product_id == product_id)))
+        .scalars()
+        .all()
+    )
+    assert ab_tests == []
 
     get_settings.cache_clear()
 
@@ -508,6 +545,10 @@ async def test_growth_review_spawns_growth_analyst_and_marks_reviewed(
     get_settings.cache_clear()
 
     product_id = await _make_live_product(session, "growth-review-e2e")
+    # Finding #11: start_ab_test_action now refuses on real near-zero traffic --
+    # seed enough page views for the scripted tool call below to actually start.
+    for _ in range(5):
+        await repository.record_page_view(session, product_id=product_id, path="/")
     await session.commit()
 
     provider = FakeProvider(name=Provider.GEMINI)

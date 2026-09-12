@@ -1,6 +1,6 @@
 """The Bug Council — the deploy gate.
 
-Five reviewers, unanimity required. Two of them are deterministic scanners rather
+Six reviewers, unanimity required. Two of them are deterministic scanners rather
 than model calls, because "did a credential get committed" and "does this ask for
 root" are questions with correct answers that must not depend on a model's mood:
 
@@ -8,6 +8,14 @@ root" are questions with correct answers that must not depend on a model's mood:
 * **privilege** — pattern scan for privilege escalation and sandbox escape, in code.
 * **security**, **performance**, **dependencies** — Claude reviewers, which reason
   about logic rather than pattern-match.
+* **quality** — a Claude reviewer with a deliberately different mandate from the
+  four above: not "is this correct/safe/fast" but "would the business owner
+  hesitate to hit publish." A hardcoded stale copyright year, unreplaced template
+  text, or a price that contradicts itself between two pages trips none of the
+  other five categories -- none of them are security, performance, dependency,
+  secret, or privilege issues -- so nothing caught them until this reviewer
+  existed. See its own prompt below for why this is scoped away from *any*
+  fact requiring the reviewer to know today's actual date.
 
 The security reviewer is explicitly tasked with unbounded-loop and compute-burn
 detection: this code runs unattended on a metered container, so an accidental
@@ -41,8 +49,8 @@ log = get_logger(__name__)
 #: which silently dropped files (and, per `render_sources`, gave no indication it
 #: had) on any build even modestly larger than a small scaffold; `sorted()` order
 #: means whatever sorts alphabetically last (often `tests/`) was always what got
-#: cut. Still bounded, not unlimited: three reviewers each pay for this corpus
-#: (the first read is cached for the other two, but the first write and any cache
+#: cut. Still bounded, not unlimited: every model reviewer pays for this corpus
+#: (the first read is cached for the rest, but the first write and any cache
 #: miss are not free), and a pathological build should not make one review
 #: unboundedly expensive.
 _MAX_REVIEW_CHARS = 300_000
@@ -82,6 +90,35 @@ licences incompatible with commercial use (AGPL, SSPL), and any dependency that 
 not actually imported anywhere.
 
 Set approved=false for an unvetted or unnecessary dependency.""",
+    ReviewCategory.QUALITY: """\
+You are the quality reviewer on a deploy gate -- the only one of five reviewers \
+whose question is not "is this correct, safe, or fast" but "you are the business \
+owner about to show this to a real paying customer for the first time; would you \
+hesitate to hit publish?"
+
+Look for:
+- A literal year hardcoded in a copyright notice, "as of ...", or similar date \
+claim, instead of computed at request/render time (e.g. `new Date().getFullYear()` \
+in JS, `datetime.now().year` in Python). Flag every instance you find, regardless \
+of which specific year it is -- you were not told today's real date and must not \
+guess it, so the defect is the hardcoding itself, not whether the specific number \
+looks wrong to you.
+- Placeholder or template text that was never actually customized for this product \
+-- "Lorem ipsum", "{{PLACEHOLDER}}", "Your Company Name", "Company description \
+goes here", a stock image filename left unrenamed, or similar.
+- The same fact stated two different, contradictory ways in different files -- the \
+product name spelled differently in the header vs. the footer, a price shown on \
+the landing page that does not match the price actually charged at checkout, a \
+feature claimed in marketing copy that the code does not actually implement.
+- Copy that reads unfinished or broken to a human eye even though it would pass \
+every automated check -- a heading that doesn't match its section, a button whose \
+label doesn't describe what it does, obviously garbled or truncated text.
+
+Do not flag: the specific choice of design, wording style, or copy you would have \
+written differently -- only concrete, checkable defects a careful business owner \
+would actually stop and fix before publishing, not matters of taste.
+
+Set approved=false for any defect you would genuinely hesitate to publish over.""",
 }
 
 # --- deterministic scanners -------------------------------------------------
@@ -308,6 +345,23 @@ async def _model_review(
         task_id=task_id,
         cache_prefix=corpus,
     )
+
+
+async def review_live_content(
+    ctx: FactoryContext, sources: dict[str, str], *, task_id: str | None = None
+) -> ReviewVerdict:
+    """The `QUALITY` reviewer alone, against arbitrary fetched content rather
+    than a full pre-deploy source tree -- reused by
+    `maintenance.py`'s periodic live-product content-freshness pass (Tier 0
+    finding #0b, system-wide verification plan) so a year that was correct at
+    launch but has gone stale since still gets looked at by *something*. The
+    other four reviewers need real source code (security/performance/
+    dependencies) or don't apply to a live fetch at all (secrets/privilege),
+    so this deliberately runs `QUALITY` alone rather than the full `convene()`.
+    """
+    rendered, truncated = render_sources(sources)
+    corpus = review_corpus(rendered, truncated=truncated)
+    return await _model_review(ctx, ReviewCategory.QUALITY, corpus, task_id=task_id)
 
 
 async def convene(

@@ -13,7 +13,7 @@ import asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from factory.engines.discovery import score
-from factory.engines.discovery.cluster import Cluster, cluster_signals
+from factory.engines.discovery.cluster import Cluster, cluster_signals, find_cluster_for_source_url
 from factory.engines.discovery.scout import scout_signals
 from factory.engines.discovery.sources.base import Signal, Source
 from factory.engines.discovery.sources.github import GitHubIssuesSource
@@ -65,6 +65,8 @@ def _idea_snapshot(
             "score": idea.weighted_score(weights),
             "kept": id(idea) in kept_ids,
             "rejection_reason": idea.rejection_reason,
+            "gut_check_passed": idea.gut_check_passed,
+            "gut_check_reasoning": idea.gut_check_reasoning or None,
         }
         for idea in ideas
     ]
@@ -105,11 +107,8 @@ def _evidence_count_for(idea: ScoredIdea, clusters: list[Cluster]) -> int:
     URL was altered in transit (whitespace, a trailing slash) rather than raising
     -- one idea's evidence count being wrong is not worth failing the whole cycle.
     """
-    target = str(idea.source_url).rstrip("/")
-    for cluster in clusters:
-        if any(signal.url.rstrip("/") == target for signal in cluster.signals):
-            return cluster.size
-    return 0
+    cluster = find_cluster_for_source_url(clusters, str(idea.source_url))
+    return cluster.size if cluster is not None else 0
 
 
 def build_sources(settings: Settings) -> list[Source]:
@@ -201,6 +200,7 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
     scored = await score.discriminate(
         ctx,
         batch,
+        clusters=clusters,
         system=disc_text,
         tunable_parameter_id=disc_version,
         task_id=task.id,
@@ -251,12 +251,31 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
         )
 
     stored = 0
+    unevidenced = 0
     for idea in kept:
+        evidence_count = _evidence_count_for(idea, clusters)
+        if evidence_count == 0:
+            # Tier 2 finding #8, system-wide verification plan: `source_url` is
+            # supposed to be one of the cluster's own signal URLs, copied
+            # verbatim ("never invent one" -- GENERATOR_SYSTEM) -- zero matches
+            # means the generator either paraphrased it or invented it outright,
+            # and this idea's "evidence" is unverifiable. `_evidence_count_for`
+            # has computed and stored this fact since the dedup fix earlier
+            # this session; this is the first time anything actually acts on
+            # it instead of only ever displaying it.
+            log.warning(
+                "discovery.idea_rejected_no_evidence",
+                niche=idea.target_niche,
+                source_url=str(idea.source_url),
+            )
+            unevidenced += 1
+            continue
+
         idea_id = await repository.upsert_idea(
             session,
             idea,
             score=idea.weighted_score(weights),
-            evidence_count=_evidence_count_for(idea, clusters),
+            evidence_count=evidence_count,
         )
         if idea_id is None:
             continue  # already known — de-duplicated by fingerprint
@@ -274,5 +293,5 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
     return (
         f"discovery: {len(signals)} signals ({len(scouted)} scouted) → "
         f"{len(clusters)} clusters → {len(batch.ideas)} candidates → "
-        f"{len(kept)} survivors → {stored} new"
+        f"{len(kept)} survivors → {stored} new ({unevidenced} rejected for no matching evidence)"
     )

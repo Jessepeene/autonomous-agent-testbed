@@ -14,6 +14,7 @@ import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import func, select
@@ -97,7 +98,11 @@ class _RecordingNotifier:
 
 
 def _ctx(
-    *, workspace_root: Path, notifier: _RecordingNotifier, **overrides: object
+    *,
+    workspace_root: Path,
+    notifier: _RecordingNotifier,
+    gemini: FakeProvider | None = None,
+    **overrides: object,
 ) -> FactoryContext:
     settings = Settings(
         database_url=DATABASE_URL,
@@ -106,7 +111,8 @@ def _ctx(
         **overrides,
     )
     llm = LLMClient(
-        ProviderRegistry({Provider.GEMINI: FakeProvider(name=Provider.GEMINI)}), settings=settings
+        ProviderRegistry({Provider.GEMINI: gemini or FakeProvider(name=Provider.GEMINI)}),
+        settings=settings,
     )
     return FactoryContext(
         settings=settings,
@@ -148,6 +154,12 @@ async def test_a_products_first_live_deploy_requests_a_domain(
 ) -> None:
     from factory.engines.development import bug_council
     from factory.engines.development import deploy as deploy_module
+    from factory.engines.development.design_brief import DesignBrief
+
+    async def fake_get(self: httpx.AsyncClient, url: str, **kwargs: object) -> httpx.Response:
+        return httpx.Response(200, text="<html>ok</html>", request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
 
     idea = ScoredIdea(
         problem_statement="Bookkeepers reconcile invoices by hand every week.",
@@ -175,8 +187,17 @@ async def test_a_products_first_live_deploy_requests_a_domain(
     monkeypatch.setattr(bug_council, "convene", fake_convene)
     monkeypatch.setattr(dev_graph.deploy_module, "deploy", fake_deploy)
 
+    gemini = FakeProvider(name=Provider.GEMINI)
+    gemini.register(
+        DesignBrief,
+        DesignBrief(
+            palette=["#0B0E14", "#E2A33D"],
+            typography="A bold sans-serif.",
+            tone="Minimal and technical.",
+        ),
+    )
     notifier = _RecordingNotifier()
-    ctx = _ctx(workspace_root=tmp_path, notifier=notifier)
+    ctx = _ctx(workspace_root=tmp_path, notifier=notifier, gemini=gemini)
     ctx.sandbox = _PassingSandbox()  # type: ignore[assignment]
 
     (tmp_path / "ws-first").mkdir()
@@ -228,6 +249,12 @@ async def test_a_redeploy_of_an_already_asked_product_never_asks_again(
 ) -> None:
     from factory.engines.development import bug_council
     from factory.engines.development import deploy as deploy_module
+    from factory.engines.development.design_brief import DesignBrief
+
+    async def fake_get(self: httpx.AsyncClient, url: str, **kwargs: object) -> httpx.Response:
+        return httpx.Response(200, text="<html>ok</html>", request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
 
     product_id = await _make_live_product(session, "domain-redeploy")
     await repository.set_domain_status(session, product_id, "pending")
@@ -249,8 +276,17 @@ async def test_a_redeploy_of_an_already_asked_product_never_asks_again(
     monkeypatch.setattr(bug_council, "convene", fake_convene)
     monkeypatch.setattr(dev_graph.deploy_module, "deploy", fake_deploy)
 
+    gemini = FakeProvider(name=Provider.GEMINI)
+    gemini.register(
+        DesignBrief,
+        DesignBrief(
+            palette=["#0B0E14", "#E2A33D"],
+            typography="A bold sans-serif.",
+            tone="Minimal and technical.",
+        ),
+    )
     notifier = _RecordingNotifier()
-    ctx = _ctx(workspace_root=tmp_path, notifier=notifier)
+    ctx = _ctx(workspace_root=tmp_path, notifier=notifier, gemini=gemini)
     ctx.sandbox = _PassingSandbox()  # type: ignore[assignment]
 
     (tmp_path / "ws-redeploy").mkdir()

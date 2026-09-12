@@ -95,9 +95,25 @@ class WeightsCandidate(Contract):
         return self
 
 
+class SenderIdentityCandidate(Contract):
+    #: Two space-separated name-shaped tokens, nothing else -- this is the *only*
+    #: gate a candidate sender name passes through before it starts appearing in a
+    #: raw email `From` header (see `marketing/outreach.py::send_to_lead`): the
+    #: content-safety checks in `compliance/rules.py` only ever inspect the message
+    #: body, never the sender name. The pattern excludes `<`, `>`, `@`, digits, and
+    #: control/CRLF characters *by construction*, not by omission -- a candidate
+    #: like "Alex Reyes <attacker@evil.test>" would otherwise silently override the
+    #: real mailbox, and a CRLF would allow header injection.
+    no_change_recommended: bool
+    sender_name: str = Field(
+        min_length=4, max_length=60, pattern=r"^[A-Za-z][A-Za-z.'-]*(?: [A-Za-z][A-Za-z.'-]*)+$"
+    )
+    rationale: str = Field(min_length=20, max_length=1000)
+
+
 _EXTRACT_SYSTEM = """\
 You extract a structured mutation proposal from an analyst's free-text review of a \
-prompt or a set of scoring weights.
+prompt, a set of scoring weights, or a sender display name.
 
 If the analyst recommended no change, set no_change_recommended=true and leave the \
 other fields at safe defaults. Never invent a recommendation the analyst did not \
@@ -179,6 +195,7 @@ async def propose_mutations(ctx: FactoryContext, session: AsyncSession, task: Ta
             continue
 
         is_weights = key.endswith(":SCORING_WEIGHTS")
+        is_identity = key.endswith(":SENDER_IDENTITY")
         rationale: str
         value: dict[str, float | str]
         no_change: bool
@@ -201,6 +218,18 @@ async def propose_mutations(ctx: FactoryContext, session: AsyncSession, task: Ta
                     "adoption_ease": weights_candidate.adoption_ease,
                     "defensibility": weights_candidate.defensibility,
                 }
+            elif is_identity:
+                identity_candidate = await ctx.llm.parse(
+                    SenderIdentityCandidate,
+                    task_type=TaskType.ANALYSIS,
+                    system=_EXTRACT_SYSTEM,
+                    prompt=result.answer,
+                    engine=EngineName.SUPERVISOR,
+                    task_id=task.id,
+                )
+                no_change = identity_candidate.no_change_recommended
+                rationale = identity_candidate.rationale
+                value = {"text": identity_candidate.sender_name}
             else:
                 prompt_candidate = await ctx.llm.parse(
                     PromptCandidate,

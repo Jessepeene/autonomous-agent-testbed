@@ -9,6 +9,7 @@ from __future__ import annotations
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from factory.engines.compliance import assessor
+from factory.engines.compliance.rules import idea_risk_category_hits
 from factory.hitl import interrupts
 from factory.logging import get_logger
 from factory.memory import store as memory_store
@@ -82,8 +83,19 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
     )
 
     if assessment.status is ComplianceStatus.APPROVED:
-        await repository.set_idea_status(session, idea_id, "approved")
-        return await _create_validation(session, ctx, row)
+        risk_hits = idea_risk_category_hits(idea.problem_statement, idea.monetization_hypothesis)
+        if risk_hits:
+            # Tier 2 finding #6, system-wide verification plan: a deterministic
+            # backstop the model's own APPROVED verdict cannot talk past,
+            # mirroring the spam-phrase backstop already behind outreach
+            # copy's prompt-level instructions. REJECTED is left untouched --
+            # it is already the safe, conservative outcome (see the comment
+            # on the confidence check below) and does not need a second gate.
+            log.info("compliance.idea_risk_category_override", idea_id=idea_id, hits=risk_hits)
+            assessment = assessment.model_copy(update={"status": ComplianceStatus.FLAG_FOR_REVIEW})
+        else:
+            await repository.set_idea_status(session, idea_id, "approved")
+            return await _create_validation(session, ctx, row)
 
     if assessment.status is ComplianceStatus.REJECTED:
         await repository.set_idea_status(session, idea_id, "rejected")
@@ -99,8 +111,17 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
         reason=InterruptReason.LEGAL_UNCERTAINTY,
         subject=f"Idea needs legal review: {idea.target_niche}"[:200],
         detail=(
-            f"{idea.problem_statement}\n\n"
-            f"Confidence: {assessment.confidence:.2f}\n"
+            # Tier 3 finding #13, system-wide verification plan: the full set
+            # of structured facts the justification below is reasoning about,
+            # rendered from the real Idea row rather than trusted to have been
+            # faithfully repeated by the model's own prose -- a human can spot
+            # a justification that argues about a different niche or a
+            # monetization plan it never actually saw.
+            f"Niche: {idea.target_niche}\n"
+            f"Problem: {idea.problem_statement}\n"
+            f"Monetization: {idea.monetization_hypothesis}\n"
+            f"Source: {idea.source_url}\n"
+            f"Confidence: {assessment.confidence:.2f}\n\n"
             f"{assessment.justification}"
         ),
         headline="⚖️ Legal review needed — new idea",

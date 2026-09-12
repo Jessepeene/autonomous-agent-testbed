@@ -23,6 +23,7 @@ from factory.engines.development import (
     bug_council,
     contract,
     dependencies,
+    design_brief,
     domain,
     repair,
     seo,
@@ -38,6 +39,7 @@ from factory.engines.development.scaffold.generator import (
 )
 from factory.hitl import interrupts
 from factory.learning import prompts as learning_prompts
+from factory.llm.providers.base import LLMError
 from factory.logging import get_logger
 from factory.memory import store as memory_store
 from factory.observability import costs
@@ -47,7 +49,7 @@ from factory.sandbox.runner import (
     is_devops_error,
     resolve_workspace,
 )
-from factory.settings import EngineName, Settings, get_settings
+from factory.settings import EngineName, Settings, TaskType, get_settings
 from factory.state import repository
 from factory.state.orm import ABTest, Idea, Product, Task, new_id
 from factory.state.schemas import (
@@ -141,6 +143,10 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
         return await _attach_domain(ctx, session, task)
     if kind is TaskKind.VERIFY_DOMAIN:
         return await _verify_domain(ctx, session, task)
+    if kind is TaskKind.GENERATE_DESIGN_BRIEF:
+        return await _generate_design_brief(ctx, session, task)
+    if kind is TaskKind.REVIEW_LIVE_PRODUCT:
+        return await _review_live_product(ctx, session, task)
 
     if not ctx.sandbox.available:
         # Fail loudly rather than running model-written code on the host.
@@ -588,6 +594,147 @@ async def _growth_review(ctx: FactoryContext, session: AsyncSession, task: Task)
     return f"development/growth_review: {result.summary()}"
 
 
+_REVIEW_VERDICT_SYSTEM = """\
+You read a QA engineer's account of testing a live web page and extract what they \
+actually concluded.
+
+Set defect_found=true only for something genuinely wrong with the product: the main \
+action does not work (a form that fired no request, or got a 4xx/5xx), a date, year, \
+price or claim that is wrong or stale, placeholder or unfinished content, a dead \
+link, a self-contradiction. Set it false for taste, phrasing, a missing feature \
+nobody promised, or a reviewer who simply ran out of steps without establishing \
+anything -- "I could not finish checking" is not a defect.
+
+When true, write summary and details for an engineer who cannot see the page: what \
+was done, what happened, what should have happened. Use only what the reviewer \
+actually reported -- never invent a symptom, a status code, or a cause they did not \
+state.\
+"""
+
+
+async def _review_live_product(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
+    """Walk one LIVE product with a real browser and commission a fix for anything
+    genuinely wrong -- the Development department's standing product oversight.
+
+    Why this exists alongside the deterministic `audit-live-products` slug rather
+    than replacing it: that check answers "does the URL still answer" (cheaply,
+    reliably, with no LLM call) and then hands the *markup* to a reviewer. Neither
+    half ever presses a button. A live product shipped with a signup form that
+    silently fails on submit, and a hardcoded year that had since gone stale, and
+    both checks called it healthy for three weeks. Reading a page cannot find that;
+    using it can.
+
+    Constructed directly rather than through `spawn()` -- like `repair.py` does for
+    WORKSPACE_SURGEON -- because AUDITOR's tools only exist in a private per-run
+    registry: `BrowserSession` holds the live page across steps, and the report tool
+    is pinned to this product so a model-supplied id cannot redirect a patch at a
+    different one. See CALL_SITE_SCOPED_ROLES.
+    """
+    from factory.agents.roles import get_role
+    from factory.agents.runtime import AgentRuntime
+    from factory.tools.browser import BrowserSession, allowed_origins_for
+    from factory.tools.product_review import ReviewVerdict, queue_review_patch
+
+    product_id = task.product_id or str(task.payload.get("product_id", ""))
+    product = await session.get(Product, product_id) if product_id else None
+    if product is None:
+        return f"development: product {product_id!r} not found for live review"
+    if not product.deploy_url:
+        return f"development: product {product_id} has no deploy_url to review"
+
+    origins = allowed_origins_for(product.deploy_url, product.custom_domain)
+    if not origins:
+        return f"development: product {product_id} has no reviewable origin"
+
+    role = get_role(RoleName.AUDITOR)
+    objective = (
+        f"Review the live product at {product.deploy_url}.\n\n"
+        f"It is meant to be: {product.name}.\n\n"
+        "Open it, work out what it is offering, and then actually try to do that "
+        "thing yourself. Report anything genuinely wrong; if it is fine, say so."
+    )
+    recalled = await memory_store.recall_block(
+        session,
+        query=f"{product.name} live page defect",
+        scopes=memory_store.scopes_for(engine=EngineName.DEVELOPMENT, product_id=product_id),
+    )
+
+    async with BrowserSession(allowed_origins=origins) as tools:
+        runtime = AgentRuntime(ctx.llm, settings=ctx.settings, tools=tools)
+        result = await runtime.run(
+            objective=objective,
+            system=role.system_prompt,
+            tool_categories=list(role.tool_categories),
+            task_type=role.task_type,
+            engine=EngineName.DEVELOPMENT,
+            task_id=task.id,
+            max_steps=role.max_steps,
+            deadline_seconds=role.deadline_seconds,
+            docker_available=ctx.docker_available,
+            context=recalled,
+            cost_cap_usd=role.cost_cap_usd,
+            max_context_chars=role.max_context_chars,
+        )
+
+    # The verdict is extracted, never self-reported. Both of this feature's first
+    # live runs exhausted their step budget mid-investigation and never called the
+    # reporting tool they had, so a real review was performed and then discarded --
+    # and because neither emitted a final text turn, `result.answer` was empty too.
+    # Extracting from whatever the agent did say, always, removes the dependence on
+    # it choosing to stop and file: the same investigate-then-extract split
+    # `learning/maintenance.py` uses on the proposal path.
+    if not result.answer.strip():
+        log.info("development.live_review_empty", product_id=product_id, outcome=result.summary())
+        return f"development/review_live_product: {result.summary()}, no verdict to extract"
+
+    try:
+        verdict = await ctx.llm.parse(
+            ReviewVerdict,
+            task_type=TaskType.ANALYSIS,
+            system=_REVIEW_VERDICT_SYSTEM,
+            prompt=(
+                "The reviewer's own account of what it did and found:\n\n"
+                f"{result.answer[:4000]}"
+            ),
+            engine=EngineName.DEVELOPMENT,
+            task_id=task.id,
+        )
+    except LLMError as exc:
+        # A provider failure here must not look like a clean bill of health.
+        log.warning("development.live_review_verdict_failed", detail=str(exc)[:200])
+        return f"development/review_live_product: {result.summary()}, verdict extraction failed"
+
+    patch_id, reason = await queue_review_patch(
+        session, product_id=product_id, verdict=verdict, dry_run=ctx.dry_run
+    )
+
+    # Recorded either way: "this looked fine on <date>" is exactly the prior the
+    # next review should start from, and without it every run re-derives the same
+    # judgement from scratch.
+    await memory_store.remember(
+        session,
+        content=f"Live review of {product.name}: {result.answer[:1500]}",
+        kind=(
+            memory_store.MemoryKind.FAILURE
+            if verdict.defect_found
+            else memory_store.MemoryKind.FACT
+        ),
+        scope=memory_store.scope_for(product_id=product_id),
+        source_task_id=task.id,
+        origin="agent:auditor",
+    )
+
+    log.info(
+        "development.live_reviewed",
+        product_id=product_id,
+        outcome=result.summary(),
+        defect_found=verdict.defect_found,
+        patch_task_id=patch_id,
+        patch_reason=reason,
+    )
+    return f"development/review_live_product: {result.summary()}, verdict: {reason}"
+
+
 async def _attach_domain(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
     """Attach a human-supplied hostname to a product's Vercel project and relay
     the required DNS records back -- see `development/domain.py` and
@@ -661,6 +808,26 @@ async def _verify_domain(ctx: FactoryContext, session: AsyncSession, task: Task)
         )
     log.info("development.domain_verified", product_id=product_id, hostname=product.custom_domain)
     return f"development: {product.custom_domain} verified for {product_id}"
+
+
+async def _generate_design_brief(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
+    """The dashboard-triggered path: `api/dashboard.py` only ever enqueues this
+    task (it never calls an LLM itself, see `design_brief.py`'s own module
+    docstring), this is where the real work actually happens. Backfills a
+    product that went live before this feature existed; a product built after
+    it already got one automatically in `_verify_and_ship`, so this is a no-op
+    there (`build_design_brief`'s own cache check)."""
+    product_id = task.product_id or str(task.payload.get("product_id", ""))
+    product = await session.get(Product, product_id) if product_id else None
+    if product is None or not product.deploy_url:
+        return f"development: product {product_id!r} has no live deploy_url to describe"
+
+    brief = await design_brief.build_design_brief(
+        ctx, session, product_id=product_id, deploy_url=product.deploy_url, task_id=task.id
+    )
+    if brief is None:
+        return f"development: design brief for {product_id} could not be generated this pass"
+    return f"development: design brief generated for {product_id}"
 
 
 async def _should_repair_surgically(
@@ -1192,6 +1359,13 @@ async def _verify_and_ship(
         product_id=product_id,
         priority=120,
     )
+    # Dashboard-facing only, never blocks shipping -- build_design_brief()
+    # already degrades to None on any failure and is a no-op if this product
+    # already has one cached (a repair-pass redeploy hitting this same line).
+    if result.url:
+        await design_brief.build_design_brief(
+            ctx, session, product_id=product_id, deploy_url=result.url, task_id=task_id
+        )
     # Asked once, ever, per product -- never blocking (the product is already
     # reachable on its Vercel subdomain). A redeploy of an already-live product
     # (a repair pass, a growth_seo edit) must not ask again, hence the guard.

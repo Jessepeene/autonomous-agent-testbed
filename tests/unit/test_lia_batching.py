@@ -20,6 +20,7 @@ from factory.llm.providers.fake import FakeProvider
 from factory.settings import Settings
 from factory.state import repository
 from factory.state.schemas import (
+    ComplianceAssessment,
     ComplianceStatus,
     LeadAssessment,
     LeadAssessmentBatch,
@@ -42,8 +43,21 @@ def _lead(name: str) -> LeadRecord:
 
 
 def _verdict(passed: bool = True) -> LIAVerdict:
+    # `role_utility_link` deliberately names the real job_title every `_lead()`
+    # in this file shares ("Head of Finance") -- Tier 1 finding #3's grounding
+    # check requires it to be about the role/company it was actually given,
+    # not a placeholder unrelated to either.
+    role_utility_link = (
+        "As Head of Finance, this person plausibly needs a reconciliation tool."
+    )
     text = "a" * 30
-    return LIAVerdict(role_utility_link=text, necessity=text, balancing_test=text, passed=passed)
+    return LIAVerdict(
+        role_utility_link=role_utility_link,
+        necessity=text,
+        balancing_test=text,
+        passed=passed,
+        would_a_careful_reviewer_approve=True,
+    )
 
 
 def _entry(
@@ -212,8 +226,6 @@ async def test_low_confidence_is_downgraded_the_same_way_in_a_batch(
 def test_finalise_lead_assessment_is_the_single_source_of_threshold_truth(
     settings: Settings,
 ) -> None:
-    from factory.state.schemas import ComplianceAssessment
-
     low_confidence = ComplianceAssessment(
         status=ComplianceStatus.APPROVED,
         justification="j" * 30,
@@ -222,6 +234,93 @@ def test_finalise_lead_assessment_is_the_single_source_of_threshold_truth(
     )
     result = assessor.finalise_lead_assessment(low_confidence, settings=settings)
     assert result.status is ComplianceStatus.FLAG_FOR_REVIEW
+
+
+# --- _apply_grounding_check: Tier 1 finding #3, system-wide verification plan -----
+
+
+def test_a_grounded_role_utility_link_is_left_approved() -> None:
+    lead = _lead("Alice")
+    approved = ComplianceAssessment(
+        status=ComplianceStatus.APPROVED,
+        justification="j" * 30,
+        confidence=0.95,
+        lia_verdict=_verdict(),  # names "Head of Finance", the lead's real job_title
+    )
+
+    result = assessor._apply_grounding_check(approved, lead)
+
+    assert result.status is ComplianceStatus.APPROVED
+
+
+def test_a_role_utility_link_about_a_different_role_entirely_is_flagged() -> None:
+    """A hallucinated or mismatched argument -- reasoning about a role that
+    isn't this lead's -- must not sail through just because the limbs and
+    confidence otherwise look fine."""
+    lead = _lead("Alice")
+    unrelated_verdict = LIAVerdict(
+        role_utility_link="As a warehouse logistics coordinator, this tool is directly useful.",
+        necessity="n" * 30,
+        balancing_test="b" * 30,
+        passed=True,
+        would_a_careful_reviewer_approve=True,
+    )
+    approved = ComplianceAssessment(
+        status=ComplianceStatus.APPROVED,
+        justification="j" * 30,
+        confidence=0.95,
+        lia_verdict=unrelated_verdict,
+    )
+
+    result = assessor._apply_grounding_check(approved, lead)
+
+    assert result.status is ComplianceStatus.FLAG_FOR_REVIEW
+
+
+def test_a_role_utility_link_grounded_in_the_company_name_alone_passes() -> None:
+    """Either job_title or company grounds the check -- not both required."""
+    lead = _lead("Alice")
+    company_only_verdict = LIAVerdict(
+        role_utility_link=f"{lead.company} is exactly the kind of firm that buys this tool.",
+        necessity="n" * 30,
+        balancing_test="b" * 30,
+        passed=True,
+        would_a_careful_reviewer_approve=True,
+    )
+    approved = ComplianceAssessment(
+        status=ComplianceStatus.APPROVED,
+        justification="j" * 30,
+        confidence=0.95,
+        lia_verdict=company_only_verdict,
+    )
+
+    result = assessor._apply_grounding_check(approved, lead)
+
+    assert result.status is ComplianceStatus.APPROVED
+
+
+def test_grounding_check_never_touches_a_non_approved_status() -> None:
+    """REJECTED and FLAG_FOR_REVIEW are already the safe, conservative
+    outcomes -- this check only ever needs to catch an APPROVED verdict that
+    shouldn't have been."""
+    lead = _lead("Alice")
+    unrelated_verdict = LIAVerdict(
+        role_utility_link="Nothing here mentions the real role or company at all.",
+        necessity="n" * 30,
+        balancing_test="b" * 30,
+        passed=False,
+        would_a_careful_reviewer_approve=True,
+    )
+    rejected = ComplianceAssessment(
+        status=ComplianceStatus.REJECTED,
+        justification="j" * 30,
+        confidence=0.95,
+        lia_verdict=unrelated_verdict,
+    )
+
+    result = assessor._apply_grounding_check(rejected, lead)
+
+    assert result.status is ComplianceStatus.REJECTED
 
 
 # --- evaluate_leads: the kill switch actually restores the old path ---------

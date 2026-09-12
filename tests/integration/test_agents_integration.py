@@ -29,7 +29,8 @@ from factory.llm.router import ProviderRegistry
 from factory.sandbox.disabled import DisabledSandbox
 from factory.settings import EngineName, Settings
 from factory.state import db as db_module
-from factory.state.orm import Base
+from factory.state.db import session_scope
+from factory.state.orm import Base, Task, new_id
 from factory.state.schemas import NextAction
 from factory.supervisor.context import FactoryContext
 from factory.supervisor.graph import SupervisorState, _spawn_agent
@@ -118,3 +119,63 @@ async def test_spawn_agent_node_falls_back_to_backlog_on_an_unknown_role(
 
     assert "backlog" in outcome["note"]
     assert gemini_fake.conversations == []
+
+
+async def test_spawn_agent_node_falls_back_to_backlog_on_a_fabricated_referent(
+    db_ctx: FactoryContext, gemini_fake: FakeProvider
+) -> None:
+    """Tier 3 finding #15, system-wide verification plan: an objective that names
+    a specific, id-shaped task/product must have that id actually exist -- the
+    same "don't act on an unverifiable premise" posture orchestrator.py's own
+    ROUTE-to-empty-queue check already applies. A fabricated id here must not
+    burn an agent run investigating something that was never real."""
+    fabricated_id = new_id()
+    state: SupervisorState = {
+        "action": NextAction.SPAWN_AGENT.value,
+        "agent_role": "analyst",
+        "agent_objective": f"investigate why task {fabricated_id} keeps failing",
+    }
+
+    outcome = await _spawn_agent(state, ctx=db_ctx)
+
+    assert "backlog" in outcome["note"]
+    assert gemini_fake.conversations == []
+
+
+async def test_spawn_agent_node_proceeds_when_the_referenced_id_is_real(
+    db_ctx: FactoryContext, gemini_fake: FakeProvider
+) -> None:
+    """The mirror case: a real id in the objective must not be treated as
+    suspect just because it looks the same shape as a fabricated one."""
+    async with session_scope(db_ctx.settings) as session:
+        task = Task(
+            id=new_id(),
+            kind="build_mvp",
+            engine="development",
+            payload={},
+            idempotency_key=new_id(),
+        )
+        session.add(task)
+        await session.flush()
+        real_task_id = task.id
+
+    gemini_fake.register_turns(
+        AgentTurn(
+            text="Investigated, looks like a flaky test.",
+            tool_calls=[],
+            stop_reason="end_turn",
+            provider=Provider.GEMINI,
+            model="gemini-2.5-flash",
+            usage=Usage(input_tokens=5, output_tokens=5),
+        )
+    )
+    state: SupervisorState = {
+        "action": NextAction.SPAWN_AGENT.value,
+        "agent_role": "analyst",
+        "agent_objective": f"investigate why task {real_task_id} keeps failing",
+    }
+
+    outcome = await _spawn_agent(state, ctx=db_ctx)
+
+    assert "agent/analyst" in outcome["note"]
+    assert "completed" in outcome["note"]

@@ -82,9 +82,30 @@ async def submit_signal(
 ) -> dict[str, Any]:
     from factory.state import repository
     from factory.state.db import session_scope
+    from factory.tools.builtin import http_get
+    from factory.verification.grounding import claim_in_source
 
     if not url.startswith(("http://", "https://")):
         return {"error": "url must be absolute http(s)"}
+
+    # Tier 2 finding #9, system-wide verification plan: DISCOVERY_SCOUT has the
+    # identical `http` tool and the identical hallucination risk as
+    # `marketing/providers/website.py`'s LLM-driven extraction, which already
+    # has this exact backstop -- nothing here previously checked that `quote`
+    # was ever actually on the page at `url` before treating it as real market
+    # evidence. Fails closed: an unreachable page or an unverifiable quote is
+    # rejected rather than accepted on the agent's word alone, the same
+    # direction every other fail-closed check in this codebase errs.
+    fetched = await http_get(url)
+    fetched_body = str(fetched.get("body", ""))
+    if fetched.get("status_code") != 200 or not claim_in_source(quote, fetched_body):
+        log.warning("discovery.signal_not_grounded", url=url[:200])
+        return {
+            "error": (
+                "could not verify this quote against the real page at that URL -- "
+                "the fetch failed, or the quoted text was not found there"
+            )
+        }
 
     settings = get_settings()
     async with session_scope(settings) as session:

@@ -102,7 +102,14 @@ async def resolve_entity_type(
         ),
     )
 
-    if not result.succeeded or not result.answer.strip():
+    # Tier 1 finding #2, system-wide verification plan: `result.succeeded` alone
+    # means only "the model emitted a final turn with no tool calls and
+    # non-empty text" -- a RESEARCHER that never actually calls `http` and
+    # confidently invents "found a KVK registration, this is a BV" satisfied it
+    # exactly as well as one that genuinely investigated. This gates whether a
+    # real person is legally contactable, so require real evidence the
+    # investigation touched something before trusting its account of it.
+    if not result.succeeded or not result.used_tool("http_get") or not result.answer.strip():
         verdict = _unknown(f"the investigation did not complete ({result.stopped_because})")
     else:
         verdict = await _extract_or_unknown(ctx, result.answer, task_id=task_id)

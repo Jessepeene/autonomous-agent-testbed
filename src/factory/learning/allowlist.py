@@ -3,7 +3,7 @@
 Every key here is commercially-lossy, never safety-critical — a bad discovery prompt
 means worse ideas queued (caught by the compliance/dev gates downstream anyway), a bad
 outreach prompt means fewer replies, a bad landing-page prompt means a weaker pitch.
-None of these six keys can produce a compliance violation, a security hole, or
+None of these seven keys can produce a compliance violation, a security hole, or
 unlawful data processing on their own. The LIA prompts, Bug Council reviewer prompts,
 the orchestrator's system prompt, and the real-MVP codegen prompt
 (``factory.engines.development.scaffold.generator:SYSTEM_PROMPT`` specifically — not
@@ -32,6 +32,7 @@ MUTABLE_KEYS: frozenset[str] = frozenset(
         "factory.engines.marketing.leads:PLANNER_SYSTEM",
         "factory.engines.marketing.outreach:SYSTEM_PROMPT",
         "factory.engines.development.scaffold.generator:LANDING_PAGE_SYSTEM",
+        "factory.engines.marketing.outreach:SENDER_IDENTITY",
     }
 )
 
@@ -44,6 +45,12 @@ MUTABLE_KEYS: frozenset[str] = frozenset(
 #: `EVALUATE_VALIDATION` in `engines/development/graph.py` for why: episodes carry no
 #: metric/kind tag, so pooling a different Bernoulli population into an existing key's
 #: statistics would silently corrupt that key's own trial judgments.
+#:
+#: `SENDER_IDENTITY` is the first key actually gated on `outreach_conversion_rate` —
+#: there is no faster proxy for "did this name work" the way `outreach_content_pass_rate`
+#: proxies for prompt quality, since the name itself has no synchronous pass/fail. Its
+#: outcome is recorded later, on a delay, by `marketing/attribution.py::reconcile` —
+#: see that module and `state/repository.py::outreach_needing_identity_timeout`.
 DEFAULT_METRIC: dict[str, str] = {
     "factory.engines.discovery.score:GENERATOR_SYSTEM": "idea_survival_rate",
     "factory.engines.discovery.score:DISCRIMINATOR_SYSTEM": "idea_survival_rate",
@@ -53,6 +60,7 @@ DEFAULT_METRIC: dict[str, str] = {
     "factory.engines.development.scaffold.generator:LANDING_PAGE_SYSTEM": (
         "landing_page_interest_rate"
     ),
+    "factory.engines.marketing.outreach:SENDER_IDENTITY": "outreach_conversion_rate",
 }
 
 

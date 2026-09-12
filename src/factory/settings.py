@@ -14,6 +14,10 @@ from pathlib import Path
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from factory.logging import get_logger
+
+log = get_logger(__name__)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -98,6 +102,10 @@ class Settings(BaseSettings):
     # means every fetch is direct-only, same as today.
     scrape_proxy_url: SecretStr | None = None
 
+    #: A bare mailbox (e.g. "alex@mail.example.com"), never a "Display Name <email>"
+    #: string — the display name is a learning-loop tunable
+    #: (`factory.engines.marketing.outreach:SENDER_IDENTITY`) composed around this
+    #: value at send time, not baked into it. See `get_settings`'s startup check.
     outbound_from_address: str | None = None
     outbound_postal_address: str | None = None
     unsubscribe_base_url: str | None = None
@@ -233,6 +241,13 @@ class Settings(BaseSettings):
     # Same idea for CHANNEL_SCOUT -- a longer cadence since channel discovery is a
     # heavier, rarer activity than a growth-data read.
     channel_scout_interval_days: int = Field(default=14, ge=1)
+    # Cadence of AUDITOR's live-product walkthrough (scheduler.py ->
+    # development/graph.py::_review_live_product). Daily by default: this is the
+    # check that catches a shipped defect nobody has looked at, and the three-week
+    # miss that motivated it argues for tight rather than thorough. One review is a
+    # single capped agent run (AgentRole.cost_cap_usd), so the cost is bounded per
+    # product per day, not per tick.
+    live_review_interval_days: int = Field(default=1, ge=1)
     # How long an approved channel_experiment waits before the measurement sweep
     # tallies referrer hits and concludes it. Long enough that a human has had time
     # to actually post the draft and for any resulting traffic to show up.
@@ -360,6 +375,18 @@ class Settings(BaseSettings):
     # --- Paths ------------------------------------------------------------------
     blacklist_path: Path = REPO_ROOT / "blacklist.txt"
     workspace_root: Path = REPO_ROOT / "workspaces"
+    # Writable path to the real .env file docker-compose reads for this service's
+    # `env_file: .env` directive (bind-mounted there in docker-compose.yml, same
+    # pattern as BLACKLIST_PATH above). Lets the dashboard's credential-write
+    # endpoint (api/dashboard.py) persist a new value to the file docker-compose
+    # itself reads at container (re)creation. Unset means that endpoint refuses
+    # every write with a clear error rather than silently no-op'ing -- same
+    # fail-closed posture as every other optional credential in this file.
+    # Writing here changes nothing for the *running* process: Settings is an
+    # lru_cache'd singleton read once at boot, so a new value only takes effect
+    # after the next `docker compose up -d factory`, which the write endpoint's
+    # response always says explicitly.
+    env_file_path: Path | None = None
 
     @field_validator("log_level")
     @classmethod
@@ -415,4 +442,14 @@ class Settings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    return Settings()
+    settings = Settings()
+    if settings.outbound_from_address and "<" in settings.outbound_from_address:
+        # OUTBOUND_FROM_ADDRESS must be a bare mailbox now that the display name is
+        # composed at send time (see the field's own comment) -- a value that
+        # already carries one would double-wrap into a broken header, e.g.
+        # "Alex Reyes <Alex Reyes <alex@mail.example.com>>".
+        log.warning(
+            "settings.outbound_from_address_looks_wrapped",
+            detail="OUTBOUND_FROM_ADDRESS should be a bare mailbox, not a display-name string",
+        )
+    return settings

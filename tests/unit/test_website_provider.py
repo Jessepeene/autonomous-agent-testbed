@@ -256,6 +256,84 @@ async def test_an_extracted_email_not_actually_on_the_page_is_dropped(
     assert result == []
 
 
+async def test_a_fabricated_job_title_not_actually_on_the_page_is_dropped(
+    ctx: FactoryContext, gemini_fake: FakeProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Tier 1 finding #4, system-wide verification plan: job_title used to be
+    the one field this backstop never checked, despite being exactly the
+    field the LIA later uses to argue role-to-utility link
+    (compliance/assessor.py)."""
+    _mock_repository(monkeypatch)
+    _mock_serper(
+        monkeypatch,
+        [SerperResult(title="Our Team", link="https://acme-books.test/team", snippet="...")],
+    )
+    _mock_fetch(monkeypatch, "Ada Lovelace of Acme Books. Contact: ada@acme-books.test")
+    _mock_robots_allowed(monkeypatch, True)
+
+    gemini_fake.register(_QueryList, _QueryList(queries=["bookkeeping contact us"]))
+    gemini_fake.register(
+        _LeadExtraction,
+        _LeadExtraction(
+            leads=[
+                ExtractedContact(
+                    name="Ada Lovelace",
+                    company="Acme Books",
+                    job_title="Chief Financial Officer",  # not on the page anywhere
+                    email="ada@acme-books.test",
+                    confidence=0.95,
+                )
+            ]
+        ),
+    )
+    provider = _provider(ctx)
+
+    result = await provider.search(_PLAN)
+
+    assert result == []
+
+
+async def test_a_paraphrased_job_title_is_still_accepted(
+    ctx: FactoryContext, gemini_fake: FakeProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The job_title check is deliberately loose (`claim_loosely_in_source`),
+    not an exact substring match like company/name/email -- a title is
+    routinely paraphrased relative to the page's own wording, and a real,
+    correctly-extracted title must not be dropped just because it isn't a
+    byte-for-byte match."""
+    _mock_repository(monkeypatch)
+    _mock_serper(
+        monkeypatch,
+        [SerperResult(title="Our Team", link="https://acme-books.test/team", snippet="...")],
+    )
+    _mock_fetch(
+        monkeypatch, "Ada Lovelace, Head of Finance at Acme Books. Contact: ada@acme-books.test"
+    )
+    _mock_robots_allowed(monkeypatch, True)
+
+    gemini_fake.register(_QueryList, _QueryList(queries=["bookkeeping contact us"]))
+    gemini_fake.register(
+        _LeadExtraction,
+        _LeadExtraction(
+            leads=[
+                ExtractedContact(
+                    name="Ada Lovelace",
+                    company="Acme Books",
+                    job_title="Finance Lead",  # paraphrased, but "Finance" is on the page
+                    email="ada@acme-books.test",
+                    confidence=0.95,
+                )
+            ]
+        ),
+    )
+    provider = _provider(ctx)
+
+    result = await provider.search(_PLAN)
+
+    assert len(result) == 1
+    assert result[0].job_title == "Finance Lead"
+
+
 # --- employer-domain / non-employer-domain filtering --------------------------------
 
 

@@ -20,6 +20,7 @@ from factory.engines.marketing.providers.base import (
     Provenance,
     ProvenanceKind,
     ProviderAuthError,
+    ProviderQuotaExceeded,
     ProviderRequestError,
     usable_person_email,
 )
@@ -90,6 +91,8 @@ class HunterProvider:
                         raise ProviderAuthError(self.name, response.status_code, detail)
                     if response.status_code in (400, 422):
                         raise ProviderRequestError(self.name, response.status_code, detail)
+                    if response.status_code == 429:
+                        raise ProviderQuotaExceeded(self.name, detail)
                     continue
 
                 try:
@@ -169,8 +172,9 @@ async def find_email(
     person and returns a confidence score for that guess).
 
     Returns `None` (never raises) when the key is absent or the guess scores
-    below `MIN_EMAIL_CONFIDENCE` — only a genuinely rejected key or malformed
-    request raises, matching every other provider call in this codebase.
+    below `MIN_EMAIL_CONFIDENCE` — a rejected key, malformed request, or
+    exhausted quota raises instead, matching every other provider call in
+    this codebase.
     """
     settings = settings or get_settings()
     key = settings.secret("HUNTER_API_KEY")
@@ -200,6 +204,8 @@ async def find_email(
             raise ProviderAuthError("hunter.io", response.status_code, detail)
         if response.status_code in (400, 422):
             raise ProviderRequestError("hunter.io", response.status_code, detail)
+        if response.status_code == 429:
+            raise ProviderQuotaExceeded("hunter.io", detail)
         return None
 
     try:

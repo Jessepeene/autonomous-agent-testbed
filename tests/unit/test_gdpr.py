@@ -228,6 +228,32 @@ def test_a_common_word_that_is_not_a_multiword_trigger_does_not_fail() -> None:
     assert result.passed is True, result.violations
 
 
+@pytest.mark.parametrize(
+    "phrase",
+    ["SOC 2", "GDPR-compliant", "industry-leading", "trusted by", "award-winning"],
+)
+def test_unverifiable_claim_phrases_fail_the_content_check(phrase: str) -> None:
+    """Tier 1 finding #5, system-wide verification plan: `SYSTEM_PROMPT` asks
+    the model, by prompt alone, to never invent a statistic or claim -- this
+    is the deterministic backstop behind that instruction, same shape as the
+    spam-trigger check above."""
+    postal = "Testlaan 1, 1000 AA Amsterdam, NL"
+    unsubscribe = "https://example.com/u/tok"
+    body = f"Hi there, we are {phrase} in this space." + render_compliance_footer(
+        postal_address=postal,
+        unsubscribe_url=unsubscribe,
+        source_url="https://analytical-engines.test/team",
+    )
+    result = check_outreach_content(
+        body,
+        from_address="factory@example.com",
+        postal_address=postal,
+        unsubscribe_url=unsubscribe,
+    )
+    assert result.passed is False
+    assert any("unverifiable claim" in v for v in result.violations)
+
+
 def test_footer_names_the_data_source() -> None:
     """GDPR Art. 14: a person we never met is entitled to know where we got them."""
     footer = render_compliance_footer(

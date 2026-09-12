@@ -28,6 +28,11 @@ time it's fixed, not batched up afterward.**
 14. [DeepSeek sent Gemini-shaped tool schemas, not Anthropic-shaped](#14-deepseek-sent-gemini-shaped-tool-schemas-not-anthropic-shaped)
 15. [Gemini and DeepSeek spend silently mispriced](#15-gemini-and-deepseek-spend-silently-mispriced)
 16. [Real code generation was mocked in production](#16-real-code-generation-was-mocked-in-production)
+17. [Contract check false-positived on `os.environ.get(...)`, forcing needless heal cycles](#17-contract-check-false-positived-on-osenvironget-forcing-needless-heal-cycles)
+18. [Dashboard credential-write endpoint failed closed with a real `PermissionError`](#18-dashboard-credential-write-endpoint-failed-closed-with-a-real-permissionerror)
+19. [A tunable prompt's live DB row silently never gets a code-side rewrite once bootstrapped](#19-a-tunable-prompts-live-db-row-silently-never-gets-a-code-side-rewrite-once-bootstrapped)
+20. [40 identical provider-outage escalations mislabeled as legal review, spamming past the dedup guard](#20-40-identical-provider-outage-escalations-mislabeled-as-legal-review-spamming-past-the-dedup-guard)
+21. [Live-product auditing only ran when the factory was idle](#21-live-product-auditing-only-ran-when-the-factory-was-idle)
 
 ---
 
@@ -763,3 +768,297 @@ rows showing genuine Anthropic-served `CODE_GENERATION`/`CODE_REVIEW`
 outcomes instead of the mock's synthetic ones.
 
 **Status**: Fixed, live. No code changed, no commit.
+
+---
+
+## 17. Contract check false-positived on `os.environ.get(...)`, forcing needless heal cycles
+
+**Found**: 2026-08-22, while investigating why 4 products that had already
+been hand-guided to fix their Stripe wiring still failed the very same
+check on the next heal attempt. The raw (unparaphrased) `heal_attempts.
+healing_text` insisted `PRODUCT_PRICE_CENTS`/`STRIPE_API_KEY` were "never
+read" — directly contradicting the real pulled source file, which read both
+correctly.
+
+**Severity**: High-frequency, silent waste — every product whose generated
+backend happened to use `os.environ.get(...)` (a fully correct, common
+idiom) instead of `os.environ[...]`/`os.getenv(...)` burned an unnecessary
+heal cycle on a bug that was never there, and enough of them in a row hit
+the autonomous heal ceiling and escalated to a human over nothing.
+
+**Root cause**: `contract.py`'s `_PRICE_ENV_READ_RE`/`_STRIPE_KEY_ENV_READ_RE`
+only matched two of the three real Python idioms for reading an environment
+variable (`os.environ["X"]`, `os.getenv("X")`) — `os.environ.get("X")`,
+equally correct and the one the model actually wrote, silently never
+matched.
+
+**Affected**: `src/factory/engines/development/contract.py`.
+
+**Fix**: Refactored into a shared `_env_read_pattern(name)` helper covering
+all three idioms.
+
+**Verification**: Reproduced the false positive locally against the real
+pulled workspace file (`missing: [...]` before, `missing: []` after).
+Parametrized regression tests added
+(`tests/unit/test_codegen_contract.py`). Full local + scratch-Postgres
+suites green before deploy.
+
+**Status**: Fixed, deployed. No commit (per standing practice, not
+committed without being asked).
+
+---
+
+## 18. Dashboard credential-write endpoint failed closed with a real `PermissionError`
+
+**Found**: 2026-08-23, live smoke test of the new `/dashboard/integrations`
+credential-write endpoint immediately after its first deploy — caught
+before any real operator hit it through the UI.
+
+**Severity**: Would have 500'd on every real write attempt; no data was
+ever at risk (fails closed, nothing partially written), but the whole
+"add/update credentials from the dashboard" feature would have looked
+completely broken the first time anyone tried it.
+
+**Root cause**: The factory container runs as a fixed non-root user (uid
+10001) — the same reason `WORKSPACE_ROOT`/`BLACKLIST_PATH` already require
+a one-time host `chown`. The newly bind-mounted `.env` (`docker-compose.yml`,
+`./.env:/app/.env`) was root-owned on the host, exactly like every `.env`
+created by a root shell or a root-run deploy step — readable by the
+container (world-readable, `0644`) but not writable by uid 10001. The write
+endpoint's `write_env_value()` correctly raised, FastAPI correctly turned it
+into a 500, and nothing was corrupted — but the feature did not work.
+
+**Affected**: Host file ownership only, no code bug (`/opt/superagent/.env`).
+
+**Fix**: `chown 10001:10001 .env` on the host, once. Documented next to
+`ENV_FILE_PATH` in `.env.example` and in `docker-compose.yml`'s own comment
+so a future new-host deploy doesn't rediscover this the same way.
+
+**Verification**: Confirmed via `ls -la` inside the container
+(`-rw-r--r-- 1 10001 10001 ... /app/.env`) and via the local integration
+test (`test_write_credential_saves_to_the_configured_env_file`) covering
+the identical code path against a writable file. Live end-to-end
+verification via a real write was blocked by Claude Code's own auto-mode
+safety classifier (writing to a production credential file is treated as a
+sensitive action) — flagged to the user rather than routed around.
+
+**Status**: Fixed, deployed. No commit.
+
+---
+
+## 19. A tunable prompt's live DB row silently never gets a code-side rewrite once bootstrapped
+
+**Found**: 2026-08-24, not from a production symptom but from the test
+suite itself catching real drift: changing `DISCRIMINATOR_SYSTEM`'s text
+(adding the Tier 0 gut-check paragraph, system-wide verification plan)
+broke `test_idea_defensibility_migration.py::
+test_new_discriminator_system_matches_the_live_code_constant` — a test that
+exists precisely to compare the migration-seeded DB text against the live
+Python constant.
+
+**Severity**: Silent and permanent, not a crash. Every one of this
+factory's tunable prompts (`learning/prompts.py::get_prompt`, gated to a
+`MUTABLE_KEYS` allowlist) is only ever written to the database *once* — the
+first time `get_prompt` is called for that key with no `active` row yet
+(`store.bootstrap_active`). Every later call just serves whatever text is
+already sitting in that row. Editing the Python constant changes what a
+brand-new, never-bootstrapped database will serve; it does nothing at all
+for a database that bootstrapped that key any time in the past — which, in
+production, is every database that has been running for more than one
+tick. Discovered only because `0023_idea_defensibility.py` had already set
+the precedent of a migration that rewrites the live row to match, and the
+test enforcing that precedent is what actually caught this specific
+instance; without that test, `DISCRIMINATOR_SYSTEM`'s new gut-check
+instruction and outreach's new tone-check instruction would have shipped in
+the container image and never once reached the model actually running
+against the production database.
+
+**Root cause**: `get_prompt`/`get_scoring_weights` (`learning/prompts.py`)
+have no code path that re-syncs an already-bootstrapped row to a changed
+default — by design, since a *tuned* row (promoted by a trial) must never
+be silently overwritten by a code deploy. But that same "never touch a
+live row automatically" property means an *un-tuned*, still-default row is
+indistinguishable from a tuned one to this code, and a source-level edit to
+the default text has no effect on it either.
+
+**Affected**: `src/factory/engines/discovery/score.py`
+(`DISCRIMINATOR_SYSTEM`), `src/factory/engines/marketing/outreach.py`
+(outreach `SYSTEM_PROMPT`) — both edited in the same change as this
+session's Tier 0 holistic-check work.
+
+**Fix**: `alembic/versions/0028_tier0_prompt_appendices.py`, following
+`0023_idea_defensibility.py`'s exact precedent — appends the new paragraph
+to whatever `active` tunable_parameters row already exists for each key,
+idempotently (`endswith()` check, safe to run twice). No code-side fix is
+possible or desirable here: the correct general fix is procedural, not a
+bug in `get_prompt` itself — **any future change to a tunable prompt
+constant needs its own migration to reach an already-bootstrapped
+database**, the same way a schema change needs a migration to reach
+already-existing rows.
+
+---
+
+## 20. 40 identical provider-outage escalations mislabeled as legal review, spamming past the dedup guard
+
+**Found**: 2026-09-10, Jesse asked to start a "quality testing" cycle
+evaluating the system's autonomy — specifically, errors that "should be
+caught by a supervisor as a human supervisor would." A direct query
+against production's `interrupts` table, run to ground that conversation
+in real data rather than a hypothetical, turned up 40 `legal_uncertainty`
+interrupts in the trailing 14 days — every one of them, on inspection, the
+identical Anthropic "credit balance too low" 400 error.
+
+**Severity**: Real, ongoing noise, not a crash. A human reading
+`[LEGAL_UNCERTAINTY]` in Telegram reasonably expects a compliance judgment
+call; getting the same billing failure under that label 40 times both
+wastes their attention and actively erodes trust in every *other*
+`legal_uncertainty` interrupt, which are genuine and need real judgment
+(see `compliance/graph.py`'s and `compliance/lia.py`'s uses of the same
+reason, both correctly classified and correctly deduped by content). Also
+compounded by a second failure: the same handler tries to write a
+human-friendly explanation via an LLM call (`interrupts.plain_language_error`),
+which — since both configured providers were out of credits at once — also
+failed, so several of the 40 interrupts showed the human a raw, unedited
+`ProviderRequestRejected(...)` repr instead of any explanation at all.
+
+**Root cause**: `supervisor/graph.py::_run_engine`'s generic
+`except Exception` handler (the last-resort bucket for an exhausted task)
+raises every uncategorized failure as `InterruptReason.LEGAL_UNCERTAINTY`
+with `subject=f"{engine.value} task {task_id} exhausted its retries"`. That
+subject embeds the failing task's own id, so `interrupts.request`'s
+duplicate-open-subject collapse (added specifically to fix a *different*
+version of this exact bug class — see entry-free comment in
+`supervisor/graph.py::_escalate` calling out "the same bug class as the
+generic per-engine task-failure subjects above", and `test_interrupt_
+subject_uniqueness.py`) never engages: a fresh `discover_opportunities` task
+enqueued on every tick fails the same way and gets its own "unique" subject
+every time, because the uniqueness comes from the task id, not the actual
+cause. `ProviderUnavailable`/`ProviderRequestRejected` (`llm/providers/
+base.py`) were never given their own branch, so they fell all the way
+through the specific handlers above (`ProviderRefusal`, `DevOpsError`,
+`MarketingFrozen`, `CampaignApprovalPending`, `ValidationCapacityExceeded`,
+`RepairBlocked`, `SandboxUnavailable`) into the generic one.
+
+**Affected**: `src/factory/state/schemas.py` (new
+`InterruptReason.PROVIDER_OUTAGE`), `src/factory/supervisor/graph.py`
+(new `except ProviderUnavailable` branch in `_run_engine`, before the
+generic `except Exception`).
+
+**Fix**: A provider failure now gets its own branch and its own reason,
+with a subject built from the provider and HTTP status (`f"{provider} is
+rejecting requests (HTTP {status})"`) instead of the task id — so every
+task hitting the same persistent outage collapses into the one open
+interrupt, exactly like `compliance/graph.py`'s niche-keyed and
+`compliance/lia.py`'s email-keyed subjects already do correctly. The
+explanation is built deterministically from the exception's own structured
+`provider`/`status`/message fields rather than calling
+`plain_language_error` — which needs a working LLM call to explain an LLM
+call failing, the exact single point of failure that left several of the
+40 real interrupts with no explanation at all.
+
+**Verification**: New `tests/integration/test_interrupt_subject_
+uniqueness.py::test_two_tasks_hitting_the_same_provider_outage_collapse_
+into_one_interrupt` — two different tasks failing with the identical
+`ProviderRequestRejected` now produce exactly one open interrupt
+(`PROVIDER_OUTAGE`, correct subject/detail, no LLM call registered on the
+fake provider), proving both the collapse and the no-LLM-dependency
+property. Full local unit suite (1037 passed, 2 pre-existing unrelated
+Windows path-separator failures) and the relevant integration suite
+(`test_interrupt_subject_uniqueness.py`, `test_campaign_approval.py`,
+`test_surgical_patch.py` — 12 passed) green on scratch Postgres.
+
+**Status**: Fixed, deployed 2026-09-11. Not yet committed to git.
+
+---
+
+## 21. Live-product auditing only ran when the factory was idle
+
+**Found**: 2026-09-11, while scoping the department-manager architecture. Jesse
+reported that a live product's landing page had a broken signup/email-capture
+form and a wrong year, unnoticed for weeks; tracing *why* nothing caught it
+turned up two independent causes, of which this is the structural one.
+
+**Severity**: Silent and structural. `audit-live-products` is the only
+recurring check a shipped product ever gets, and it stops running exactly when
+the factory is busiest -- which is precisely when a defect is most likely to
+ship unnoticed and least likely to be spotted by a human watching the queue.
+
+**Root cause**: the maintenance catalogue (`supervisor/backlog.py::CATALOGUE`,
+which holds `audit-live-products` on a nominal 4h cadence) is enqueued from
+exactly one place: `supervisor/graph.py::_backlog`. That node is only reached on
+an `IDLE_BACKLOG` or `HOLD_DISCOVERY` routing decision (or as a fallback for an
+unknown engine/role). So the "4h cadence" is really "4h cadence, but only on a
+tick where there was nothing revenue-bearing to do." Everything else hanging off
+that catalogue inherits the same property -- including `prune-memory`,
+`audit-snapshot-integrity` and `remind-stale-interrupts`.
+
+A second, unrelated cause compounded it for this specific product: the content
+half of that audit (`_content_freshness_issue`) routes through `CODE_REVIEW`,
+which is Anthropic-only and in `router.NO_FAILOVER`, and Anthropic had been out
+of credits for weeks -- so even on the ticks it did run, it returned `None`
+(fail-quiet by design, so a provider outage never looks like a content problem).
+
+**Affected**: `src/factory/supervisor/scheduler.py` (new live-review sweep in
+`_schedule_periodic`), `src/factory/settings.py`
+(`live_review_interval_days`), plus the new reviewer itself (see below).
+
+**Fix**: product oversight moved onto `scheduler._schedule_periodic`, which runs
+unconditionally every tick regardless of load, bucketed daily per live product.
+The new check is also materially stronger than the one it backstops: AUDITOR
+(`agents/roles.py`, previously defined but entirely unused) now has a real
+browser (`tools/browser.py`) and *uses* the product -- submits the form, follows
+the call to action -- rather than reading its markup. A form that silently fails
+on submit is invisible to every check that never presses the button, which is
+why both existing checks reported this product healthy for three weeks. It
+commissions fixes through the existing `PATCH_PRODUCT` lever
+(`tools/product_review.py`), so nothing bypasses the repair → Bug Council →
+deploy pipeline.
+
+The old deterministic `audit-live-products` slug is deliberately left in place
+for now, to run alongside the reviewer for a shadow period before its LLM-backed
+content half is retired -- its cheap HTTP status check is strictly better at the
+uptime question and stays either way.
+
+**Verification**: `tests/unit/test_browser_tools.py` (18 tests -- origin
+pinning, SSRF refusals incl. cloud-metadata and sibling compose services,
+call-site role scoping), `tests/integration/test_live_product_review.py` (7
+tests -- dispatch guards, a finding queues exactly one guided patch, a clean
+review queues nothing, dry-run commissions nothing, no same-day patch
+stacking), two new scheduler sweep tests. Image built on the real host and
+Chromium confirmed launching as the non-root uid-10001 user; `BrowserSession`
+exercised end-to-end in that image, including a real navigation against the
+live product (HTTP 200, title and form fields correctly extracted).
+
+**Status**: Fixed, deployed 2026-09-12. Not yet committed to git.
+
+**Postscript — the reviewer's own first two runs both failed, and the fix
+generalises.** v1 cast AUDITOR as "a demanding manager on a walkthrough" and gave
+it a browser returning only visible page text. Asked whether a form worked, it had
+no way to observe whether submitting fired a request, so it re-filled and
+re-clicked exactly like a confused visitor; both runs hit `step_limit` without
+ever calling their reporting tool, and because neither emitted a final text turn
+`AgentResult.answer` was empty too, so nothing was recorded either. Two real
+reviews performed and discarded.
+
+Three changes, all in this deploy: network/console instruments surfaced on every
+browser action (`tools/browser.py`); the role reframed from manager-on-a-walkthrough
+to senior QA engineer with an explicit method; and the verdict now *extracted* by a
+separate always-run structured call rather than self-reported through a tool the
+agent has to remember to use (`tools/product_review.py::queue_review_patch`, the
+same investigate-then-extract split `learning/maintenance.py` uses). On the first
+run after, it found `POST /api/billing/checkout -> 422` -- the live product's
+payment path, broken since launch -- in 11 steps, and stopped on its own.
+
+The transferable lesson, recorded in `ARCHITECTURE_ROADMAP.md`: before giving an
+agent judgment over a domain, check the system can actually show it what an expert
+in that domain looks at. Access without instruments produces confident flailing.
+
+**Verification**: `tests/unit/test_tier0_prompt_appendices_migration.py`
+(new) covers the migration's content and idempotency directly;
+`test_idea_defensibility_migration.py`'s existing test was updated to
+compose both migrations' text and re-passed. Full local unit suite and a
+scratch-Postgres `alembic upgrade head` + integration run both green.
+
+**Status**: Fixed, part of the Tier 0-3 system-wide verification change.
+Not yet deployed. No commit (per standing practice, not committed without
+being asked).

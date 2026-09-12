@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from factory.engines.development.design_brief import DesignBrief
 from factory.learning import stats as learning_stats
 from factory.learning import store as learning_store
 from factory.observability import metrics as metrics_module
@@ -72,6 +73,52 @@ class ProductSection:
     heal_attempts: int
     mrr_cents: int
     updated_at: datetime
+
+
+@dataclass(slots=True)
+class BusinessPlanSection:
+    """Everything the dashboard's product detail view needs to show a
+    "business plan" -- all of it already lives on `Idea` (joined via
+    `Product.idea_id`), so this is a pure read, no new generation."""
+
+    problem_statement: str
+    target_niche: str
+    monetization_hypothesis: str
+    self_serve_price_usd: float
+    score: float
+    evidence_count: int
+    source_url: str
+    pain_severity: float | None
+    willingness_to_pay: float | None
+    build_feasibility: float | None
+    adoption_ease: float | None
+    defensibility: float | None
+
+
+@dataclass(slots=True)
+class DesignBriefSection:
+    palette: list[str]
+    typography: str
+    tone: str
+
+
+@dataclass(slots=True)
+class ProductDetail:
+    id: str
+    name: str
+    status: str
+    deploy_url: str | None
+    heal_attempts: int
+    created_at: datetime
+    updated_at: datetime
+    business_plan: BusinessPlanSection
+    #: None if never generated -- either still building, or an already-live
+    #: product that predates this feature and hasn't been backfilled yet
+    #: (see `api/dashboard.py`'s generate-design-brief endpoint).
+    design_brief: DesignBriefSection | None
+
+    def as_dict(self) -> dict[str, object]:
+        return asdict(self)
 
 
 @dataclass(slots=True)
@@ -250,6 +297,52 @@ async def _products(session: AsyncSession, *, limit: int) -> list[ProductSection
         )
         for product, idea in pairs
     ]
+
+
+async def collect_product_detail(session: AsyncSession, product_id: str) -> ProductDetail | None:
+    """The dashboard's product detail view -- unlike `collect()`, this isn't
+    part of the bulk snapshot poll; it's fetched on demand when an operator
+    opens one product's card."""
+    pair = await repository.get_product_with_idea(session, product_id)
+    if pair is None:
+        return None
+    product, idea = pair
+
+    design: DesignBriefSection | None = None
+    if product.design_brief:
+        try:
+            brief = DesignBrief.model_validate_json(product.design_brief)
+        except ValueError:
+            brief = None
+        if brief is not None:
+            design = DesignBriefSection(
+                palette=brief.palette, typography=brief.typography, tone=brief.tone
+            )
+
+    return ProductDetail(
+        id=product.id,
+        name=product.name,
+        status=product.status,
+        deploy_url=product.deploy_url,
+        heal_attempts=product.heal_attempts,
+        created_at=product.created_at,
+        updated_at=product.updated_at,
+        business_plan=BusinessPlanSection(
+            problem_statement=idea.problem_statement,
+            target_niche=idea.target_niche,
+            monetization_hypothesis=idea.monetization_hypothesis,
+            self_serve_price_usd=idea.self_serve_price_usd,
+            score=idea.score,
+            evidence_count=idea.evidence_count,
+            source_url=idea.source_url,
+            pain_severity=idea.pain_severity,
+            willingness_to_pay=idea.willingness_to_pay,
+            build_feasibility=idea.build_feasibility,
+            adoption_ease=idea.adoption_ease,
+            defensibility=idea.defensibility,
+        ),
+        design_brief=design,
+    )
 
 
 async def _interrupts(session: AsyncSession, *, limit: int) -> list[InterruptSection]:

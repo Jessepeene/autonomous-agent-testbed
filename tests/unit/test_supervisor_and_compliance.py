@@ -403,17 +403,25 @@ async def test_a_model_route_to_an_engine_with_real_pending_work_is_trusted(
 # --- LIA contact gate -------------------------------------------------------
 
 
-def _verdict(passed: bool) -> LIAVerdict:
+def _verdict(passed: bool, *, reviewer_approve: bool = True) -> LIAVerdict:
     text = "a" * 30
-    return LIAVerdict(role_utility_link=text, necessity=text, balancing_test=text, passed=passed)
+    return LIAVerdict(
+        role_utility_link=text,
+        necessity=text,
+        balancing_test=text,
+        passed=passed,
+        would_a_careful_reviewer_approve=reviewer_approve,
+    )
 
 
-def _assessment(status: ComplianceStatus, confidence: float, passed: bool) -> ComplianceAssessment:
+def _assessment(
+    status: ComplianceStatus, confidence: float, passed: bool, *, reviewer_approve: bool = True
+) -> ComplianceAssessment:
     return ComplianceAssessment(
         status=status,
         justification="j" * 30,
         confidence=confidence,
-        lia_verdict=_verdict(passed),
+        lia_verdict=_verdict(passed, reviewer_approve=reviewer_approve),
     )
 
 
@@ -500,6 +508,36 @@ def test_refusal_helper_never_approves() -> None:
     assert refusal.confidence == 0.0
     assert refusal.lia_verdict is not None
     assert refusal.lia_verdict.passed is False
+    assert refusal.lia_verdict.would_a_careful_reviewer_approve is False
+
+
+def test_a_failed_reviewer_signoff_flags_for_review_even_with_every_limb_passing(
+    settings: Settings,
+) -> None:
+    """Tier 0: a justification can correctly reference the real facts (every
+    limb passes) while still not being a decision a careful reviewer would
+    stand behind. This is a softer signal than a failed limb -- same failure
+    mode as low confidence (escalate to a human), not an automatic REJECTED."""
+    high_confidence_but_flagged = _assessment(
+        ComplianceStatus.APPROVED, 0.99, True, reviewer_approve=False
+    )
+
+    result = assessor.finalise_lead_assessment(high_confidence_but_flagged, settings=settings)
+
+    assert result.status is ComplianceStatus.FLAG_FOR_REVIEW
+    assert result.approved is False
+
+
+def test_a_passed_reviewer_signoff_does_not_block_an_otherwise_approved_verdict(
+    settings: Settings,
+) -> None:
+    high_confidence_and_signed_off = _assessment(
+        ComplianceStatus.APPROVED, 0.99, True, reviewer_approve=True
+    )
+
+    result = assessor.finalise_lead_assessment(high_confidence_and_signed_off, settings=settings)
+
+    assert result.status is ComplianceStatus.APPROVED
 
 
 # --- idea-level compliance thresholding --------------------------------------

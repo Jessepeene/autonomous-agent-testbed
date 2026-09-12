@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -33,9 +34,13 @@ from factory.llm.router import ProviderRegistry
 from factory.sandbox.disabled import DisabledSandbox
 from factory.settings import EngineName, Settings
 from factory.state import repository
-from factory.state.orm import Base, Interrupt, Task, new_id
+from factory.state.orm import Base, HealAttempt, Interrupt, LLMCall, Task, new_id
 from factory.state.schemas import InterruptReason, ScoredIdea, TaskKind, TaskStatus
-from factory.supervisor.audit import check_approved_idea_orphans, check_scoring_contract_drift
+from factory.supervisor.audit import (
+    check_approved_idea_orphans,
+    check_business_health,
+    check_scoring_contract_drift,
+)
 from factory.supervisor.context import FactoryContext
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -287,3 +292,142 @@ async def test_maintenance_run_dispatches_the_slug_without_any_llm_call(
 
     assert "1 orphaned approved idea" in summary
     assert "scoring contract drift: False" in summary  # no SCORING_WEIGHTS row seeded here
+    assert "business-health concern(s)" in summary
+
+
+# --- supervisor/audit.py::check_business_health (Tier 0 finding #0g) ---------------
+
+
+async def test_a_freshly_active_factory_with_no_history_has_no_concerns(
+    session: AsyncSession,
+) -> None:
+    """No products at all yet, no heal attempts, no spend history -- nothing
+    to be worried about, and nothing here is an LLM judgement call."""
+    concerns = await check_business_health(session)
+
+    assert concerns == []
+    assert (await session.execute(select(Interrupt))).scalars().all() == []
+
+
+async def test_a_stuck_factory_is_flagged(session: AsyncSession) -> None:
+    product_id = await _approved_idea_with_product(session, "audit-stuck")
+    await session.flush()
+    # Backdate the product's own last-activity timestamp directly -- onupdate
+    # only fires on a real UPDATE, so this simulates "nothing has touched
+    # this row in days" without needing to wait days in a test.
+    from factory.state.orm import Product
+
+    stale_product = (
+        await session.execute(select(Product).where(Product.idea_id == product_id))
+    ).scalar_one()
+    stale_product.updated_at = datetime.now(UTC) - timedelta(days=5)
+    await session.flush()
+
+    concerns = await check_business_health(session)
+
+    assert any("has changed status" in c for c in concerns)
+    interrupts = (await session.execute(select(Interrupt))).scalars().all()
+    assert len(interrupts) == 1
+    assert interrupts[0].reason == InterruptReason.DATA_INTEGRITY.value
+
+
+async def _bare_product(session: AsyncSession, niche: str) -> str:
+    """A product with no approval-orphan baggage -- just something with a real
+    id a `HealAttempt` can point at."""
+    idea_id = await repository.upsert_idea(session, _idea(niche))
+    assert idea_id is not None
+    return await repository.create_product(session, name=niche, idea_id=idea_id)
+
+
+async def test_several_products_healing_at_once_is_flagged(session: AsyncSession) -> None:
+    now = datetime.now(UTC)
+    for i in range(3):
+        product_id = await _bare_product(session, f"audit-heal-spike-{i}")
+        session.add(
+            HealAttempt(
+                product_id=product_id,
+                attempt_number=1,
+                healing_text="something broke",
+                created_at=now,
+            )
+        )
+    await session.flush()
+
+    concerns = await check_business_health(session)
+
+    assert any("different products hit a heal cycle" in c for c in concerns)
+
+
+async def test_a_single_products_repeated_heals_is_not_flagged_as_a_spike(
+    session: AsyncSession,
+) -> None:
+    """One product legitimately cycling through several heal attempts is
+    routine -- only several *different* products at once is the pattern
+    worth naming."""
+    product_id = await _bare_product(session, "audit-single-heal")
+    now = datetime.now(UTC)
+    for attempt in range(1, 4):
+        session.add(
+            HealAttempt(
+                product_id=product_id,
+                attempt_number=attempt,
+                healing_text="something broke",
+                created_at=now,
+            )
+        )
+    await session.flush()
+
+    concerns = await check_business_health(session)
+
+    assert not any("heal cycle" in c for c in concerns)
+
+
+async def test_an_llm_spend_spike_relative_to_the_trailing_week_is_flagged(
+    session: AsyncSession,
+) -> None:
+    now = datetime.now(UTC)
+    # A quiet trailing week: $1/day for 7 days.
+    for day in range(1, 8):
+        session.add(
+            LLMCall(
+                provider="anthropic",
+                model="claude-sonnet-5",
+                task_type="analysis",
+                cost_usd=1.0,
+                created_at=now - timedelta(days=day, hours=1),
+            )
+        )
+    # Today: a huge spike relative to that baseline.
+    session.add(
+        LLMCall(
+            provider="anthropic",
+            model="claude-sonnet-5",
+            task_type="analysis",
+            cost_usd=100.0,
+            created_at=now,
+        )
+    )
+    await session.flush()
+
+    concerns = await check_business_health(session)
+
+    assert any("LLM spend" in c for c in concerns)
+
+
+async def test_multiple_concerns_on_the_same_day_raise_exactly_one_interrupt(
+    session: AsyncSession,
+) -> None:
+    product_id = await _approved_idea_with_product(session, "audit-multi-concern")
+    from factory.state.orm import Product
+
+    stale_product = (
+        await session.execute(select(Product).where(Product.idea_id == product_id))
+    ).scalar_one()
+    stale_product.updated_at = datetime.now(UTC) - timedelta(days=10)
+    await session.flush()
+
+    concerns = await check_business_health(session)
+
+    assert len(concerns) >= 1
+    interrupts = (await session.execute(select(Interrupt))).scalars().all()
+    assert len(interrupts) == 1

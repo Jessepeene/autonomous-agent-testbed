@@ -30,6 +30,16 @@ from factory.tools.registry import REGISTRY
 
 log = get_logger(__name__)
 
+#: Tier 2 finding #11, system-wide verification plan: GROWTH_ANALYST is prompted
+#: to call `read_product_growth` before deciding to start a test, but nothing
+#: re-derives that the decision was actually consistent with what that call
+#: returned -- an agent can assert "traffic looks sufficient" about a page with
+#: near-zero real views. This is deliberately a low floor, not an attempt at
+#: real statistical power: it exists to catch the outright-no-traffic case, the
+#: same "catch the extreme, don't try to be the whole answer" posture as the
+#: keyword backstops elsewhere in this plan.
+MIN_VIEWS_LAST_7_DAYS_FOR_AB_TEST = 5
+
 
 @REGISTRY.tool(
     name="read_product_growth",
@@ -172,6 +182,17 @@ async def start_ab_test_action(
         product = await repository.get_product(session, product_id)
         if product is None:
             return {"error": f"no product with id {product_id!r}"}
+        views_7d = await repository.tally_page_views(
+            session, product_id, since=datetime.now(UTC) - timedelta(days=7)
+        )
+        if views_7d < MIN_VIEWS_LAST_7_DAYS_FOR_AB_TEST:
+            return {
+                "started": False,
+                "reason": (
+                    f"only {views_7d} page view(s) in the last 7 days -- too little real "
+                    "traffic to be worth splitting into an AB test right now"
+                ),
+            }
         ab_test_id = await dev_graph.start_ab_test(
             session,
             product_id=product_id,

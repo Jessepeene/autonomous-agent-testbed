@@ -63,6 +63,24 @@ class ProviderUnavailable(LLMError):
         self.status = status
 
 
+class ProviderCircuitOpen(ProviderUnavailable):
+    """A provider is in a sustained outage and this call was not attempted at all.
+
+    Distinct from `ProviderUnavailable` (which means "we tried and it failed") in
+    the one way that matters to a caller: no request was made, nothing was spent,
+    and retrying *now* is certain to fail the same way. Observed live -- DeepSeek
+    returned `402 Insufficient Balance` for hours while a repair task retried 40
+    times, each attempt paying the latency and the agent-loop setup for a call
+    that could never succeed, and never telling anyone.
+
+    A `ProviderUnavailable` subclass on purpose: every existing degradation path
+    (`except LLMError` -> skip the optional work, `except ProviderUnavailable` ->
+    try the other vendor) stays correct without modification. Only the places that
+    should *defer rather than fail* catch this specific type -- see
+    `supervisor/graph.py::_run_engine`.
+    """
+
+
 class ProviderRequestRejected(ProviderUnavailable):
     """A permanent 4xx (bad request, auth, not found) -- the exact same request will
     never succeed against this provider no matter how many times it is retried, so

@@ -166,6 +166,24 @@ class ProviderRequestError(Exception):
         super().__init__(f"{provider} rejected the request (HTTP {status_code}): {self.detail}")
 
 
+class ProviderQuotaExceeded(Exception):
+    """The provider rejected the request over a rate limit or metered quota
+    (HTTP 429) -- the key itself is fine, but this billing period's usage
+    ceiling (search count, seat limit) has been hit. Distinct from
+    `ProviderAuthError`: nothing needs fixing in the account, it needs either
+    waiting for the period to roll over or raising the plan's limit -- and
+    unlike either error above, it is not something a human is asked to act on
+    immediately (see `marketing/leads.py`'s handling), only informed of, via
+    an `IntegrationAlert` on the dashboard's Integrations page rather than an
+    `Interrupt`.
+    """
+
+    def __init__(self, provider: str, detail: str) -> None:
+        self.provider = provider
+        self.detail = detail[:300]
+        super().__init__(f"{provider} usage limit reached (HTTP 429): {self.detail}")
+
+
 #: Below this the record is treated as unverified and discarded. This is an accuracy
 #: obligation (GDPR Art. 5(1)(d)) before it is a deliverability preference: emailing
 #: a guessed address means processing a real person's data on a wrong assumption.

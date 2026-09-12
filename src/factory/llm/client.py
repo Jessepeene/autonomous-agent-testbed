@@ -19,6 +19,7 @@ from factory.llm.providers.base import (
     AgentTurn,
     LLMProvider,
     Provider,
+    ProviderCircuitOpen,
     ProviderRefusal,
     ProviderRequestRejected,
     ProviderUnavailable,
@@ -101,11 +102,39 @@ class LLMClient:
         self._record = usage_recorder
         # Tests set this to 0 so the retry path is exercised without real sleeps.
         self._backoff_base = backoff_base
+        #: Providers currently in a sustained outage. Refreshed once per tick by
+        #: `scheduler.housekeeping` from `llm/health.py` -- deliberately a plain
+        #: mutable attribute rather than a query here: this is consulted on every
+        #: single LLM call, and a database round trip per call to answer a question
+        #: that changes on the order of minutes would cost more than the outage.
+        #: Empty by default, so nothing changes for any caller that never sets it.
+        self.tripped_providers: set[Provider] = set()
 
     @property
     def registry(self) -> ProviderRegistry:
         """Exposed so the agent runtime can reach providers for tool-calling turns."""
         return self._registry
+
+    def _usable(self, candidates: list[LLMProvider], task_type: TaskType) -> list[LLMProvider]:
+        """Drop providers the breaker has tripped.
+
+        Applied after the candidate list is built, so failover still works exactly
+        as before when only *one* provider is out: a tripped Gemini simply leaves
+        Anthropic as the candidate for an ANALYSIS call. It is only when this
+        empties the list that the call is refused outright -- which is the whole
+        point for a `NO_FAILOVER` task type like CODE_REPAIR, whose single provider
+        being down means there is genuinely nothing to try.
+        """
+        if not self.tripped_providers:
+            return candidates
+        usable = [p for p in candidates if p.name not in self.tripped_providers]
+        if usable:
+            return usable
+        raise ProviderCircuitOpen(
+            candidates[0].name,
+            f"every provider for {task_type} is in a sustained outage "
+            f"({', '.join(sorted(p.name.value for p in candidates))}); call not attempted",
+        )
 
     async def parse(
         self,
@@ -138,6 +167,7 @@ class LLMClient:
             raise NoProviderAvailable(
                 f"no available provider for {task_type} (routed to {primary})"
             )
+        candidates = self._usable(candidates, task_type)
 
         last_error: Exception | None = None
         for index, provider in enumerate(candidates):
@@ -343,6 +373,7 @@ class LLMClient:
             raise NoProviderAvailable(
                 f"no available provider for {task_type} (routed to {primary})"
             )
+        candidates = self._usable(candidates, task_type)
 
         last_error: Exception | None = None
         for index, provider in enumerate(candidates):

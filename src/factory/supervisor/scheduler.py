@@ -26,6 +26,7 @@ from typing import Any
 
 from factory.engines.marketing import campaign, channel, deliverability
 from factory.hitl import interrupts
+from factory.llm import health as llm_health
 from factory.logging import get_logger
 from factory.settings import EngineName
 from factory.state import repository
@@ -61,8 +62,56 @@ class Scheduler:
             await campaign.sync_decisions(session)
             await channel.sync_decisions(session)
             await deliverability.sync_freeze_clearance(session)
+            await self._refresh_provider_health(session)
             await self._schedule_discovery(session)
             await self._schedule_periodic(session)
+
+    async def _refresh_provider_health(self, session: Any) -> None:
+        """Trip or clear the per-provider circuit breaker, and tell a human once.
+
+        Same shape as `deliverability.sync_freeze_clearance` above: a standing
+        state that pauses a class of work, recomputed every tick from real
+        recorded outcomes rather than held in a state machine that can drift.
+        Clearing needs no action at all -- once real calls succeed again, the
+        derived query simply stops reporting the provider (see `llm/health.py`).
+        """
+        ctx = self._ctx
+        try:
+            tripped = await llm_health.tripped_providers(session)
+        except Exception as exc:  # never let an observability query stop a tick
+            log.warning("provider_health.check_failed", detail=str(exc)[:200])
+            return
+
+        previous = set(ctx.llm.tripped_providers)
+        ctx.llm.tripped_providers = set(tripped)
+
+        for provider in sorted(set(tripped) - previous):
+            log.warning(
+                "provider_health.tripped", provider=provider.value, reason=tripped[provider]
+            )
+            # One interrupt per outage, not one per blocked task: `open_interrupt`
+            # dedups on (reason, subject, status), and the subject is keyed on the
+            # provider rather than on whatever task happened to notice -- the exact
+            # distinction BUG_LOG #20 was about.
+            await interrupts.request(
+                session,
+                reason=InterruptReason.PROVIDER_OUTAGE,
+                subject=f"{provider.value} is in a sustained outage",
+                detail=(
+                    f"{provider.value}: {tripped[provider]}.\n\n"
+                    "Work that depends on this provider is paused rather than retried "
+                    "-- no further calls will be made to it until it recovers, so this "
+                    "is not costing anything. Tasks routed to it are deferred, not "
+                    "failed, and resume automatically once it works again.\n\n"
+                    "This is usually billing (an exhausted balance or an expired card) "
+                    "or a revoked key."
+                ),
+                headline="\U0001f50c Provider paused — sustained outage",
+                reply_hint="No reply needed — it resumes by itself once the provider works.",
+                needs_reply=False,
+            )
+        for provider in sorted(previous - set(tripped)):
+            log.info("provider_health.recovered", provider=provider.value)
 
     async def _schedule_discovery(self, session: Any) -> None:
         """Enqueue a discovery cycle on cadence, unless Development is saturated.
@@ -271,6 +320,27 @@ class Scheduler:
                     payload={"product_id": product.id},
                     product_id=product.id,
                     priority=65,
+                )
+
+            # Standing product oversight: AUDITOR walks each live product with a
+            # real browser (development/graph.py::_review_live_product).
+            #
+            # Deliberately here rather than in `backlog.py::CATALOGUE` alongside the
+            # deterministic `audit-live-products` slug. That catalogue is only ever
+            # enqueued from `graph.py::_backlog`, reached solely on IDLE_BACKLOG /
+            # HOLD_DISCOVERY -- so a *busy* factory never reviews its live products
+            # at all, which is exactly when a shipped defect is most likely to go
+            # unnoticed. This sweep runs unconditionally, like the ones above.
+            live_review_bucket = _bucket(now, ctx.settings.live_review_interval_days * 86400)
+            for product in await repository.live_products(session, limit=5):
+                await repository.enqueue_task(
+                    session,
+                    kind=TaskKind.REVIEW_LIVE_PRODUCT,
+                    engine=EngineName.DEVELOPMENT,
+                    idempotency_key=f"live-review:{product.id}:{live_review_bucket}",
+                    payload={"product_id": product.id},
+                    product_id=product.id,
+                    priority=64,
                 )
 
             # A pure API check (see development/graph.py::_verify_domain) -- no

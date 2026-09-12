@@ -104,6 +104,71 @@ def _spam_trigger_hits(body: str) -> list[str]:
     return [phrase for phrase in _SPAM_TRIGGER_PHRASES if phrase in lowered]
 
 
+#: Tier 1 finding #5, system-wide verification plan: `marketing/outreach.py
+#: ::SYSTEM_PROMPT` asks the model, by prompt alone, to "never invent a
+#: statistic, customer name, or case study" -- but nothing deterministic
+#: backstopped that instruction, unlike every spam/disclosure requirement
+#: above. Same shape as `_SPAM_TRIGGER_PHRASES`: multi-word or otherwise
+#: unambiguous phrases only, since single words ("trusted", "leading") are
+#: too common in legitimate B2B copy to be a reliable signal alone. This is
+#: deliberately narrow -- it catches the highest-frequency false-claim
+#: categories (fabricated certifications, vague social proof), not every
+#: possible untrue statement, the same honest limit `_SPAM_TRIGGER_PHRASES`
+#: already accepts for spam language.
+_UNVERIFIABLE_CLAIM_PHRASES: tuple[str, ...] = (
+    "soc 2",
+    "soc2",
+    "gdpr-compliant",
+    "gdpr compliant",
+    "hipaa-compliant",
+    "hipaa compliant",
+    "iso 27001",
+    "industry-leading",
+    "industry leading",
+    "trusted by",
+    "used by thousands",
+    "market leader",
+    "#1 ",
+    "number one ",
+    "award-winning",
+    "award winning",
+)
+
+
+def _unverifiable_claim_hits(body: str) -> list[str]:
+    lowered = body.lower()
+    return [phrase for phrase in _UNVERIFIABLE_CLAIM_PHRASES if phrase in lowered]
+
+
+#: Tier 2 finding #6, system-wide verification plan: `IDEA_SYSTEM_PROMPT`
+#: (compliance/assessor.py) already names these as reasons to reject or flag
+#: an idea, but nothing deterministic backstopped that instruction -- an
+#: APPROVED verdict on an idea that mentions one of these commits real
+#: engineering spend before any human ever looks at it. Looser than
+#: `_SPAM_TRIGGER_PHRASES`'s multi-word-only rule on purpose: the fallback
+#: here is a human glancing at one more idea (`FLAG_FOR_REVIEW`), not a
+#: message silently failing to send, so a single-word false positive costs
+#: far less than a missed genuine risk category would.
+_IDEA_RISK_PHRASES: tuple[str, ...] = (
+    "health",
+    "medical",
+    "credit card",
+    "payment card",
+    "payroll",
+    "background check",
+    "legal advice",
+    "financial advice",
+    "employee data",
+    "special category",
+    "biometric",
+)
+
+
+def idea_risk_category_hits(problem_statement: str, monetization_hypothesis: str) -> list[str]:
+    lowered = f"{problem_statement} {monetization_hypothesis}".lower()
+    return [phrase for phrase in _IDEA_RISK_PHRASES if phrase in lowered]
+
+
 @dataclass(slots=True)
 class RuleResult:
     passed: bool
@@ -175,6 +240,10 @@ def check_outreach_content(
     hits = _spam_trigger_hits(body)
     if hits:
         result.fail(f"body contains spam-trigger phrase(s): {', '.join(hits)}")
+
+    claim_hits = _unverifiable_claim_hits(body)
+    if claim_hits:
+        result.fail(f"body contains an unverifiable claim: {', '.join(claim_hits)}")
 
     return result
 

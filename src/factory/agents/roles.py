@@ -61,7 +61,23 @@ WORKSPACE_SCOPED_ROLES = frozenset({RoleName.WORKSPACE_SURGEON, RoleName.SEO_OPT
 #: that cycle -- see `submit_signal`'s required `task_id` argument). It is a pipeline
 #: step standing in for what the fixed sources do mechanically, not an open-ended
 #: capability the Orchestrator should hand an arbitrary objective.
-PIPELINE_SCOPED_ROLES = frozenset({RoleName.DISCOVERY_SCOUT})
+#:
+#: AUDITOR is here for a sharper reason: both of its tool categories only exist in a
+#: *private* registry built per run (`tools/browser.py::BrowserSession` holds the
+#: live page; `tools/product_review.py::build_report_tool` is pinned to one product).
+#: Reached through `spawn()` it would resolve against the process-wide REGISTRY,
+#: find neither category, and run with no tools at all -- burning a real cost cap to
+#: produce a confident review of a page it never opened. See
+#: `development/graph.py::_review_live_product` for its one legitimate call site.
+PIPELINE_SCOPED_ROLES = frozenset({RoleName.DISCOVERY_SCOUT, RoleName.AUDITOR})
+
+#: Every role that is only safe from its own call site. Unlike the two sets above --
+#: which were only ever filtered out of `role_catalogue()`, i.e. hidden from the
+#: Orchestrator's prompt but still resolvable if a model emitted the name anyway --
+#: this one is additionally enforced at spawn time (`spawner.can_spawn`). Prompt-level
+#: exclusion is a strong hint, not a guarantee, and "the model picked a name it was
+#: never shown" is exactly the case a guard exists for.
+CALL_SITE_SCOPED_ROLES = WORKSPACE_SCOPED_ROLES | PIPELINE_SCOPED_ROLES
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,20 +220,62 @@ ROLES: dict[RoleName, AgentRole] = {
     ),
     RoleName.AUDITOR: AgentRole(
         name=RoleName.AUDITOR,
-        purpose="Check a live product's health and report degradation.",
-        system_prompt=(
-            "You are an auditor for an autonomous software company. You check whether "
-            "a deployed product is actually working from the outside.\n"
-            "Fetch its health endpoint and its main page. Report concrete observations: "
-            "status codes, response times, error text. Distinguish 'degraded' from "
-            "'down' from 'fine'. Do not speculate about causes you cannot observe.\n"
-            + _SHARED_RULES
+        purpose=(
+            "Use a live product the way a first-time visitor would and report what a "
+            "demanding manager would flag."
         ),
-        tool_categories=("http",),
+        system_prompt=(
+            "You are a senior QA engineer testing a live product. You have a real "
+            "browser with working instruments: every action returns `network` (the "
+            "requests it fired, with status codes) and `console_errors` alongside "
+            "the visible page.\n"
+            "\n"
+            "Work like a tester, not like a confused visitor. That means:\n"
+            "- Decide what the page's one main action is (sign up, capture an email, "
+            "start a trial) and what *should* happen when it works.\n"
+            "- Test it ONCE, deliberately. Fill the field(s), click the control.\n"
+            "- Then read the instruments, not the vibes. Did a request fire? What "
+            "status came back? A submit that fires POST -> 404/500, or that fires no "
+            "request at all, is broken -- even if the page looks identical. A submit "
+            "that returns 2xx and shows confirmation works. The network line is your "
+            "evidence; the page text alone is not.\n"
+            "- Repeating an identical action is NOT evidence. If a click did nothing, "
+            "doing it again will also do nothing. Read `network` and conclude.\n"
+            "\n"
+            "Worth flagging: the main action does not work; a date, year, price or "
+            "claim is wrong or stale; the page is visibly unfinished (placeholder "
+            "text, lorem ipsum, a dead link, an empty section); it contradicts "
+            "itself. Not worth flagging: taste, wording you would have phrased "
+            "differently, or a missing feature nobody promised.\n"
+            "\n"
+            "Be economical. A competent tester settles this in a handful of actions. "
+            "When you know what you think, STOP CALLING TOOLS and write your verdict "
+            "as your final message: what you did, what the instruments showed, and "
+            "whether anything is actually wrong. That written verdict is the "
+            "deliverable -- it is what gets acted on.\n"
+            "Finding nothing wrong is a complete, legitimate outcome and most "
+            "products most weeks should produce exactly that. Say so plainly; do not "
+            "manufacture a finding to look thorough.\n" + _SHARED_RULES
+        ),
+        # Read-only and origin-pinned. This role deliberately has NO action tool:
+        # the first two live runs both exhausted their step budget without ever
+        # calling the reporting tool, so a real review was performed and then
+        # thrown away. Depending on an agent to voluntarily stop exploring and
+        # report is not reliable for an open-ended task. The verdict is now
+        # extracted from its final message by a separate, always-run structured
+        # call in `development/graph.py::_review_live_product`, which is what
+        # queues any patch -- the same investigate-then-extract split
+        # `learning/maintenance.py` already uses.
+        tool_categories=("browser",),
         task_type=TaskType.ANALYSIS,
-        max_steps=6,
-        cost_cap_usd=0.15,
-        max_context_chars=100_000,
+        # 14 is generous for the method above (open, fill, click, read the network,
+        # conclude) without funding a second exhaustive pass. Steps, not cost, were
+        # the binding constraint in both live runs -- a 12-step run measured $0.072
+        # against this $0.40 cap.
+        max_steps=14,
+        mutating=False,
+        cost_cap_usd=0.40,
+        max_context_chars=180_000,
     ),
     RoleName.WORKSPACE_SURGEON: AgentRole(
         name=RoleName.WORKSPACE_SURGEON,
@@ -437,5 +495,5 @@ def role_catalogue() -> str:
     return "\n".join(
         f"- {role.name.value}: {role.purpose} (tools: {', '.join(role.tool_categories)})"
         for role in ROLES.values()
-        if role.name not in WORKSPACE_SCOPED_ROLES and role.name not in PIPELINE_SCOPED_ROLES
+        if role.name not in CALL_SITE_SCOPED_ROLES
     )

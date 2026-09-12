@@ -33,24 +33,43 @@ from __future__ import annotations
 
 import re
 
-#: Requires an actual read (`os.environ[...]` or `os.getenv(...)`), not just the
-#: bare name appearing anywhere -- a `# TODO: read PRODUCT_PRICE_CENTS` comment
-#: must not satisfy this.
-_PRICE_ENV_READ_RE = re.compile(
-    r"""os\.environ\[\s*["']PRODUCT_PRICE_CENTS["']\s*\]|os\.getenv\(\s*["']PRODUCT_PRICE_CENTS["']"""
-)
-#: Same shape as `_PRICE_ENV_READ_RE`, added after a real, repeated live failure:
-#: `SYSTEM_PROMPT` never used to name the Stripe key's exact environment variable
-#: (just "reading the key from an environment variable"), and the model
-#: consistently guessed `STRIPE_SECRET_KEY` -- the name Stripe's own docs use --
-#: instead of `STRIPE_API_KEY`, the only name `deploy.py::_runtime_env` ever
-#: actually sets. Four separate products hit this identically: the key read as
-#: empty at runtime, so billing failed closed on every checkout attempt. The
+
+def _env_read_pattern(name: str) -> re.Pattern[str]:
+    """Requires an actual read of `name`, not just the bare string appearing
+    anywhere (including inside a comment) -- a `# TODO: read X` must not
+    satisfy this. Covers all three idioms Python code actually reads an
+    environment variable with: `os.environ["X"]`, `os.getenv("X")`, and
+    `os.environ.get("X")`.
+
+    Real bug, found live: the original pattern only covered the first two.
+    `os.environ.get(...)` -- an equally common, equally correct idiom, and
+    the one the model actually used -- silently never matched, so
+    `missing_contract_requirements` false-positived on genuinely correct
+    code. This sent a product whose Stripe key *and* price were both wired
+    correctly into an unnecessary heal cycle, which then exhausted the
+    autonomous ceiling and escalated to a human over a bug that was never
+    actually there -- precisely the class of wasted escalation this
+    deterministic gate exists to prevent, not cause.
+    """
+    escaped = re.escape(name)
+    return re.compile(
+        rf"""os\.environ\[\s*["']{escaped}["']\s*\]"""
+        rf"""|os\.getenv\(\s*["']{escaped}["']"""
+        rf"""|os\.environ\.get\(\s*["']{escaped}["']"""
+    )
+
+
+_PRICE_ENV_READ_RE = _env_read_pattern("PRODUCT_PRICE_CENTS")
+#: Added after a real, repeated live failure: `SYSTEM_PROMPT` never used to
+#: name the Stripe key's exact environment variable (just "reading the key
+#: from an environment variable"), and the model consistently guessed
+#: `STRIPE_SECRET_KEY` -- the name Stripe's own docs use -- instead of
+#: `STRIPE_API_KEY`, the only name `deploy.py::_runtime_env` ever actually
+#: sets. Four separate products hit this identically: the key read as empty
+#: at runtime, so billing failed closed on every checkout attempt. The
 #: prompt now names it explicitly too; this check exists so a regression is
 #: caught here, cheaply, before ever reaching Bug Council.
-_STRIPE_KEY_ENV_READ_RE = re.compile(
-    r"""os\.environ\[\s*["']STRIPE_API_KEY["']\s*\]|os\.getenv\(\s*["']STRIPE_API_KEY["']"""
-)
+_STRIPE_KEY_ENV_READ_RE = _env_read_pattern("STRIPE_API_KEY")
 _CLIENT_REFERENCE_RE = re.compile(r"client_reference_id")
 _PRIVACY_LINK_RE = re.compile(r"""<a\b[^>]*href\s*=\s*["'][^"']*privacy[^"']*["']""", re.IGNORECASE)
 

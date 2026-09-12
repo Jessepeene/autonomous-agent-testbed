@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from factory.hitl.telegram import NullNotifier
 from factory.llm.client import LLMClient
-from factory.llm.providers.base import Provider
+from factory.llm.providers.base import Provider, ProviderRequestRejected
 from factory.llm.providers.fake import FakeProvider
 from factory.llm.router import ProviderRegistry
 from factory.sandbox.disabled import DisabledSandbox
@@ -31,7 +31,7 @@ from factory.settings import EngineName, Settings
 from factory.state import db as db_module
 from factory.state import repository
 from factory.state.orm import Base, Interrupt, Task
-from factory.state.schemas import TaskKind, TaskStatus
+from factory.state.schemas import InterruptReason, TaskKind, TaskStatus
 from factory.supervisor import graph as sup_graph
 from factory.supervisor.context import FactoryContext
 
@@ -86,6 +86,10 @@ def _ctx(*, workspace_root: Path, gemini: FakeProvider | None = None) -> Factory
 
 async def _always_fails(ctx: object, session: object, task: object) -> str:
     raise RuntimeError("boom")
+
+
+async def _always_provider_unavailable(ctx: object, session: object, task: object) -> str:
+    raise ProviderRequestRejected(Provider.ANTHROPIC, "credit balance too low", status=400)
 
 
 async def test_two_tasks_that_exhaust_the_same_way_both_get_their_own_interrupt(
@@ -149,3 +153,56 @@ async def test_two_tasks_that_exhaust_the_same_way_both_get_their_own_interrupt(
     subjects = {i.subject for i in interrupts}
     assert len(subjects) == 2, f"expected two distinct subjects, got {subjects}"
     assert {i.task_id for i in interrupts} == {first_task_id, second_task_id}
+
+
+async def test_two_tasks_hitting_the_same_provider_outage_collapse_into_one_interrupt(
+    session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deliberate opposite of the test above: a *provider* rejecting every
+    request is the same root cause for every task while the outage persists, so
+    it must collapse into one interrupt, not one per task -- see
+    PROVIDER_OUTAGE's docstring in state/schemas.py for the real incident (40
+    separate LEGAL_UNCERTAINTY interrupts over 14 days, all the same persistent
+    Anthropic credit exhaustion) this fixes. Also proves the explanation never
+    needs an LLM call -- no `_PlainLanguageExplanation` is registered on the
+    fake provider here, unlike the generic-failure test above."""
+    monkeypatch.setattr(sup_graph, "get_runner", lambda engine: _always_provider_unavailable)
+
+    first_task_id = await repository.enqueue_task(
+        session,
+        kind=TaskKind.PATCH_PRODUCT,
+        engine=EngineName.DEVELOPMENT,
+        idempotency_key="provider-outage:1",
+    )
+    second_task_id = await repository.enqueue_task(
+        session,
+        kind=TaskKind.PATCH_PRODUCT,
+        engine=EngineName.DEVELOPMENT,
+        idempotency_key="provider-outage:2",
+    )
+    assert first_task_id is not None
+    assert second_task_id is not None
+    await session.execute(
+        update(Task).where(Task.id.in_([first_task_id, second_task_id])).values(attempt_count=99)
+    )
+    await session.commit()
+
+    ctx = _ctx(workspace_root=tmp_path)
+    await sup_graph._run_engine({}, ctx=ctx, engine=EngineName.DEVELOPMENT)
+    await sup_graph._run_engine({}, ctx=ctx, engine=EngineName.DEVELOPMENT)
+
+    tasks = (
+        (await session.execute(select(Task).where(Task.id.in_([first_task_id, second_task_id]))))
+        .scalars()
+        .all()
+    )
+    assert len(tasks) == 2
+    assert all(t.status == TaskStatus.ESCALATED.value for t in tasks)
+
+    interrupts = (
+        (await session.execute(select(Interrupt).where(Interrupt.status == "open"))).scalars().all()
+    )
+    assert len(interrupts) == 1
+    assert interrupts[0].reason == InterruptReason.PROVIDER_OUTAGE.value
+    assert interrupts[0].subject == "anthropic is rejecting requests (HTTP 400)"
+    assert "credit balance too low" in interrupts[0].detail

@@ -207,6 +207,13 @@ class Product(Base):
     #: change call to call, so it's generated once per product rather than on
     #: every harvest. NULL until the first harvest that needs it.
     lead_qualification_brief: Mapped[str | None] = mapped_column(Text)
+    #: A `DesignBrief` (JSON: palette/typography/tone), generated once by
+    #: `development/design_brief.py::build_design_brief` from the real deployed
+    #: page (not a guess from the idea text) and cached here -- surfaced on the
+    #: dashboard's product detail view. NULL until generated: automatically the
+    #: moment a build first ships (`development/graph.py::_verify_and_ship`), or
+    #: on demand for a product that was already live before this existed.
+    design_brief: Mapped[str | None] = mapped_column(Text)
 
     __table_args__ = (Index("ix_products_status", "status"),)
 
@@ -512,6 +519,18 @@ class OutreachLog(Base):
     #: to it afterward.
     bounced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     complained_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: Which SENDER_IDENTITY version was active when this send went out, so its real
+    #: outcome (converted / timed out unconverted) can be scored back to it later --
+    #: see `marketing/attribution.py::reconcile`. Never set for a blocked/suppressed
+    #: send (`status != "sent"`), since those never had a chance to convert.
+    sender_identity_version_id: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("tunable_parameters.id")
+    )
+    #: Stamped only by the delayed timeout path (a converted send is already
+    #: excluded from that path by `converted_at IS NOT NULL`) -- without this, a
+    #: send that ages past the attribution window would be re-scored as a fresh
+    #: failure every time `reconcile` runs.
+    identity_outcome_recorded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (
         Index("ix_outreach_lead", "lead_id", "sent_at"),
@@ -731,6 +750,69 @@ class Interrupt(Base):
             postgresql_where=(status == "open"),
         ),
         Index("ix_interrupts_status", "status", "delivered"),
+    )
+
+
+class IntegrationAlert(Base):
+    """A usage-limit/quota/account signal from a third-party integration (Hunter,
+    Apollo, ...) -- surfaced on the dashboard's Integrations page, deliberately
+    *not* an `Interrupt`. An `Interrupt` asks a human to decide something and
+    blocks a specific product/task until they reply; a quota hit blocks nothing
+    (the pipeline already degrades gracefully around it -- see leads.py) and
+    needs no reply, just visibility. Mixing the two would bury genuine
+    decisions a human must make under high-frequency, no-action-needed noise
+    every time a metered provider's limit resets on its normal monthly cycle.
+    """
+
+    __tablename__ = "integration_alerts"
+
+    id: Mapped[str] = _pk()
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="open")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        # Partial unique index, same reasoning and same bug class as
+        # Interrupt.uq_interrupts_open_subject (see
+        # 0017_interrupt_open_subject_partial.py): scoped to status='open' so a
+        # provider that hits the same limit repeatedly collapses into one open
+        # row instead of spamming a new one on every retry, while a *resolved*
+        # occurrence never blocks a later, genuinely new one from opening.
+        Index(
+            "uq_integration_alerts_open_provider_message",
+            "provider",
+            "message",
+            "status",
+            unique=True,
+            postgresql_where=(status == "open"),
+        ),
+        Index("ix_integration_alerts_status", "status"),
+    )
+
+
+class CustomCredential(Base):
+    """The registry half of a free-form, dashboard-added credential -- the
+    Integrations page's escape hatch for a secret this factory doesn't yet
+    have a typed `Settings` field or catalog entry for (see
+    `observability/integrations.py::CREDENTIAL_CATALOG`).
+
+    Only the *key name* lives here. The actual value is written straight to
+    `.env` via the same `write_env_value()` every catalog credential already
+    uses -- this table exists purely so the dashboard knows which extra keys
+    to list back and preview, since an arbitrary key is not a `Settings`
+    attribute `getattr()` can read.
+    """
+
+    __tablename__ = "custom_credentials"
+
+    id: Mapped[str] = _pk()
+    key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
 

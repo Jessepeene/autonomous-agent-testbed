@@ -4,7 +4,12 @@ FROM python:3.13-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    # Shared, world-readable browser location. Playwright's default is
+    # $HOME/.cache/ms-playwright, which would install under /root during the build
+    # and then be unreadable to the uid-10001 runtime user -- the browser would be
+    # present in the image and still fail to launch.
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 # docker-cli only: the factory drives the host daemon to launch sibling sandboxes.
 # Copied from the official docker:cli image rather than installed via apt: Debian
@@ -22,7 +27,14 @@ WORKDIR /app
 
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN pip install --no-cache-dir .
+# `[browser]` pulls in Playwright; `playwright install --with-deps chromium` adds
+# Chromium plus its ~15 apt-level shared-object dependencies. Needed because the
+# product reviewer (agents/roles.py::AUDITOR) has to actually *use* a live page --
+# submit its forms, not just read its HTML. Run as root, before USER factory.
+RUN pip install --no-cache-dir ".[browser]" \
+    && playwright install --with-deps chromium \
+    && chmod -R a+rX /ms-playwright \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY alembic.ini ./
 COPY alembic ./alembic

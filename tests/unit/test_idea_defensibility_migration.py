@@ -30,15 +30,33 @@ from factory.state.schemas import ScoredIdea
 _MIGRATION_PATH = (
     Path(__file__).resolve().parents[2] / "alembic" / "versions" / "0023_idea_defensibility.py"
 )
+_APPENDICES_MIGRATION_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "alembic"
+    / "versions"
+    / "0028_tier0_prompt_appendices.py"
+)
 
 
-@pytest.fixture(scope="module")
-def migration() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("_migration_0023", _MIGRATION_PATH)
+def _load(path: Path, name: str) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture(scope="module")
+def migration() -> ModuleType:
+    return _load(_MIGRATION_PATH, "_migration_0023")
+
+
+@pytest.fixture(scope="module")
+def later_appendices_migration() -> ModuleType:
+    """0028 is the next migration to touch this same tunable key -- see its own
+    module docstring. Needed here only to compose the full no-drift check
+    below across both migrations combined."""
+    return _load(_APPENDICES_MIGRATION_PATH, "_migration_0028")
 
 
 # --- _matches: detecting an untouched row --------------------------------------
@@ -144,12 +162,25 @@ def test_old_default_weights_do_not_sum_to_one_plus_defensibility(migration: Mod
 # --- The discriminator prompt text: must never silently drift from the code ----
 
 
-def test_new_discriminator_system_matches_the_live_code_constant(migration: ModuleType) -> None:
+def test_new_discriminator_system_matches_the_live_code_constant(
+    migration: ModuleType, later_appendices_migration: ModuleType
+) -> None:
     """The migration carries its own copy of the post-Phase-4 prompt text (Alembic
     migrations must not import application code that might itself change later)
     -- this is the guard that the copy can never silently drift from the real
-    constant `discovery/graph.py` actually serves."""
-    assert migration._NEW_DISCRIMINATOR_SYSTEM == DISCRIMINATOR_SYSTEM
+    constant `discovery/graph.py` actually serves.
+
+    0023 is no longer the last migration to touch this key -- 0028 later
+    appended a Tier 0 holistic-check paragraph (system-wide verification
+    plan) -- so the true invariant is now "0023's text plus every later
+    appendix equals today's live constant," not "0023's text alone still
+    does." Composing the two here keeps this a real no-drift guard instead of
+    a stale assumption that quietly stopped being checked.
+    """
+    assert (
+        migration._NEW_DISCRIMINATOR_SYSTEM + later_appendices_migration._DISCRIMINATOR_APPENDIX
+        == DISCRIMINATOR_SYSTEM
+    )
 
 
 def test_discriminator_appendix_names_every_new_field(migration: ModuleType) -> None:

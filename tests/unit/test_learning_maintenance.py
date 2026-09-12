@@ -20,7 +20,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from factory.learning.maintenance import WeightsCandidate, _engine_for_key
+from factory.learning.maintenance import SenderIdentityCandidate, WeightsCandidate, _engine_for_key
 from factory.settings import EngineName
 from factory.state.schemas import ScoredIdea
 
@@ -145,3 +145,65 @@ def test_engine_for_key_returns_none_for_an_unrecognised_engine_segment() -> Non
     """A module path shaped like `factory.engines.<x>...` where `<x>` is not one
     of the fixed `EngineName` values -- must not raise."""
     assert _engine_for_key("factory.engines.nonexistent.module:KEY") is None
+
+
+# --- SenderIdentityCandidate: the only gate a candidate sender name passes
+# through before it reaches a raw email `From` header -------------------------
+
+
+def test_a_real_looking_two_token_name_is_accepted() -> None:
+    candidate = SenderIdentityCandidate(
+        no_change_recommended=False,
+        sender_name="Marcus Webb",
+        rationale="Recent episodes suggest a more common surname performs better.",
+    )
+    assert candidate.sender_name == "Marcus Webb"
+
+
+def test_a_hyphenated_or_apostrophed_name_is_accepted() -> None:
+    candidate = SenderIdentityCandidate(
+        no_change_recommended=False,
+        sender_name="Siobhan O'Malley-Reyes",
+        rationale="Testing a distinctive, memorable full name.",
+    )
+    assert candidate.sender_name == "Siobhan O'Malley-Reyes"
+
+
+def test_a_single_token_name_is_rejected() -> None:
+    """A bare first name reads worse in a `From` header, not better -- every
+    version of this key must be the same two-token shape."""
+    with pytest.raises(ValidationError, match="sender_name"):
+        SenderIdentityCandidate(
+            no_change_recommended=False,
+            sender_name="Marcus",
+            rationale="Testing a shorter, punchier sender name.",
+        )
+
+
+def test_an_embedded_angle_bracket_address_is_rejected() -> None:
+    """The exact attack this pattern exists to block: a candidate that would
+    silently override the real mailbox once composed into a `From` header."""
+    with pytest.raises(ValidationError, match="sender_name"):
+        SenderIdentityCandidate(
+            no_change_recommended=False,
+            sender_name="Alex Reyes <attacker@evil.test>",
+            rationale="Malicious candidate.",
+        )
+
+
+def test_a_crlf_injection_attempt_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="sender_name"):
+        SenderIdentityCandidate(
+            no_change_recommended=False,
+            sender_name="Alex Reyes\r\nBcc: attacker@evil.test",
+            rationale="Malicious candidate.",
+        )
+
+
+def test_digits_in_a_name_are_rejected() -> None:
+    with pytest.raises(ValidationError, match="sender_name"):
+        SenderIdentityCandidate(
+            no_change_recommended=False,
+            sender_name="Alex Reyes2",
+            rationale="Testing a name with a digit.",
+        )

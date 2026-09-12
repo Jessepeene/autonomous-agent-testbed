@@ -10,6 +10,7 @@ from factory.engines.marketing.providers.base import (
     Provenance,
     ProvenanceKind,
     ProviderAuthError,
+    ProviderQuotaExceeded,
     ProviderRequestError,
     QualificationBrief,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "Provenance",
     "ProvenanceKind",
     "ProviderAuthError",
+    "ProviderQuotaExceeded",
     "ProviderRequestError",
     "QualificationBrief",
     "WebsiteContactProvider",

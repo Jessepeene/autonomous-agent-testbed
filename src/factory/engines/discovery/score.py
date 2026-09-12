@@ -7,10 +7,10 @@ grade their own homework.
 
 from __future__ import annotations
 
-from factory.engines.discovery.cluster import Cluster
+from factory.engines.discovery.cluster import Cluster, find_cluster_for_source_url
 from factory.logging import get_logger
 from factory.settings import EngineName, TaskType
-from factory.state.schemas import DiscriminatedIdeas, IdeaBatch, ScoredIdea
+from factory.state.schemas import DiscriminatedIdeas, GeneratedIdea, IdeaBatch, ScoredIdea
 from factory.supervisor.context import FactoryContext
 
 log = get_logger(__name__)
@@ -102,7 +102,17 @@ to anyone, in whole US dollars.
 
 Score honestly and low. Optimistic scoring here wastes real engineering budget \
 downstream. If you would not personally build it, say so in rejection_reason and score \
-it accordingly.\
+it accordingly.
+
+Finally, step back from the five dimensions above and apply one holistic check: \
+gut_check_passed should be false whenever an experienced operator would object to \
+this as a real business on sight, even if every dimension above happened to score \
+well -- the niche is not actually distinct from products already well known to \
+exist, the monetization_hypothesis contradicts the target_niche or problem_statement \
+stated earlier, or the idea is simply not a coherent business when considered as a \
+whole rather than five separate numbers. Set gut_check_passed=true by default; only \
+set it false with a concrete, specific objection in gut_check_reasoning -- a generic \
+hedge ("this is risky") does not count.\
 """
 
 
@@ -159,6 +169,7 @@ async def discriminate(
     ctx: FactoryContext,
     batch: IdeaBatch,
     *,
+    clusters: list[Cluster] | None = None,
     system: str = DISCRIMINATOR_SYSTEM,
     tunable_parameter_id: str | None = None,
     task_id: str | None = None,
@@ -167,11 +178,31 @@ async def discriminate(
     if not batch.ideas:
         return DiscriminatedIdeas(ideas=[])
 
+    # Tier 2 finding #7, system-wide verification plan: this module's own
+    # docstring frames generator/discriminator as adversarial ("running them
+    # as one call produces ideas that grade their own homework"), but the
+    # discriminator previously only ever saw the generator's own paraphrase
+    # of the evidence (problem_statement/target_niche), never the raw signals
+    # it's supposedly independently judging -- it could not catch an
+    # exaggerated pain point or an invented niche characteristic because it
+    # never saw the complaints being summarized. `clusters` is optional,
+    # defaulting to None, so a caller that predates this (or one without a
+    # cluster mapping handy) still gets the original, ungrounded behaviour
+    # rather than a hard failure.
+    def _evidence_block(idea: GeneratedIdea) -> str:
+        if clusters is None:
+            return ""
+        cluster = find_cluster_for_source_url(clusters, str(idea.source_url))
+        if cluster is None:
+            return ""
+        return f"\nraw evidence this was drawn from:\n{cluster.summary(max_chars=800)}"
+
     rendered = "\n\n".join(
         f"### Idea {index + 1}\n"
         f"problem_statement: {idea.problem_statement}\n"
         f"target_niche: {idea.target_niche}\n"
         f"source_url: {idea.source_url}"
+        f"{_evidence_block(idea)}"
         for index, idea in enumerate(batch.ideas)
     )
     # Same reasoning as generate_ideas above -- memory in the prompt, never system.
@@ -203,6 +234,17 @@ def passes_plg_constraint(
     )
 
 
+def passes_gut_check(idea: ScoredIdea) -> bool:
+    """Deterministic admission gate on the discriminator's own holistic veto --
+    same pattern and same reasoning as `passes_plg_constraint`: the model
+    self-reports the judgement, code makes the binding decision. Independent of
+    `weighted_score()` on purpose: an idea can score adequately on all five
+    scored dimensions while being, taken as a whole, obviously not a real
+    business (Tier 0 of the system-wide verification plan) -- exactly the gap a
+    fixed set of isolated numeric dimensions can never catch on its own."""
+    return idea.gut_check_passed
+
+
 def survivors(
     result: DiscriminatedIdeas,
     weights: dict[str, float] | None = None,
@@ -212,13 +254,15 @@ def survivors(
     every caller that never heard of the learning loop behaves exactly as before."""
     scored = weights if weights is not None else ScoredIdea.default_weights()
     scored_ok = [idea for idea in result.ideas if idea.weighted_score(scored) >= threshold]
-    kept = [idea for idea in scored_ok if passes_plg_constraint(idea)]
+    gut_ok = [idea for idea in scored_ok if passes_gut_check(idea)]
+    kept = [idea for idea in gut_ok if passes_plg_constraint(idea)]
     log.info(
         "discovery.discriminated",
         candidates=len(result.ideas),
         scored_survivors=len(scored_ok),
         survivors=len(kept),
-        plg_rejected=len(scored_ok) - len(kept),
+        gut_check_rejected=len(scored_ok) - len(gut_ok),
+        plg_rejected=len(gut_ok) - len(kept),
         threshold=threshold,
     )
     return sorted(kept, key=lambda i: i.weighted_score(scored), reverse=True)

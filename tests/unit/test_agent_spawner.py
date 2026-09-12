@@ -20,6 +20,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from factory.agents.roles import (
+    CALL_SITE_SCOPED_ROLES,
     PIPELINE_SCOPED_ROLES,
     ROLES,
     WORKSPACE_SCOPED_ROLES,
@@ -29,7 +30,7 @@ from factory.agents.roles import (
 )
 from factory.agents.runtime import AgentResult
 from factory.agents.spawner import RoleNotPermitted, SpawnRequest, can_spawn, resolve_role, spawn
-from factory.llm.providers.base import AgentTurn, Provider, Usage
+from factory.llm.providers.base import AgentTurn, Provider, ToolCall, Usage
 from factory.llm.providers.fake import FakeProvider
 from factory.memory import store as memory_store
 from factory.settings import EngineName
@@ -41,6 +42,17 @@ def _completion(text: str) -> AgentTurn:
         text=text,
         tool_calls=[],
         stop_reason="end_turn",
+        provider=Provider.GEMINI,
+        model="gemini-2.5-flash",
+        usage=Usage(input_tokens=5, output_tokens=5),
+    )
+
+
+def _tool_call_turn(call: ToolCall) -> AgentTurn:
+    return AgentTurn(
+        text="",
+        tool_calls=[call],
+        stop_reason="tool_use",
         provider=Provider.GEMINI,
         model="gemini-2.5-flash",
         usage=Usage(input_tokens=5, output_tokens=5),
@@ -159,7 +171,51 @@ def test_read_only_roles_are_all_declared_non_mutating() -> None:
     the world (edit live code, start a real AB test, enqueue a real patch, raise
     a real human-approval request) are flagged mutating."""
     mutating = {name for name, role in ROLES.items() if role.mutating}
-    assert mutating == {RoleName.REPAIR_ENGINEER, RoleName.GROWTH_ANALYST, RoleName.CHANNEL_SCOUT}
+    assert mutating == {
+        RoleName.REPAIR_ENGINEER,
+        RoleName.GROWTH_ANALYST,
+        RoleName.CHANNEL_SCOUT,
+    }
+    # AUDITOR is deliberately NOT here despite its reviews commissioning real
+    # patches: its own tools are read-only and origin-pinned, and the patch is
+    # queued by `_review_live_product` from an extracted verdict, not by the agent.
+    # It briefly held an action tool and that design failed twice live -- see
+    # tools/product_review.py's module docstring.
+    assert ROLES[RoleName.AUDITOR].tool_categories == ("browser",)
+
+
+# --- call-site scoping: a guard, not just a hidden menu entry -----------------
+
+
+@pytest.mark.parametrize("name", sorted(CALL_SITE_SCOPED_ROLES))
+def test_call_site_scoped_roles_are_refused_by_a_generic_spawn(
+    name: RoleName, ctx: FactoryContext
+) -> None:
+    """Before this guard existed the exclusion was prompt-level only: these roles
+    were filtered out of `role_catalogue()`, so the Orchestrator was never *shown*
+    them -- but nothing stopped a model emitting the name anyway, and
+    `resolve_role` would resolve it happily. AUDITOR makes that concrete: reached
+    through a generic spawn its tool categories resolve against the process-wide
+    REGISTRY, which holds neither, so it would burn a real cost cap producing a
+    confident review of a page it never opened."""
+    ctx.docker_available = True
+    ctx.settings.factory_dry_run = False
+    permitted, reason = can_spawn(ctx, get_role(name))
+    assert permitted is False
+    assert "own call site" in reason
+
+
+@pytest.mark.parametrize("name", sorted(CALL_SITE_SCOPED_ROLES))
+def test_the_authorised_call_site_may_still_spawn_a_scoped_role(
+    name: RoleName, ctx: FactoryContext
+) -> None:
+    """`discovery/scout.py` legitimately reaches DISCOVERY_SCOUT through `spawn()`
+    -- it is the only caller that can supply the cycle's own task_id. The guard
+    must gate on *who is asking*, not block the role outright."""
+    ctx.docker_available = True
+    ctx.settings.factory_dry_run = False
+    permitted, _ = can_spawn(ctx, get_role(name), from_own_call_site=True)
+    assert permitted is True
 
 
 # --- spawn(): refusal never touches the provider ------------------------------
@@ -187,21 +243,37 @@ async def test_spawn_without_a_session_skips_memory_entirely(
 ) -> None:
     gemini_fake.register_turns(_completion("Nothing looks degraded."))
     result = await spawn(
-        ctx, None, SpawnRequest(role=RoleName.AUDITOR, objective="check the product")
+        ctx, None, SpawnRequest(role=RoleName.ANALYST, objective="check the product")
     )
     assert result.succeeded
     assert result.answer == "Nothing looks degraded."
 
 
 async def test_spawn_writes_a_memory_on_success(
-    ctx: FactoryContext, gemini_fake: FakeProvider, memory_session: AsyncSession
+    ctx: FactoryContext,
+    gemini_fake: FakeProvider,
+    memory_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    gemini_fake.register_turns(_completion("The checkout endpoint returns 503."))
+    """A memory write requires real tool evidence, not just a confident final
+    answer -- Tier 1 finding #1, system-wide verification plan. ANALYST's only
+    tool category is `http`, so this registers a real `http_get` call before
+    the final answer, with the actual network request stubbed out."""
+    import httpx
+
+    async def fake_get(self: httpx.AsyncClient, url: str, **kwargs: object) -> httpx.Response:
+        return httpx.Response(503, text="", request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "get", fake_get)
+    gemini_fake.register_turns(
+        _tool_call_turn(ToolCall(id="1", name="http_get", arguments={"url": "https://example.test"})),
+        _completion("The checkout endpoint returns 503."),
+    )
     await spawn(
         ctx,
         memory_session,
         SpawnRequest(
-            role=RoleName.AUDITOR,
+            role=RoleName.ANALYST,
             objective="check the product",
             engine=EngineName.MARKETING,
             product_id="prod-1",
@@ -216,6 +288,35 @@ async def test_spawn_writes_a_memory_on_success(
     )
     assert len(hits) == 1
     assert "503" in hits[0].content
+
+
+async def test_spawn_does_not_write_a_memory_when_no_tool_was_ever_called(
+    ctx: FactoryContext, gemini_fake: FakeProvider, memory_session: AsyncSession
+) -> None:
+    """The exact gap Tier 1 finding #1 closes: a confident final answer with
+    zero tool calls previously satisfied `result.succeeded` exactly as well as
+    one backed by real investigation, and became a permanent shared memory
+    every future agent recalls as established fact."""
+    gemini_fake.register_turns(_completion("Nothing looks degraded."))
+
+    await spawn(
+        ctx,
+        memory_session,
+        SpawnRequest(
+            role=RoleName.ANALYST,
+            objective="check the product",
+            engine=EngineName.MARKETING,
+            product_id="prod-2",
+        ),
+    )
+    await memory_session.commit()
+
+    hits = await memory_store.recall(
+        memory_session,
+        query="Nothing looks degraded",
+        scopes=memory_store.scopes_for(product_id="prod-2"),
+    )
+    assert hits == []
 
 
 async def test_spawn_recalls_prior_memory_into_the_objective_context(
@@ -237,7 +338,7 @@ async def test_spawn_recalls_prior_memory_into_the_objective_context(
         ctx,
         memory_session,
         SpawnRequest(
-            role=RoleName.AUDITOR,
+            role=RoleName.ANALYST,
             objective="check the product",
             product_id="prod-1",
         ),
@@ -272,14 +373,14 @@ async def test_spawn_does_not_write_a_memory_on_failure(
 async def test_spawned_agent_only_receives_its_roles_tools(
     ctx: FactoryContext, gemini_fake: FakeProvider
 ) -> None:
-    """AUDITOR is restricted to the 'http' category. `run_in_sandbox` and
+    """ANALYST is restricted to the 'http' category. `run_in_sandbox` and
     `github_search_issues` exist in the real registry and must still never be
     offered — the allowlist is the role's tool_categories, not "everything
     currently unlocked by credentials"."""
     from factory.tools import builtin  # noqa: F401 - import populates REGISTRY
 
     gemini_fake.register_turns(_completion("Nothing looks degraded."))
-    await spawn(ctx, None, SpawnRequest(role=RoleName.AUDITOR, objective="check the product"))
+    await spawn(ctx, None, SpawnRequest(role=RoleName.ANALYST, objective="check the product"))
 
     tools_sent = gemini_fake.conversations[0]["tools"]
     tool_names = {t["name"] for t in tools_sent}
@@ -399,7 +500,11 @@ async def test_discovery_scout_only_reaches_http_and_submit_signal(
 
     gemini_fake.register_turns(_completion("Found nothing worth reporting this run."))
     await spawn(
-        ctx, None, SpawnRequest(role=RoleName.DISCOVERY_SCOUT, objective="find market signals")
+        ctx,
+        None,
+        SpawnRequest(role=RoleName.DISCOVERY_SCOUT, objective="find market signals"),
+        # As `discovery/scout.py` does -- this role is call-site scoped.
+        from_own_call_site=True,
     )
 
     tool_names = {t["name"] for t in gemini_fake.conversations[0]["tools"]}
