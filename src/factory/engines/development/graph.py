@@ -1479,11 +1479,26 @@ async def _heal(
         log.warning("development.heal_exhausted", product_id=product_id, attempts=attempts)
         return f"development: product {product_id} escalated after {attempts} heal cycles"
 
+    # The hour bucket is what makes this key unique across heal *cycles*, not just
+    # within one. `attempts` comes from `product.heal_attempts`, which
+    # `_verify_and_ship` resets to 0 on every successful ship -- so a product that
+    # heals, ships, and later regresses starts a second cycle at 1 and collides with
+    # the first cycle's key. `enqueue_task` then returns None and, before this, the
+    # code simply carried on: the heal attempt was recorded, "heal_queued" was
+    # logged, and the product was left in PATCHING with no task in existence and
+    # nothing to notice. Observed live -- the exact reason a real checkout bug sat
+    # unrepaired while every log line claimed a repair had been queued. (Same
+    # resetting-counter-as-a-lifetime-key bug as `record_heal_attempt`'s, found the
+    # same day, in the other place it occurs.)
+    #
+    # Deduping within the hour still covers what this key is actually for: two
+    # `_heal` calls racing on the same cycle.
+    cycle_bucket = int(datetime.now(UTC).timestamp()) // 3600
     patch_task_id = await repository.enqueue_task(
         session,
         kind=TaskKind.PATCH_PRODUCT,
         engine=EngineName.DEVELOPMENT,
-        idempotency_key=f"patch:{product_id}:{attempts}",
+        idempotency_key=f"patch:{product_id}:heal:{attempts}:{cycle_bucket}",
         payload={
             "product_id": product_id,
             "idea_id": idea_id,
@@ -1496,6 +1511,23 @@ async def _heal(
         product_id=product_id,
         priority=40,  # repairing a broken product outranks starting a new one
     )
+    if patch_task_id is None:
+        # Should now be unreachable (the key above is unique per cycle), but a
+        # silently-dropped repair is the failure that produced a product stranded
+        # in PATCHING with nothing queued and nothing to notice -- so it fails
+        # loudly rather than being inferred from an absence months later. The
+        # product goes back to LIVE rather than being left mid-repair: the next
+        # audit can then see it and re-raise, which a PATCHING product is invisible
+        # to.
+        log.error(
+            "development.heal_not_queued",
+            product_id=product_id,
+            attempt=attempts,
+            detail="enqueue_task returned None; a repair was requested but never created",
+        )
+        await repository.set_product_status(session, product_id, ProductStatus.LIVE)
+        return f"development: product {product_id} repair could not be queued (cycle {attempts})"
+
     await repository.record_heal_attempt(
         session,
         product_id=product_id,
