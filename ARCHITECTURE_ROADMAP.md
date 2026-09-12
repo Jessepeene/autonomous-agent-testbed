@@ -168,6 +168,31 @@ Do this audit **before** building each manager, not after:
 | 4 — General manager | cross-department trend, what changed, what's stuck | Mostly exists and is **thrown away**: `check_business_health` computes real concerns and `engines/maintenance.py` discards them; memory has no cross-product scope (gaps 3–4 above) |
 | Discovery (if ever) | whether a signal is real and not already mined | Weak — live logs show repeated `discovery.signal_not_grounded`, i.e. it cannot reliably verify its own sources |
 
+## Phase 1.5 — the record (prerequisite for Phase 2 and Phase 4)
+
+Not originally a phase, and it should have been. Phases 2 and 4 both reduce to
+"the manager can see what happened": Phase 2 *is* widening context, and a general
+manager with no cross-department history has nothing to be a manager over. This is
+the instrumentation principle applied to the managers themselves.
+
+Done:
+- **Durable logs.** Docker's json-file driver keys logs to a container id and
+  `docker compose up -d` replaces the container, so every deploy destroyed the
+  record of everything before it. Now a rotated, bind-mounted JSON file that
+  outlives any container (`factory/logging.py`). httpx/httpcore silenced to
+  WARNING -- they log request URLs at INFO and Telegram carries its bot token in
+  the URL path, which a durable file turns into a credential on disk.
+- **Tool arguments in `agent.finished`**, not just tool names. `run_workspace_command
+  x20` cannot be diagnosed without them.
+
+Still missing, and the piece that would have made today's debugging trivial
+instead of archaeological:
+- **A causal trail.** A `task_events` table linking task -> engine -> agent ->
+  tools -> outcome -> what it caused. Today a task's story is spread across logs,
+  `tasks.last_error` (overwritten on each attempt), `heal_attempts`, and
+  inference. There is no query that answers "what happened to this product, in
+  order". Phase 4's general manager needs exactly that view.
+
 ## Phase 2 — widen the manager's context
 
 Feed it what `orchestrator.build_snapshot()` already assembles plus per-product
