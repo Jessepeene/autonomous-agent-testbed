@@ -58,6 +58,14 @@ services:
       # actually works at every boot rather than assuming it from config.
       - /var/run/docker.sock:/var/run/docker.sock
       - ${WORKSPACE_HOST_PATH:-/srv/factory-workspaces}:/srv/factory-workspaces
+      # Durable logs. Docker's json-file driver keys a container's logs to that
+      # container's id, and `docker compose up -d` replaces the container on every
+      # deploy -- so each deploy silently destroyed the record of everything that
+      # happened before it, and diagnosing a real incident meant reconstructing it
+      # from database inference. Bind-mounted so the history outlives any container;
+      # rotation (see factory/logging.py) keeps it bounded. Same non-root-uid
+      # requirement as the mounts below: `chown 10001:10001` the host directory once.
+      - ${LOG_HOST_PATH:-/srv/factory-logs}:/app/logs
       # The real .env file this same `env_file: .env` line already reads, bind-mounted
       # so the dashboard's credential-write endpoint (api/dashboard.py, gated by
       # ENV_FILE_PATH below) can persist a new value to disk. A write here has no

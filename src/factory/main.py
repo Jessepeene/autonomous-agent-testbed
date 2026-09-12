@@ -135,7 +135,7 @@ async def _serve_api(settings: Settings, stop: asyncio.Event) -> None:
 
 async def run_factory(*, once: bool = False) -> int:
     settings = get_settings()
-    configure_logging(settings.log_level)
+    configure_logging(settings.log_level, file_path=settings.log_file_path)
 
     report = run_preflight(settings)
     write_missing_credentials(report)

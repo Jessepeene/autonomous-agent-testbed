@@ -171,6 +171,12 @@ class Settings(BaseSettings):
     # to be baked into the page's fetch() target at generation time instead.
     public_domain: str | None = None
     log_level: str = "INFO"
+    #: Durable JSON log file, in addition to stdout. Point this at a bind-mounted
+    #: host path (see docker-compose.yml) so the record survives a container
+    #: replacement -- `docker compose up -d` destroys the old container's Docker
+    #: logs on every deploy, taking the history of any incident with it. Unset
+    #: means stdout only, exactly as before.
+    log_file_path: str | None = None
     api_host: str = "0.0.0.0"  # noqa: S104 - bound inside a container, published by compose
     api_port: int = 8000
     max_concurrent_builds: int = Field(default=2, ge=1, le=32)

@@ -34,7 +34,7 @@ log = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
-    configure_logging(settings.log_level)
+    configure_logging(settings.log_level, file_path=settings.log_file_path)
     app.state.report = run_preflight(settings)
     log.info("api.started", dry_run=settings.factory_dry_run)
     yield
