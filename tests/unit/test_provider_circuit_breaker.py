@@ -115,6 +115,17 @@ def test_an_exhausted_repair_budget_is_a_real_attempt_not_a_block() -> None:
     assert {"no_provider", "provider_error"} <= BLOCKED_REASONS
 
 
+def test_a_guided_repair_gets_a_bigger_step_budget_than_a_test_failure() -> None:
+    """A test_failure arrives with a traceback naming the file; a guided repair
+    arrives as a symptom observed from outside, and finding it costs several reads
+    before any edit. Confirmed live: a real 422-on-checkout repair never modified
+    the workspace once, hitting step_limit and rolling back every time."""
+    from factory.agents.roles import RoleName, get_role
+    from factory.engines.development.repair import GUIDED_MAX_STEPS
+
+    assert GUIDED_MAX_STEPS > get_role(RoleName.WORKSPACE_SURGEON).max_steps
+
+
 def test_circuit_open_is_a_provider_unavailable_subclass() -> None:
     """Load-bearing: every existing `except LLMError` degradation path and
     `except ProviderUnavailable` failover path must keep working unchanged. Only

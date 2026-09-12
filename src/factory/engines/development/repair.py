@@ -80,6 +80,26 @@ EXHAUSTED_REASONS = frozenset(
     }
 )
 
+#: Step budget for a `guided` repair, overriding WORKSPACE_SURGEON's default 8.
+#:
+#: The two categories are not the same shape of problem. A `test_failure` arrives
+#: with a traceback naming a file and a line, so the work is read-one-file, edit,
+#: re-run: comfortably inside 8. A `guided` repair arrives as a *symptom* observed
+#: from outside -- "clicking Subscribe returns 422 and the UI prints [object
+#: Object]" -- with no location at all. Finding it means listing the tree, reading
+#: the frontend call site, the backend route, and the request model before a single
+#: edit, which spends the entire 8-step budget on reading.
+#:
+#: Confirmed live rather than reasoned about: a real 422-on-checkout repair was
+#: attempted repeatedly and the workspace was never modified once -- every run hit
+#: `step_limit` and was rolled back. The role docstring's "past ~8 steps a surgical
+#: repair stops being cheaper than the regeneration it replaces" is the right
+#: instinct but the wrong lever here: `repair_agent_cost_cap_usd` ($0.75, set
+#: deliberately below a full regeneration's ~$1.15) already enforces that economic
+#: bound directly, and now consumes a heal cycle when hit rather than looping. The
+#: step count was only ever a proxy for cost, and a poor one on a cheap model.
+GUIDED_MAX_STEPS = 16
+
 _TEST_PATH = re.compile(r"(^|/)(tests?/|test_[^/]*\.py$|[^/]*_test\.py$)")
 _ASSERT = re.compile(r"\bassert\b")
 _WEAKENER = re.compile(r"@pytest\.mark\.(skip|xfail)\b|pytest\.(skip|xfail)\(")
@@ -429,7 +449,7 @@ async def attempt_repair(
         task_type=role.task_type,
         engine=EngineName.DEVELOPMENT,
         task_id=task_id,
-        max_steps=role.max_steps,
+        max_steps=GUIDED_MAX_STEPS if category == "guided" else role.max_steps,
         deadline_seconds=role.deadline_seconds,
         docker_available=ctx.docker_available,
         context=context,
