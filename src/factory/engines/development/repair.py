@@ -42,10 +42,30 @@ from factory.tools.workspace import build_workspace_tools
 log = get_logger(__name__)
 
 #: Tool results are the bulk of an agent transcript and the transcript is re-sent
-#: every step, so this is the single biggest lever on cost. Well under the 20k
-#: default: a truncated pytest run keeps its head and tail (`_truncate_middle`),
-#: which is where the failure actually is.
-MAX_RESULT_CHARS = 6_000
+#: every step, so this is the single biggest lever on cost.
+#:
+#: This was 6_000, chosen against *pytest output*, where `_truncate_middle` keeping
+#: the head and tail is exactly right -- the failure is at the ends. But the same
+#: cap applies to `read_workspace_file`, where middle-elision is fatal rather than
+#: lossy, and 6_000 is smaller than a real generated source file.
+#:
+#: The consequence was not a slightly worse repair, it was no repair at all. A
+#: product's `app/main.py` is 547 lines / 20_277 chars; the agent asked for it,
+#: received 30% of it with the middle removed, and fell back to paging the file
+#: with `sed -n '1,130p'`, `'130,280p'`, `'280,430p'`... burning its entire step
+#: budget reconstructing a file it could not read in one call, and writing nothing.
+#: Three separate live repairs failed this way before the tool-argument log made it
+#: visible -- the tool-name log showed only `run_workspace_command x20`.
+#:
+#: Sized to hold a whole real source file with headroom. Costs more per step, and
+#: is still far cheaper than the previous behaviour: a budget spent entirely on
+#: re-reading, producing nothing, every time. `repair_agent_cost_cap_usd` remains
+#: the real economic bound, and `max_context_chars` compacts older results.
+#:
+#: The better fix is a per-tool result budget -- a pytest dump and a source file
+#: genuinely want different limits -- but `AgentRuntime.run` takes one cap for the
+#: whole run, so that is a runtime change rather than a constant.
+MAX_RESULT_CHARS = 24_000
 
 #: Outcomes that mean the agent genuinely never got to run: something in the
 #: environment stopped it before it could work on the problem. Deferring costs
