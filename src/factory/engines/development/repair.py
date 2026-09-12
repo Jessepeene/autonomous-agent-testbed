@@ -464,24 +464,59 @@ async def attempt_repair(
             f"repair agent stopped early ({result.stopped_because}) after {result.steps} step(s)"
         )
     if result.stopped_because in EXHAUSTED_REASONS:
-        # Ran and spent its whole budget without finishing. Returned as a real
-        # rejected outcome rather than raised as RepairBlocked, so it consumes a
-        # heal cycle and the product can eventually escalate -- see
-        # EXHAUSTED_REASONS for the 43-attempt loop this prevents.
+        # Ran and spent its whole budget without finishing. Consumes a heal cycle
+        # rather than being raised as RepairBlocked -- see EXHAUSTED_REASONS for the
+        # 43-attempt loop that prevents.
+        #
+        # But "the agent ran out of budget" is not the same as "the work is
+        # unusable", and the first version of this conflated them: it returned
+        # `changed_files=set()` unconditionally, so any edit a capped run had
+        # already made was discarded before anything looked at it. The gate that
+        # actually decides whether a repair ships is `_verify_and_ship` -- the test
+        # suite and Bug Council -- not whether the agent felt finished. A capped run
+        # whose edits pass both is a good repair that happened to be slow; throwing
+        # it away guarantees the next cycle starts from nothing and hits the same
+        # ceiling.
+        #
+        # So the edits are kept and allowed to face verification. A half-finished
+        # edit is not a risk here: it fails the suite or Council and is rolled back
+        # by the caller exactly as before.
+        after_exhausted = _read_tree(resolve_workspace(workspace, ctx.settings))
+        changed_when_capped = {
+            name
+            for name in set(before) | set(after_exhausted)
+            if before.get(name) != after_exhausted.get(name)
+        }
         log.info(
             "repair.budget_exhausted",
             product_id=product_id,
             stopped=result.stopped_because,
             steps=result.steps,
+            changed_files=len(changed_when_capped),
         )
+        if not changed_when_capped:
+            return RepairOutcome(
+                changed_files=set(),
+                answer=result.answer,
+                summary=result.summary(),
+                rejected_because=(
+                    f"the repair agent used its entire budget without changing "
+                    f"anything ({result.stopped_because} after {result.steps} step(s))"
+                ),
+            )
+        violation = audit_edits(before, after_exhausted)
+        if violation is not None:
+            log.warning("repair.rejected", product_id=product_id, reason=violation)
+            return RepairOutcome(
+                changed_files=set(),
+                answer=result.answer,
+                summary=result.summary(),
+                rejected_because=violation,
+            )
         return RepairOutcome(
-            changed_files=set(),
+            changed_files=changed_when_capped,
             answer=result.answer,
             summary=result.summary(),
-            rejected_because=(
-                f"the repair agent used its entire budget without finishing "
-                f"({result.stopped_because} after {result.steps} step(s))"
-            ),
         )
 
     after = _read_tree(resolve_workspace(workspace, ctx.settings))

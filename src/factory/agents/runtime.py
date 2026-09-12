@@ -33,6 +33,30 @@ from factory.tools.registry import REGISTRY, ToolDescriptor, ToolRegistry
 log = get_logger(__name__)
 
 _TOOL_TIMEOUT_SECONDS = 120
+
+#: Invocations recorded in the `agent.finished` log line, and the per-argument
+#: ceiling. A repair agent can make dozens of calls and a single argument can carry
+#: an entire file's contents, so both are bounded -- this is a durable log on a disk
+#: that has run low, not a debugger.
+_MAX_LOGGED_INVOCATIONS = 40
+_MAX_LOGGED_ARG_CHARS = 300
+
+
+def _summarise_arguments(arguments: dict[str, Any]) -> dict[str, str]:
+    """Tool arguments, truncated, for the run's audit line.
+
+    Values only -- no filtering by key. Nothing an agent passes to a tool in this
+    codebase is a credential: the tool registry withholds a tool entirely when its
+    `required_credential` is absent (`ToolRegistry.usable`), so secrets reach
+    providers through settings, never through a model-supplied argument.
+    """
+    summarised = {}
+    for key, value in arguments.items():
+        text = value if isinstance(value, str) else json.dumps(value, default=str)
+        summarised[key] = (
+            text[:_MAX_LOGGED_ARG_CHARS] + "..." if len(text) > _MAX_LOGGED_ARG_CHARS else text
+        )
+    return summarised
 _MAX_RESULT_CHARS = 20_000
 
 #: Marker inserted where `_truncate_middle` removed content, so the model can tell a
@@ -342,6 +366,24 @@ class AgentRuntime:
             steps=result.steps,
             stopped=result.stopped_because,
             tools=[i.name for i in result.invocations],
+            # The arguments, not just the tool names. A run that reports
+            # `run_workspace_command x20` is unreadable without them: it could be
+            # twenty attempts at one failing test, or twenty different diagnostics,
+            # and those call for opposite fixes. Diagnosing a real repair failure
+            # stalled here -- the name list showed the agent never wrote a file, and
+            # nothing recorded what it did instead.
+            #
+            # Bounded hard: this goes to a durable log on a disk that has run low,
+            # and a tool argument can carry a whole file's contents.
+            invocations=[
+                {
+                    "tool": inv.name,
+                    "ok": inv.ok,
+                    "args": _summarise_arguments(inv.arguments),
+                    **({} if inv.ok else {"detail": inv.detail[:200]}),
+                }
+                for inv in result.invocations[:_MAX_LOGGED_INVOCATIONS]
+            ],
         )
         return result
 
