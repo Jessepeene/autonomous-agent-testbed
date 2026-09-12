@@ -157,6 +157,49 @@ The other two here are structural: a bounded terminal extraction call so a revie
 always ends in a decision rather than an exhausted ceiling, and a per-role
 `cost_cap_usd`.
 
+## Every entity keeps a living record (applies to every phase)
+
+The companion to the instrumentation principle, and the generalisation of Phase
+2c. Instruments let an agent *see the present*. A record lets it know *what has
+already been learned*.
+
+**The system has data, not knowledge.** `heal_attempts`, `page_views`,
+`validation_signals`, `llm_calls` are rows a query can assemble into an answer --
+if someone already knows to ask. What no entity has is a standing account of
+itself: this product's monetisation hypothesis was never actually tested because
+checkout has been broken since launch; this niche produced four near-duplicate
+ideas from one GitHub issue; this capability cannot run tests because the sandbox
+is stripped before it starts.
+
+Every entity should hold one, and maintain it:
+
+| Entity | Should know about itself | Today |
+|---|---|---|
+| Product | design plan, monetisation strategy, what has been tried, what worked | Partial and static: `Idea.monetization_hypothesis` (a launch-time guess, never revisited), `Product.design_brief`, `.factory/ARCHITECTURE.md`. Outcomes live in rows nothing synthesises |
+| Capability / role | what this job keeps getting wrong, what the environment actually provides | Nothing. See Phase 2c |
+| Department | what works in this niche, which channels failed | Partial -- `engine:*` memory, retrieved by token overlap |
+| The factory itself | what broke, what was tried, what the strategy is | **`BUG_LOG.md` and this file -- both written by hand by an operator.** The factory keeps every row and loses every lesson |
+
+That last row is the sharp one. The institutional knowledge of this system
+currently exists because a human writes it down. That is a dependency the end
+state must not have.
+
+**The constraint that keeps this honest.** This codebase is rightly suspicious of
+prose: a decision is read from a validated field, never regex'd from text, and
+"LLM prose becomes the human-facing ground truth" is already recorded as a known
+gap (Tier 3 finding #14). A self-maintained narrative is exactly that failure mode
+unless it is anchored. So a record must be **derived from and checkable against
+real rows** -- "this product has never converted" cites the ledger; "outreach is
+blind" cites the absence of reply data -- never free-floating recollection. The
+instrumentation principle supplies the evidence; the record is what persists the
+conclusion. A claim that cannot be traced back to a row does not belong in one.
+
+The existing precedents to build on rather than replace: `Product.design_brief`
+(generated once from the real deployed page, cached), `.factory/ARCHITECTURE.md`
+(a per-product knowledge file the repair agent already reads), and
+`memory/store.py`'s reinforce-on-near-duplicate behaviour, which is the right
+shape for a record that accumulates instead of piling up restatements.
+
 ### Instrument audit for the remaining phases
 
 Do this audit **before** building each manager, not after:
