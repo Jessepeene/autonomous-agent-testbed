@@ -193,12 +193,83 @@ instead of archaeological:
   inference. There is no query that answers "what happened to this product, in
   order". Phase 4's general manager needs exactly that view.
 
-## Phase 2 — widen the manager's context
+## Phase 2 — the handoffs, not "more judgement"
 
-Feed it what `orchestrator.build_snapshot()` already assembles plus per-product
-history (days since touched, outreach/signal counts, prior findings) — handed to
-judgment instead of a fixed threshold. Let it choose *which* product to look at
-(most-neglected first) rather than round-robin.
+Originally scoped as "widen the manager's context". That was too shallow, and a
+day of real failures showed why. The org chart already mirrors a human team —
+Bug Council is the pre-deploy check, its findings are the report, the repair agent
+is the dev who receives it. What does *not* mirror a human team is how those roles
+communicate: **one-way payloads between stateless workers, where a human team has
+conversations between people who accumulate context and can push back.**
+
+Every failure chased on 2026-09-12 is an instance of one of the four gaps below.
+
+### 2a. A blocked worker must be able to say so
+
+The repair agent found the sandbox had no dependencies installed, could not `pip
+install` (no network, by design), and had no way to report that. It burned its
+budget searching the filesystem and returned a plain failure. That was recorded as
+a consumed heal cycle — indistinguishable from "tried and could not fix it" — and
+escalated three times without once naming the actual problem.
+
+A human dev says *"I can't run the tests, the environment is broken, who owns
+that?"* and is believed. The system needs the same: a distinct *blocked* outcome
+carrying what is missing, which does not consume a repair budget and which routes
+to whoever can fix it rather than to a generic escalation.
+
+Note this also **replaces most of the give-up constants** rather than tuning them:
+`MAX_HEAL_CYCLES`, `GUIDED_MAX_STEPS`, the breaker thresholds. Most exist because
+the system cannot tell blocked from failing, so it counts attempts instead. Once
+it can tell, the counters become backstops rather than the primary mechanism.
+
+### 2b. Reports must be addressable
+
+Bug Council emits a text blob into a task payload. The recipient can comply or
+fail; it cannot say *"finding 4 is wrong, that behaviour is intentional"* or ask
+what a finding means. A human report has an author you can go back to.
+
+### 2c. Workers keep notes — statelessness is the wrong default
+
+`spawner.py` deliberately avoids a long-lived agent registry, and that reasoning
+holds: a long-running process drifts out of sync with the code. But a human dev is
+not a long-running process either — they go home. What makes them non-stateless is
+that **they keep notes and the team keeps records.**
+
+The gap is not agent lifetime, it is that **there is nowhere to record a lesson
+about a capability.** Memory scopes are `global` (never written by anything),
+`engine:<name>`, and `product:<id>`. "The repair sandbox has no dependencies
+installed" is a fact about the *repair capability* — it will recur on every
+product, so `product:` is wrong, and `engine:development` is too coarse to recall
+reliably. The lesson therefore has no home and is rediscovered from scratch every
+run, at full cost.
+
+Needed: a capability/role memory scope, written by agents about their own work and
+recalled on every spawn of that role. The per-product knowledge file
+(`.factory/ARCHITECTURE.md`) is the existing precedent — the same idea, scoped to a
+product instead of a job.
+
+### 2d. Operational competence must be learnable
+
+`learning/allowlist.py` holds seven mutable keys: discovery generator,
+discriminator, scoring weights, the leads planner, outreach copy, the landing-page
+prompt, and the sender identity. **All seven are commercial.** Not on the list: the
+repair agent's prompt, the reviewer's, Bug Council's, the orchestrator's.
+
+So the loop optimises *what the factory sells* and never *how competently it
+operates*. Every agent that failed on 2026-09-12 is structurally incapable of
+learning from it — the repair agent will hunt for pytest again tomorrow.
+
+Bringing operational prompts in needs care, and the existing safety exclusions stay
+exactly as they are: LIA, Bug Council's reviewer prompts, the orchestrator's system
+prompt, and the real-MVP codegen prompt remain permanently excluded. The candidates
+are the *worker* prompts (repair, review), whose failures are commercially lossy
+rather than safety-critical — the same bar every current allowlist entry meets.
+
+### What carries over from the original scope
+
+Still worth doing, now as a consequence rather than the headline: feed the manager
+`build_snapshot()`'s data plus per-product history, and let it choose *which*
+product to look at rather than round-robin.
 
 ## Phase 3 — a second department manager
 
