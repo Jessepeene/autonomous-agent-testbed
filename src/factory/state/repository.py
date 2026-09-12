@@ -2246,6 +2246,30 @@ async def mark_interrupt_delivered(session: AsyncSession, interrupt_id: str) -> 
     )
 
 
+async def resolve_open_interrupts_by_subject(
+    session: AsyncSession, *, reason: InterruptReason, subject: str, response: str
+) -> int:
+    """Close every open interrupt matching one (reason, subject), returning how many.
+
+    For a condition that clears on its own and should stop being reported the
+    moment it does. A provider outage is the case this exists for: the breaker
+    self-heals from real call outcomes, but the *notice* raised when it tripped
+    outlived it by hours and kept telling an operator a provider was down that had
+    long since recovered -- worse than no notice, because it is confidently wrong.
+    """
+    stmt = (
+        update(Interrupt)
+        .where(
+            Interrupt.reason == reason.value,
+            Interrupt.subject == subject[:200],
+            Interrupt.status == "open",
+        )
+        .values(status="resolved", response=response, resolved_at=_now())
+        .returning(Interrupt.id)
+    )
+    return len((await session.execute(stmt)).scalars().all())
+
+
 async def resolve_interrupt(session: AsyncSession, interrupt_id: str, response: str) -> None:
     await session.execute(
         update(Interrupt)

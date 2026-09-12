@@ -112,6 +112,22 @@ class Scheduler:
             )
         for provider in sorted(previous - set(tripped)):
             log.info("provider_health.recovered", provider=provider.value)
+            # Close the notice raised when it tripped. Without this the breaker
+            # self-heals in seconds while its escalation sits open indefinitely,
+            # telling an operator a provider is down that recovered hours ago --
+            # confidently wrong, which is worse than silent. Matched on the same
+            # subject the trip used, so it can only ever close its own notice.
+            closed = await repository.resolve_open_interrupts_by_subject(
+                session,
+                reason=InterruptReason.PROVIDER_OUTAGE,
+                subject=f"{provider.value} is in a sustained outage",
+                response=(
+                    f"Resolved automatically: {provider.value} is answering again. "
+                    "Work that was deferred while it was down resumes on its own."
+                ),
+            )
+            if closed:
+                log.info("provider_health.notice_closed", provider=provider.value, closed=closed)
 
     async def _schedule_discovery(self, session: Any) -> None:
         """Enqueue a discovery cycle on cadence, unless Development is saturated.
