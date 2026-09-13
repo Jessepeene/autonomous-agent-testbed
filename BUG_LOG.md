@@ -1062,3 +1062,58 @@ scratch-Postgres `alembic upgrade head` + integration run both green.
 **Status**: Fixed, part of the Tier 0-3 system-wide verification change.
 Not yet deployed. No commit (per standing practice, not committed without
 being asked).
+
+## 22. The Orchestrator escalated daily because nothing told it what `spend_limit_cents` meant
+
+**Found**: 2026-09-13, by the escalation monitor — the sixth instance of the same
+false alarm in two days.
+
+**Symptom**: a `task_exhausted` escalation every day, reading:
+
+> `spend_limit_cents` is 0, blocking all work. A missing budget credential or
+> configuration error must be resolved by a human before the factory can resume
+> autonomously.
+
+**It was false.** In the six hours around the escalation the factory completed 15
+tasks (`reconcile_revenue`, `maintenance`, `discover_opportunities`,
+`patch_product`) and made 60 model calls. Nothing was blocked.
+
+**Cause**: `spend_limit_cents` is the **reinvestment pool** —
+`budget.get_spend_limit` → `available_cents` → `repository.current_balance`, which
+reads the latest `ledger` row and returns `(0, 0)` when the table is empty. The
+ledger is empty because this business has not yet earned revenue. Zero is the
+correct, expected value.
+
+The Orchestrator could not know that. `_ask_model` hands it
+`json.dumps(asdict(snapshot))` — a bare JSON blob, no legend — while the system
+prompt says escalation is *"permitted only for a missing credential or genuine
+legal uncertainty."* Given an unlabelled zero named like a budget and exactly one
+sanctioned escalation category, "the budget credential is missing" is the obvious
+inference. The prompt supplied the category and the snapshot supplied the zero; the
+model joined them. Its wording even mirrors the prompt back.
+
+Two things made it recur rather than get noticed: the dedup key is day-bucketed
+(`Supervisor requested human review ({day})`), so it renews every midnight instead
+of colliding; and `needs_reply=False` meant each one was closed by a human glance
+rather than investigated.
+
+**Fix**: a legend in the Orchestrator's system prompt for the snapshot fields whose
+*name alone misleads* — that `spend_limit_cents` is retained revenue, that zero is
+normal before the first paying customer, that it does not gate model work (the
+separate daily-spend breaker does, and says so explicitly when it trips), and that
+it is never grounds to escalate. Escalation also now requires naming the specific
+missing credential or open legal question: if the model cannot name one, it is not
+an escalation.
+
+**Not fixed by**: telling the model to be more careful. The number was accessible
+and its meaning was not — the instrumentation principle
+(`ARCHITECTURE_ROADMAP.md`) applied to the Supervisor itself. This is the same
+failure class as bug #21, one level up: there an agent could see a page but not
+what an expert looks at; here the Supervisor could see a balance but not what it
+measures.
+
+**Verification**: `tests/unit/test_routing.py` — one test pins the legend, and one
+is a drift guard asserting every `*_cents` field on `FactorySnapshot` appears in
+the prompt, so the next money field added cannot reach the model unlabelled.
+
+**Status**: Fixed locally, not yet deployed.

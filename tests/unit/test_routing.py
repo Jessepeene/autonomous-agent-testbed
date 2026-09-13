@@ -350,3 +350,35 @@ async def test_a_provider_outage_does_not_reset_the_cadence_clock(
     assert decision.target_engine is EngineName.FINANCE
     assert ctx.routing.has_deliberated is False
     assert ctx.routing.decision is None
+
+
+# --- the snapshot legend: a number the model cannot interpret is a bug ---------
+
+
+def test_the_prompt_explains_that_an_empty_reinvestment_pool_is_normal() -> None:
+    """Observed live, six times: the Orchestrator was handed a bare JSON dump
+    containing `"spend_limit_cents":0`, with the system prompt telling it that
+    escalation is "permitted only for a missing credential". It drew the obvious
+    inference -- zero budget must be a broken budget credential -- and escalated
+    daily, claiming the factory was "blocked", while 15 tasks and 60 model calls
+    completed in the same six hours.
+
+    The number was accessible and its meaning was not. That is the instrumentation
+    principle exactly: access without an instrument produces confident flailing,
+    and no amount of "be more careful" in the prompt fixes a missing legend.
+    """
+    prompt = orchestrator._system_prompt()
+    assert "spend_limit_cents" in prompt
+    assert "reinvestment pool" in prompt
+    assert "Zero is the normal" in prompt
+
+
+def test_every_money_field_in_the_snapshot_is_explained_to_the_model() -> None:
+    """The drift guard. A future `*_cents` field added to the snapshot reaches the
+    model as one more unlabelled integer in a JSON blob, which is how this bug
+    happened the first time."""
+    prompt = orchestrator._system_prompt()
+    money_fields = [f for f in routing.FactorySnapshot.__annotations__ if f.endswith("_cents")]
+    assert money_fields, "expected at least one money field to guard"
+    undocumented = [f for f in money_fields if f not in prompt]
+    assert not undocumented, f"snapshot money fields not explained to the model: {undocumented}"
