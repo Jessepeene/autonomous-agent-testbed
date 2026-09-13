@@ -64,6 +64,8 @@ from factory.supervisor.context import FactoryContext
 
 log = get_logger(__name__)
 
+#: Default only. The live value is `settings.max_heal_cycles` -- see its comment
+#: in settings.py for why a counter is the wrong shape and what replaces it.
 MAX_HEAL_CYCLES = 3
 
 #: Failure kinds a surgical, in-place repair can actually address.
@@ -987,7 +989,7 @@ async def _should_repair_surgically(
         # agent optimising against a different suite than the gate runs -- a repair
         # that looks successful right up until verification.
         return False
-    if category != "guided" and product.heal_attempts >= MAX_HEAL_CYCLES - 1:
+    if category != "guided" and product.heal_attempts >= ctx.settings.max_heal_cycles - 1:
         # The last autonomous cycle always regenerates: two surgical attempts have
         # already failed, and a from-scratch rebuild is the only thing left that can
         # recover a workspace they may have made worse.
@@ -1607,7 +1609,7 @@ async def _heal(
         origin="development:heal",
     )
 
-    if attempts >= MAX_HEAL_CYCLES:
+    if attempts >= ctx.settings.max_heal_cycles:
         await repository.record_heal_attempt(
             session,
             product_id=product_id,
@@ -1628,7 +1630,7 @@ async def _heal(
         await memory_store.remember(
             session,
             content=(
-                f"A product exhausted all {MAX_HEAL_CYCLES} heal cycles on category "
+                f"A product exhausted all {ctx.settings.max_heal_cycles} heal cycles on category "
                 f"'{category}' and was escalated to a human. Last blocking feedback: "
                 f"{healing[:300]}"
             ),

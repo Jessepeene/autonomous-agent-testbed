@@ -307,6 +307,20 @@ class Settings(BaseSettings):
     # repair that costs more than regenerating has no reason to exist. The run stops
     # cleanly and its edits are rolled back; the heal cycle is not consumed.
     repair_agent_cost_cap_usd: float = Field(default=0.75, gt=0.0)
+    # How many heal cycles a product gets before it stops and asks for a human.
+    #
+    # A counter, and an arbitrary one -- nothing measured says three is right. It is
+    # a rule invented at a desk, which is the category this factory keeps getting
+    # wrong: the real question is not "how many attempts" but "is this converging",
+    # and until the `issues` table existed there was no way to ask that. A run that
+    # closes two blockers and opens none is progress at attempt five; a run that
+    # re-finds the same fingerprint with times_seen climbing is circling at attempt
+    # two. Replacing this with that judgement is the intended direction.
+    #
+    # Configurable in the meantime so an observation run is not cut short by the
+    # number itself, and so raising it is a deliberate operator act with a value in
+    # the environment rather than an edit to a constant.
+    max_heal_cycles: int = Field(default=3, ge=1)
     # Refuse to *start* a repair agent unless this much of the daily LLM budget is
     # still unspent. The global breaker is only consulted between ticks, so without
     # this a run starting just under the cap could carry it well past.
