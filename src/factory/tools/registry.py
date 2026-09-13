@@ -86,6 +86,11 @@ class ToolRegistry:
         extended._tools = dict(base._tools)
         return extended
 
+    def unregister(self, name: str) -> None:
+        """Drop a tool by name. Only meaningful on a private per-run registry, where
+        a bound tool replaces the generic one it was copied from."""
+        self._tools.pop(name, None)
+
     def register(self, descriptor: ToolDescriptor) -> ToolDescriptor:
         if descriptor.name in self._tools:
             raise ValueError(f"tool {descriptor.name!r} is already registered")

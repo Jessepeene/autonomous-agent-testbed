@@ -136,3 +136,29 @@ def test_the_dossier_reports_a_missing_product_rather_than_inventing_one() -> No
 
     text = asyncio.run(handbook.product_dossier(_NoRows(), "nope"))  # type: ignore[arg-type]
     assert "No product" in text
+
+
+def test_the_dossier_is_pinned_to_the_run_and_asks_for_no_id() -> None:
+    """Found on the first live POC review. AUDITOR is never told its product id --
+    its objective carries the URL and the product *name* -- so when it correctly
+    decided it wanted the dossier, it guessed, passed the Vercel subdomain as the
+    id, and got "No product with id ...". It then carried on without the context it
+    had just tried to fetch, and the tool call was logged `ok: true`.
+
+    The generic form asks the model for something only the caller knows. Same fix,
+    and same reasoning, as `queue_review_patch` being pinned to its product."""
+    registry = build_handbook_tools(
+        role="auditor", task_id="t", product_id="prod-123", engine=None
+    )
+    descriptor = registry.get("read_product_dossier")
+    assert descriptor is not None
+    assert descriptor.input_schema["properties"] == {}
+
+
+def test_without_a_product_the_dossier_still_takes_an_id() -> None:
+    """A role spawned with no product -- a researcher answering an open question --
+    keeps the general form rather than losing the tool entirely."""
+    registry = build_handbook_tools(role="researcher", task_id="t", product_id=None, engine=None)
+    descriptor = registry.get("read_product_dossier")
+    assert descriptor is not None
+    assert "product_id" in descriptor.input_schema["properties"]

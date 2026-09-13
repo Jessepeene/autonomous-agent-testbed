@@ -608,7 +608,11 @@ anything -- "I could not finish checking" is not a defect.
 When true, write summary and details for an engineer who cannot see the page: what \
 was done, what happened, what should have happened. Use only what the reviewer \
 actually reported -- never invent a symptom, a status code, or a cause they did not \
-state.\
+state.
+
+Length matters: keep summary to one sentence under 200 characters, and details \
+under 1500. Be specific but do not restate the reviewer's whole transcript -- the \
+engineer needs the finding, not the narration.\
 """
 
 

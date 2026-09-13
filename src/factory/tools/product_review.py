@@ -50,8 +50,22 @@ class ReviewVerdict(Contract):
     #: Deliberately the first field: everything else is only meaningful once this
     #: is true, and a reviewer that found nothing must have a cheap way to say so.
     defect_found: bool
-    summary: str = Field(default="", max_length=200)
-    details: str = Field(default="", max_length=2000)
+    #: Generous rather than tight, and the target lengths live in the prompt
+    #: instead (`_REVIEW_VERDICT_SYSTEM`).
+    #:
+    #: These were 200/2000, and the prompt -- which asks for "what was done, what
+    #: happened, what should have happened", for "an engineer who cannot see the
+    #: page" -- never mentioned either number. The first live POC review wrote a
+    #: perfectly good writeup, overran 200 on `summary`, had its repair attempt
+    #: overrun 2000 on `details`, and the whole review was discarded: a real defect
+    #: found on a real page and thrown away over a limit nobody told the model
+    #: about. That is the same outcome as the step-limit loss this extraction step
+    #: was built to prevent, arriving by a different door.
+    #:
+    #: A cap still exists so genuinely absurd output fails rather than flowing into
+    #: a task payload, and `queue_review_patch` truncates what it forwards anyway.
+    summary: str = Field(default="", max_length=500)
+    details: str = Field(default="", max_length=4000)
 
 
 async def queue_review_patch(

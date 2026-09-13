@@ -140,6 +140,37 @@ def build_handbook_tools(
         if descriptor.category == "docs" and registry.get(descriptor.name) is None:
             registry.register(descriptor)
 
+    if product_id:
+        # Pinned to this run's product, exactly like `queue_review_patch`, and for a
+        # reason the first live POC review demonstrated: AUDITOR is never told its
+        # product id -- its objective names the URL and the product *name* -- so it
+        # called `read_product_dossier` with the Vercel subdomain as the id, got
+        # "No product with id ...", and carried on without the dossier it had
+        # correctly decided it wanted. The generic form asks the model for something
+        # only the caller knows.
+        registry.unregister("read_product_dossier")
+
+        @registry.tool(
+            name="read_product_dossier",
+            description=(
+                "Read everything the company knows about the product you are working "
+                "on: what problem it solves, who it is for, how it is meant to make "
+                "money, what has happened to it so far, and which repairs have "
+                "already been tried. Read this before changing or judging it -- "
+                "knowing what a product is for is how you tell a broken thing from a "
+                "thing that works but is wrong."
+            ),
+            input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+            category="docs",
+        )
+        async def read_bound_product_dossier() -> dict[str, Any]:
+            from factory import handbook
+            from factory.state.db import session_scope
+
+            async with session_scope(get_settings()) as session:
+                dossier = await handbook.product_dossier(session, product_id)
+            return {"product_id": product_id, "dossier": dossier}
+
     @registry.tool(
         name="document_work",
         description=(
