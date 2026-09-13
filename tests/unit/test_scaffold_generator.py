@@ -54,7 +54,13 @@ _PLAN = ScaffoldPlan(
 
 def _ctx(*, provider: FakeProvider, workspace_root: Path) -> FactoryContext:
     settings = Settings(gemini_api_key="test-key", workspace_root=workspace_root)
-    llm = LLMClient(ProviderRegistry({Provider.ANTHROPIC: provider}), settings=settings)
+    # Registered under both vendors: generation is no longer one task type, and
+    # landing pages and MVP iteration route to DeepSeek while the initial MVP
+    # build stays on Claude. The fake stands in for whichever one is asked.
+    llm = LLMClient(
+        ProviderRegistry({Provider.ANTHROPIC: provider, Provider.DEEPSEEK: provider}),
+        settings=settings,
+    )
     return FactoryContext(
         settings=settings,
         llm=llm,

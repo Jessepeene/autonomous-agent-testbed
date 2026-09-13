@@ -26,10 +26,10 @@ from factory.agents.roles import (
 )
 from factory.agents.runtime import AgentResult, AgentRuntime
 from factory.llm.providers.base import ProviderRefusal
-from factory.llm.router import model_for
+from factory.llm.router import may_failover, model_for
 from factory.logging import get_logger
 from factory.memory import store as memory_store
-from factory.settings import EngineName, TaskType
+from factory.settings import EngineName
 from factory.supervisor.context import FactoryContext
 from factory.tools.handbook import build_handbook_tools
 
@@ -225,6 +225,8 @@ def _cost_model(ctx: FactoryContext, role: AgentRole) -> str | None:
     back to its mid-range default price, which errs toward stopping early rather
     than silently overspending.
     """
-    if role.task_type in (TaskType.CODE_GENERATION, TaskType.CODE_REVIEW, TaskType.CODE_REPAIR):
+    # Every NO_FAILOVER task type: these cannot cross vendors, so the model that
+    # will serve the run is knowable in advance and its price is the right one.
+    if not may_failover(role.task_type):
         return model_for(role.task_type, ctx.settings)
     return None

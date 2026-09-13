@@ -116,7 +116,19 @@ def test_general_tasks_route_to_gemini() -> None:
 
 
 def test_code_tasks_never_fail_over() -> None:
-    assert NO_FAILOVER == {TaskType.CODE_GENERATION, TaskType.CODE_REVIEW, TaskType.CODE_REPAIR}
+    assert NO_FAILOVER == {
+        TaskType.LANDING_PAGE,
+        TaskType.CODE_GENERATION,
+        TaskType.CODE_ITERATION,
+        TaskType.CODE_REVIEW,
+        TaskType.CODE_REPAIR,
+    }
+    # The property behind the list: anything that writes or judges code that
+    # ships is here, so a new code task type cannot be added without deciding
+    # this deliberately.
+    for task_type in TaskType:
+        writes_code = task_type.value.startswith(("code_", "landing_"))
+        assert may_failover(task_type) is not writes_code
     assert not may_failover(TaskType.CODE_GENERATION)
     assert not may_failover(TaskType.CODE_REPAIR)
     assert may_failover(TaskType.DISCOVERY)

@@ -29,7 +29,21 @@ class TaskType(StrEnum):
     ANALYSIS = "analysis"
     COMPLIANCE = "compliance"
     MARKETING_COPY = "marketing_copy"
+    #: Building a landing/validation page from nothing, or regenerating one. A page
+    #: with a form and a pricing section, not an application -- split out from
+    #: CODE_GENERATION because conflating them meant a landing page was priced,
+    #: budgeted and routed as if it were a complete MVP.
+    LANDING_PAGE = "landing_page"
+    #: Producing a complete working MVP from a validated idea, from nothing. The
+    #: single most consequential generation the factory does and the one where model
+    #: quality shows most: it is one shot at an entire product.
     CODE_GENERATION = "code_generation"
+    #: Regenerating an MVP that already exists, given its current files -- adding a
+    #: feature, or rebuilding after a repair could not be done in place. A different
+    #: job from CODE_GENERATION despite sharing a prompt: the model is editing a
+    #: known product rather than inventing one, which is materially easier and does
+    #: not warrant the same model.
+    CODE_ITERATION = "code_iteration"
     CODE_REVIEW = "code_review"
     #: Agentic tool-calling repair/healing work (WORKSPACE_SURGEON, SEO_OPTIMIZER,
     #: REPAIR_ENGINEER) -- split out from CODE_GENERATION because it goes through
@@ -378,6 +392,12 @@ class Settings(BaseSettings):
     # CODE_REVIEW's parse()-based structured output, which DeepSeek's
     # Anthropic-compatible endpoint does not reliably produce.
     model_deepseek: str = "deepseek-v4-pro"
+    #: The model for the two DeepSeek-served code paths that are not initial MVP
+    #: generation: building/regenerating a landing page, and iterating on an MVP
+    #: that already exists. Pro rather than flash because both write real code that
+    #: ships, and flash rather than Claude because neither is the one-shot
+    #: whole-product build that justifies Opus.
+    model_deepseek_pro: str = "deepseek-v4-pro"
     #: POC mode: route EVERY task type to DeepSeek on this one model, overriding the
     #: routing table entirely (see `llm/router.py::model_for` for why, and why it
     #: does not weaken NO_FAILOVER). `deepseek-flash` is DeepSeek-V4.1-Flash: 1M

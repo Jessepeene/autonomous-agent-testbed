@@ -313,7 +313,12 @@ async def _real_ab_prompt(variant_a_brief: str, variant_b_brief: str) -> str:
     settings = Settings(gemini_api_key="k", public_domain="factory.test")
     ctx = FactoryContext(
         settings=settings,
-        llm=LLMClient(ProviderRegistry({Provider.ANTHROPIC: fake}), settings=settings),
+        # Both vendors: a landing page is TaskType.LANDING_PAGE and routes to
+        # DeepSeek now, separately from the initial MVP build on Claude.
+        llm=LLMClient(
+            ProviderRegistry({Provider.ANTHROPIC: fake, Provider.DEEPSEEK: fake}),
+            settings=settings,
+        ),
         notifier=NullNotifier(),
         sandbox=DisabledSandbox(),
         enabled_engines={EngineName.DEVELOPMENT},

@@ -289,9 +289,15 @@ async def generate_scaffold(
             + "\n\n"
         )
     prompt += "Produce the complete MVP."
+    # Building a product from nothing and rebuilding one that already exists are
+    # different jobs, and `existing_files` is exactly what separates them: with it,
+    # the model is editing a known product; without it, inventing one from a brief.
+    # They were one task type, so a routine feature iteration was priced, budgeted
+    # and routed as the one-shot whole-product build.
+    task_type = TaskType.CODE_ITERATION if existing_files else TaskType.CODE_GENERATION
     return await ctx.llm.parse(
         ScaffoldPlan,
-        task_type=TaskType.CODE_GENERATION,
+        task_type=task_type,
         system=SYSTEM_PROMPT,
         prompt=prompt,
         engine=EngineName.DEVELOPMENT,
@@ -362,7 +368,10 @@ async def generate_landing_page(
     prompt += "Produce the complete validation page."
     return await ctx.llm.parse(
         ScaffoldPlan,
-        task_type=TaskType.CODE_GENERATION,
+        # Not split by `existing_files` the way the MVP path is: a landing page is a
+        # page with a form whether it is the first draft or the fifth, and nothing
+        # about regenerating one is harder than writing it.
+        task_type=TaskType.LANDING_PAGE,
         system=system,
         prompt=prompt,
         engine=EngineName.DEVELOPMENT,

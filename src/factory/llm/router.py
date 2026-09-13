@@ -19,7 +19,9 @@ ROUTING: dict[TaskType, Provider] = {
     TaskType.ANALYSIS: Provider.GEMINI,
     TaskType.COMPLIANCE: Provider.GEMINI,
     TaskType.MARKETING_COPY: Provider.GEMINI,
+    TaskType.LANDING_PAGE: Provider.DEEPSEEK,
     TaskType.CODE_GENERATION: Provider.ANTHROPIC,
+    TaskType.CODE_ITERATION: Provider.DEEPSEEK,
     TaskType.CODE_REVIEW: Provider.ANTHROPIC,
     TaskType.CODE_REPAIR: Provider.DEEPSEEK,
 }
@@ -27,7 +29,13 @@ ROUTING: dict[TaskType, Provider] = {
 #: Code tasks must never be silently served by the other vendor: a cross-provider
 #: failover here would change *who wrote the code that ships*, invisibly.
 NO_FAILOVER: frozenset[TaskType] = frozenset(
-    {TaskType.CODE_GENERATION, TaskType.CODE_REVIEW, TaskType.CODE_REPAIR}
+    {
+        TaskType.LANDING_PAGE,
+        TaskType.CODE_GENERATION,
+        TaskType.CODE_ITERATION,
+        TaskType.CODE_REVIEW,
+        TaskType.CODE_REPAIR,
+    }
 )
 
 #: DeepSeek is a dedicated, single-purpose provider (CODE_REPAIR only, itself in
@@ -49,18 +57,26 @@ GENERAL_FALLBACK_PROVIDERS: frozenset[Provider] = frozenset({Provider.GEMINI, Pr
 #: Task types `POC_MODEL_OVERRIDE` does **not** capture -- they keep their normal
 #: `ROUTING` entry even in POC mode.
 #:
-#: Only CODE_GENERATION, and for one specific reason: it is the single call that
-#: produces an entire working MVP in one shot, and Claude is demonstrably able to
-#: do that. It is also the least informative thing to put on a cheap model -- the
-#: POC exists to find *structural* gaps (thin briefs, dropped payloads, caps), and
-#: a failed one-shot MVP tells you about the model's raw generation ceiling rather
-#: than about the factory's plumbing.
+#: The three that write code which ships. Everything else -- orchestration,
+#: analysis, compliance, discovery, marketing copy, review and agentic repair --
+#: runs on the POC model, which is where a cheap model is most informative: the POC
+#: exists to find *structural* gaps (thin briefs, dropped payloads, caps), and those
+#: show up in plumbing rather than in raw generation ability.
+#:
+#: Each keeps its own routing for its own reason:
+#: - CODE_GENERATION is one shot at an entire product from nothing, and is the place
+#:   model quality shows most.
+#: - CODE_ITERATION is editing a product that already exists, which is materially
+#:   easier and does not warrant the same model.
+#: - LANDING_PAGE is a page with a form, easier still, but it is real shipped code.
 #:
 #: CODE_REVIEW is deliberately NOT exempt. Jesse's reasoning, and it is right: if
 #: the system works as it should, who reviews the code should not matter. Review is
 #: a judgement over evidence already gathered, which is exactly what the POC is
 #: meant to stress.
-POC_EXEMPT: frozenset[TaskType] = frozenset({TaskType.CODE_GENERATION})
+POC_EXEMPT: frozenset[TaskType] = frozenset(
+    {TaskType.LANDING_PAGE, TaskType.CODE_GENERATION, TaskType.CODE_ITERATION}
+)
 
 
 def _poc_model(task_type: TaskType, settings: Settings) -> str | None:
@@ -117,13 +133,15 @@ def model_for(task_type: TaskType, settings: Settings | None = None) -> str:
     provider = provider_for(task_type, settings)
     if provider is Provider.ANTHROPIC:
         return settings.model_code
+    if task_type in (TaskType.LANDING_PAGE, TaskType.CODE_ITERATION):
+        return settings.model_deepseek_pro
     if provider is Provider.DEEPSEEK:
         return settings.model_deepseek
     return settings.model_general
 
 
 def max_tokens_for(task_type: TaskType) -> int:
-    if task_type is TaskType.CODE_GENERATION:
+    if task_type in (TaskType.CODE_GENERATION, TaskType.CODE_ITERATION):
         # 32_000 was observed live to be too tight: Claude Sonnet 5's adaptive
         # thinking is not budget-capped (budget_tokens is rejected outright on this
         # model), and an open-ended "produce the complete MVP" prompt let thinking
@@ -134,6 +152,12 @@ def max_tokens_for(task_type: TaskType) -> int:
         # the live API) and the only lever available to give thinking and the final
         # JSON answer enough combined room.
         return 64_000
+    if task_type is TaskType.LANDING_PAGE:
+        # A page, not an application -- but still every file's full contents in
+        # one ScaffoldPlan, and the same thinking-plus-answer squeeze applies.
+        # Well clear of what a landing page needs, without reserving an MVP's
+        # ceiling for it.
+        return 32_000
     if task_type is TaskType.CODE_REVIEW:
         return 16_000
     if task_type is TaskType.CODE_REPAIR:

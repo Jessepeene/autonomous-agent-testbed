@@ -170,7 +170,7 @@ class AnthropicProvider:
         """
         if model == self._settings.model_fallback_anthropic:
             return None
-        if task_type is TaskType.CODE_GENERATION:
+        if task_type in (TaskType.CODE_GENERATION, TaskType.CODE_ITERATION, TaskType.LANDING_PAGE):
             return self._settings.effort_code
         if task_type is TaskType.CODE_REVIEW:
             return self._settings.effort_review
