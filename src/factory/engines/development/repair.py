@@ -68,7 +68,32 @@ log = get_logger(__name__)
 #: The better fix is a per-tool result budget -- a pytest dump and a source file
 #: genuinely want different limits -- but `AgentRuntime.run` takes one cap for the
 #: whole run, so that is a runtime change rather than a constant.
+#: Fallback only. The live value is derived per run from the role's own transcript
+#: budget -- see `_result_budget`.
 MAX_RESULT_CHARS = 24_000
+
+
+def _result_budget(role_max_context_chars: int | None) -> int:
+    """How much one tool result may occupy, derived rather than chosen.
+
+    A flat constant was the wrong shape and outgrew itself twice. It was 6_000
+    against a 20_277-char source file; raised to 24_000; and the file is now 34_604
+    because every regeneration adds code, so the same failure returned -- four
+    consecutive repair attempts spending their whole budget re-reading one file with
+    `sed` and changing nothing.
+
+    The real constraint was never per-result size. `AgentRuntime._compact_to_budget`
+    already bounds the *transcript* and does it non-destructively: it evicts the
+    oldest results, which an agent can read again. Truncating each result as it
+    arrives solves a problem that is already solved, in the one place where it does
+    permanent damage.
+
+    Half the transcript budget, because the only genuine constraint on a single
+    result is that it must not crowd out everything else -- past half, one read
+    evicts essentially all context and the run is worse off than if it had paged.
+    Not a number picked for a file size, so it cannot be outgrown by one.
+    """
+    return max(MAX_RESULT_CHARS, (role_max_context_chars or 0) // 2)
 
 #: Outcomes that mean the agent genuinely never got to run: something in the
 #: environment stopped it before it could work on the problem. Deferring costs
@@ -130,7 +155,7 @@ _WEAKENER = re.compile(r"@pytest\.mark\.(skip|xfail)\b|pytest\.(skip|xfail)\(")
 
 
 def _workspace_and_review_tools(
-    ctx: FactoryContext, workspace: str, test_command: str
+    ctx: FactoryContext, workspace: str, test_command: str, *, max_file_chars: int
 ) -> ToolRegistry:
     """The engineer's own toolkit: edit the workspace, and check the work before
     declaring it done.
@@ -146,6 +171,7 @@ def _workspace_and_review_tools(
             settings=ctx.settings,
             sandbox=ctx.sandbox,
             test_command=test_command,
+            max_file_chars=max_file_chars,
         )
     )
     for descriptor in build_review_tools(ctx, workspace=workspace).all():
@@ -488,6 +514,10 @@ async def attempt_repair(
     # than one on a fresh build.
     knowledge = read_knowledge(workspace, ctx.settings)
     context = "\n\n".join(part for part in (knowledge, recalled) if part.strip())
+    # One budget, derived from this role's own transcript ceiling and used for both
+    # the tool's page size and the runtime's result cap -- so a file the tool hands
+    # back whole is never mutilated a second time on the way into the transcript.
+    result_budget = _result_budget(role.max_context_chars)
 
     runtime = AgentRuntime(
         ctx.llm,
@@ -501,7 +531,9 @@ async def attempt_repair(
             task_id=task_id,
             product_id=product_id,
             engine=EngineName.DEVELOPMENT,
-            base=_workspace_and_review_tools(ctx, workspace, test_command),
+            base=_workspace_and_review_tools(
+                ctx, workspace, test_command, max_file_chars=result_budget
+            ),
         ),
     )
     result = await runtime.run(
@@ -515,7 +547,7 @@ async def attempt_repair(
         deadline_seconds=role.deadline_seconds,
         docker_available=ctx.docker_available,
         context=context,
-        max_result_chars=MAX_RESULT_CHARS,
+        max_result_chars=result_budget,
         cost_cap_usd=ctx.settings.repair_agent_cost_cap_usd,
         cost_model=model_for(role.task_type, ctx.settings),
         max_context_chars=role.max_context_chars,

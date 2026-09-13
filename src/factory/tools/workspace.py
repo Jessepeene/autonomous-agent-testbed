@@ -41,8 +41,18 @@ from factory.tools.registry import ToolDescriptor, ToolRegistry
 
 log = get_logger(__name__)
 
-#: A single file the agent may read or write. Large enough for any realistic source
-#: file, small enough that one bad read cannot consume the whole step budget.
+#: The most one file read may return in a single call.
+#:
+#: Not a truncation point -- a *page* boundary. Past this the read returns a bounded
+#: chunk that says exactly which lines it covers and how to ask for the rest, so an
+#: agent always knows whether it has the whole file.
+#:
+#: Silent elision is what this replaces, and it was not a small bug: a 34,604-char
+#: `app/main.py` came back with its middle removed, the agent correctly distrusted
+#: it, and reconstructed the file with seven `sed -n 'X,Yp'` calls instead -- four
+#: consecutive repair attempts spent their entire budget re-reading one file and
+#: changed nothing. A file has no "signal at the ends" the way a pytest dump does,
+#: so middle-elision produces something that looks complete and is not.
 MAX_FILE_CHARS = 60_000
 
 #: Enough to see the shape of a generated product (they are ~20 files) without an
@@ -72,6 +82,7 @@ def build_workspace_tools(
     settings: Settings,
     sandbox: SandboxRunner,
     test_command: str,
+    max_file_chars: int = MAX_FILE_CHARS,
 ) -> ToolRegistry:
     """A private registry holding this repair run's four tools.
 
@@ -96,7 +107,7 @@ def build_workspace_tools(
         truncated = len(files) > MAX_LISTED_FILES
         return {"files": files[:MAX_LISTED_FILES], "truncated": truncated}
 
-    async def read_workspace_file(path: str) -> dict[str, Any]:
+    async def read_workspace_file(path: str, offset: int = 0) -> dict[str, Any]:
         target = _safe_relative(root, path)
         if target is None:
             return {"error": f"path {path!r} is outside the workspace"}
@@ -106,11 +117,37 @@ def build_workspace_tools(
             content = target.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError) as exc:
             return {"error": f"{path!r} could not be read as text: {exc}"}
-        return {
+
+        # Paged by line, because that is the unit the caller thinks in -- the
+        # behaviour this replaces was agents reaching for `sed -n 'X,Yp'` when a
+        # read came back incomplete.
+        lines = content.splitlines(keepends=True)
+        total = len(lines)
+        start = min(max(offset, 0), total)
+        chunk: list[str] = []
+        used = 0
+        for line in lines[start:]:
+            if chunk and used + len(line) > max_file_chars:
+                break
+            chunk.append(line)
+            used += len(line)
+        end = start + len(chunk)
+
+        result: dict[str, Any] = {
             "path": path,
-            "content": content[:MAX_FILE_CHARS],
-            "truncated": len(content) > MAX_FILE_CHARS,
+            "content": "".join(chunk),
+            "lines": f"{start + 1}-{end} of {total}" if total else "empty file",
+            "complete": start == 0 and end == total,
         }
+        if end < total:
+            # Stated plainly and with the exact next call, so "I have the whole
+            # file" is never something the agent has to infer.
+            result["next_offset"] = end
+            result["more"] = (
+                f"{total - end} more line(s). Call read_workspace_file with "
+                f"offset={end} for the next page."
+            )
+        return result
 
     async def write_workspace_file(path: str, content: str) -> dict[str, Any]:
         target = _safe_relative(root, path)
@@ -160,14 +197,27 @@ def build_workspace_tools(
     registry.register(
         ToolDescriptor(
             name="read_workspace_file",
-            description="Read one file from the product workspace as text.",
+            description=(
+                "Read one file from the product workspace as text. The result always "
+                "states which lines it covers and whether they are the whole file; if "
+                "a file is too large for one call it comes back as a page with the "
+                "exact offset to request next. Use this rather than shelling out to "
+                "sed or head -- it is one call per page and it tells you where you are."
+            ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
                         "description": "Workspace-relative path, e.g. 'app/main.py'.",
-                    }
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": (
+                            "0-based line to start at. Omit for the start of the file; "
+                            "pass the `next_offset` from a previous page to continue."
+                        ),
+                    },
                 },
                 "required": ["path"],
                 "additionalProperties": False,
