@@ -14,6 +14,7 @@ from factory.llm.providers.base import (
 from factory.llm.providers.fake import FakeProvider
 from factory.llm.router import (
     NO_FAILOVER,
+    POC_EXEMPT,
     ROUTING,
     ProviderRegistry,
     may_failover,
@@ -28,15 +29,34 @@ from factory.settings import Settings, TaskType
 # --- POC model override -----------------------------------------------------
 
 
-def test_poc_override_sends_every_task_type_to_one_model(settings: Settings) -> None:
-    """POC mode runs the whole factory on one cheap model, because every bug found
-    in two days of live debugging was structural -- a cap, an ordering, a dropped
-    payload -- and a weak model exposes that class *better* than a strong one,
-    which papers over a thin brief by inferring what was meant."""
+def test_poc_override_sends_every_non_exempt_task_type_to_one_model(
+    settings: Settings,
+) -> None:
+    """POC mode runs the factory on one cheap model, because every bug found in two
+    days of live debugging was structural -- a cap, an ordering, a dropped payload
+    -- and a weak model exposes that class *better* than a strong one, which papers
+    over a thin brief by inferring what was meant."""
     poc = settings.model_copy(update={"poc_model_override": "deepseek-flash"})
     for task_type in TaskType:
+        if task_type in POC_EXEMPT:
+            continue
         assert provider_for(task_type, poc) is Provider.DEEPSEEK
         assert model_for(task_type, poc) == "deepseek-flash"
+
+
+def test_code_generation_stays_on_claude_even_in_poc_mode(settings: Settings) -> None:
+    """The one exemption, and the reason is specific: CODE_GENERATION is the single
+    call that produces a whole working MVP in one shot, and Claude is demonstrably
+    able to do that. It is also the least informative thing to put on a cheap model
+    -- a failed one-shot MVP measures the model's generation ceiling, not the
+    factory's plumbing, which is what the POC is for.
+
+    CODE_REVIEW is deliberately not exempt: if the system works as it should, who
+    reviews the code should not matter."""
+    poc = settings.model_copy(update={"poc_model_override": "deepseek-flash"})
+    assert provider_for(TaskType.CODE_GENERATION, poc) is Provider.ANTHROPIC
+    assert model_for(TaskType.CODE_GENERATION, poc) == poc.model_code
+    assert provider_for(TaskType.CODE_REVIEW, poc) is Provider.DEEPSEEK
 
 
 def test_clearing_the_poc_override_restores_the_table_exactly(settings: Settings) -> None:
@@ -44,7 +64,7 @@ def test_clearing_the_poc_override_restores_the_table_exactly(settings: Settings
     give back the documented routing table, including the Anthropic-only code
     paths, with nothing left behind."""
     poc = settings.model_copy(update={"poc_model_override": "deepseek-flash"})
-    assert provider_for(TaskType.CODE_GENERATION, poc) is Provider.DEEPSEEK
+    assert provider_for(TaskType.CODE_REVIEW, poc) is Provider.DEEPSEEK
 
     restored = settings.model_copy(update={"poc_model_override": None})
     for task_type in TaskType:

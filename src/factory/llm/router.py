@@ -46,14 +46,38 @@ NO_FAILOVER: frozenset[TaskType] = frozenset(
 GENERAL_FALLBACK_PROVIDERS: frozenset[Provider] = frozenset({Provider.GEMINI, Provider.ANTHROPIC})
 
 
+#: Task types `POC_MODEL_OVERRIDE` does **not** capture -- they keep their normal
+#: `ROUTING` entry even in POC mode.
+#:
+#: Only CODE_GENERATION, and for one specific reason: it is the single call that
+#: produces an entire working MVP in one shot, and Claude is demonstrably able to
+#: do that. It is also the least informative thing to put on a cheap model -- the
+#: POC exists to find *structural* gaps (thin briefs, dropped payloads, caps), and
+#: a failed one-shot MVP tells you about the model's raw generation ceiling rather
+#: than about the factory's plumbing.
+#:
+#: CODE_REVIEW is deliberately NOT exempt. Jesse's reasoning, and it is right: if
+#: the system works as it should, who reviews the code should not matter. Review is
+#: a judgement over evidence already gathered, which is exactly what the POC is
+#: meant to stress.
+POC_EXEMPT: frozenset[TaskType] = frozenset({TaskType.CODE_GENERATION})
+
+
+def _poc_model(task_type: TaskType, settings: Settings) -> str | None:
+    """The POC override in force for this task type, or None if it does not apply."""
+    if not settings.poc_model_override or task_type in POC_EXEMPT:
+        return None
+    return settings.poc_model_override
+
+
 def provider_for(task_type: TaskType, settings: Settings | None = None) -> Provider:
     """Which vendor serves this task type.
 
-    `POC_MODEL_OVERRIDE` sends every task type to DeepSeek instead -- see
-    `model_for` for what that mode is and why it does not weaken `NO_FAILOVER`.
+    `POC_MODEL_OVERRIDE` sends every task type except `POC_EXEMPT` to DeepSeek --
+    see `model_for` for what that mode is and why it does not weaken `NO_FAILOVER`.
     """
     settings = settings or get_settings()
-    if settings.poc_model_override:
+    if _poc_model(task_type, settings):
         return Provider.DEEPSEEK
     try:
         return ROUTING[task_type]
@@ -71,11 +95,12 @@ def model_for(task_type: TaskType, settings: Settings | None = None) -> str:
     Orchestration runs on every tick and produces a tightly-constrained decision, so
     it uses the fast model; everything judgement-heavy uses the general model.
 
-    `POC_MODEL_OVERRIDE` replaces all of that with one model for every task type.
-    It exists because two days of live debugging produced twelve bugs and not one
-    of them was a reasoning failure -- they were caps, orderings and dropped
-    payloads. A cheap model exposes that class of problem *better* than a strong
-    one, which papers over a thin brief by inferring what was meant.
+    `POC_MODEL_OVERRIDE` replaces all of that with one model for every task type
+    except `POC_EXEMPT`. It exists because two days of live debugging produced
+    twelve bugs and not one of them was a reasoning failure -- they were caps,
+    orderings and dropped payloads. A cheap model exposes that class of problem
+    *better* than a strong one, which papers over a thin brief by inferring what
+    was meant.
 
     This deliberately overrides the ROUTING table above, including its
     Anthropic-only code paths. It does **not** weaken `NO_FAILOVER`: that rule
@@ -84,8 +109,9 @@ def model_for(task_type: TaskType, settings: Settings | None = None) -> str:
     back, and clearing the setting restores the table exactly as written.
     """
     settings = settings or get_settings()
-    if settings.poc_model_override:
-        return settings.poc_model_override
+    poc = _poc_model(task_type, settings)
+    if poc:
+        return poc
     if task_type is TaskType.ORCHESTRATION:
         return settings.model_fast
     provider = provider_for(task_type, settings)
