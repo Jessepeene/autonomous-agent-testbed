@@ -29,7 +29,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from factory.agents.roles import RoleName, get_role
+from factory.agents.roles import RoleName, categories_for, get_role
 from factory.agents.runtime import AgentRuntime
 from factory.engines.development.scaffold.generator import WORKSPACE_SKIP_DIRS
 from factory.llm.router import model_for
@@ -37,6 +37,7 @@ from factory.logging import get_logger
 from factory.sandbox.runner import resolve_workspace
 from factory.settings import EngineName, Settings
 from factory.supervisor.context import FactoryContext
+from factory.tools.handbook import build_handbook_tools
 from factory.tools.workspace import build_workspace_tools
 
 log = get_logger(__name__)
@@ -455,17 +456,27 @@ async def attempt_repair(
     runtime = AgentRuntime(
         ctx.llm,
         settings=ctx.settings,
-        tools=build_workspace_tools(
-            workspace=workspace,
-            settings=ctx.settings,
-            sandbox=ctx.sandbox,
-            test_command=test_command,
+        # Layered, not replaced: the workspace tools are this role's whole job, and
+        # the handbook is what lets it know what the product it is editing is *for*
+        # -- and read the repairs already tried on it, which is the difference
+        # between a second attempt and a repeat of the first.
+        tools=build_handbook_tools(
+            role=role.name.value,
+            task_id=task_id,
+            product_id=product_id,
+            engine=EngineName.DEVELOPMENT,
+            base=build_workspace_tools(
+                workspace=workspace,
+                settings=ctx.settings,
+                sandbox=ctx.sandbox,
+                test_command=test_command,
+            ),
         ),
     )
     result = await runtime.run(
         objective=objective,
         system=role.system_prompt,
-        tool_categories=list(role.tool_categories),
+        tool_categories=categories_for(role),
         task_type=role.task_type,
         engine=EngineName.DEVELOPMENT,
         task_id=task_id,

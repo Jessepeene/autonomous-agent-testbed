@@ -846,6 +846,26 @@ async def resolve_pending_heal_attempts(
     )
 
 
+async def heal_attempts_for(
+    session: AsyncSession, product_id: str, *, limit: int = 20
+) -> list[HealAttempt]:
+    """What has already been tried on this product, oldest first.
+
+    The table's own docstring notes nothing reads it to make a decision. That is
+    still true of the *control flow*, but the handbook now reads it for the
+    product dossier: an employee about to repair something should be able to see
+    that the same fix was attempted twice and failed, which is exactly the loop
+    `MAX_HEAL_CYCLES` currently ends by exhaustion rather than by anyone noticing.
+    """
+    stmt = (
+        select(HealAttempt)
+        .where(HealAttempt.product_id == product_id)
+        .order_by(HealAttempt.created_at.asc())
+        .limit(limit)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
 async def live_products(session: AsyncSession, limit: int = 20) -> list[Product]:
     stmt = (
         select(Product)

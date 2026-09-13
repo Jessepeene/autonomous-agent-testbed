@@ -112,6 +112,50 @@ class AgentRole:
     max_context_chars: int | None = None
 
 
+#: Tool categories every employee gets on top of its role's own, and the only ones
+#: that may ever be granted this way.
+#:
+#: Declared here rather than written as a literal at the three call sites that
+#: build a runtime, so that "what does a role get beyond its envelope" has exactly
+#: one answer and `tests/unit/test_agent_spawner.py` can assert against it. That
+#: test is the guard on the real invariant -- the allowlist is the role's declared
+#: categories, never "everything currently unlocked" -- and a universal grant that
+#: could be added without amending this line would quietly dissolve it.
+#:
+#: `docs` qualifies because it confers no new power over the world: three reads of
+#: the company's own generated documentation, plus one write that only records what
+#: the employee did. Nothing else currently qualifies.
+UNIVERSAL_TOOL_CATEGORIES: tuple[str, ...] = ("docs",)
+
+
+def categories_for(role: AgentRole) -> list[str]:
+    """The full tool allowlist for one run: the role's envelope plus the handbook."""
+    return [*role.tool_categories, *UNIVERSAL_TOOL_CATEGORIES]
+
+
+#: Appended to every role's rules, repair included. Separate constant because the
+#: two rule blocks below deliberately diverge and this part must not.
+#:
+#: Stated in the prompt because a tool nobody is told to call does not get called:
+#: `queue_review_patch` was registered as a tool twice and the reviewer never
+#: invoked it either time, which is why it is a plain function today. Handing an
+#: employee a handbook is not the same as telling it the handbook exists.
+_HANDBOOK_RULES = """
+Working here:
+- You are one employee in a company of them. If something is unclear -- what this
+  product is for, who owns a problem, why a rule exists -- look it up before you
+  guess: `list_docs` and `read_doc` describe the company, and
+  `read_product_dossier` tells you what a product is for, what has happened to it,
+  and which repairs were already tried and failed.
+- Knowing what a product is *for* is how you judge whether a change actually helps.
+  A change that passes every check and does not serve the product's purpose is not
+  a success.
+- Before you finish, call `document_work` once: what you did, and why. Write the
+  reasoning, not just the change -- what you found, what you decided, what you
+  rejected. The next person to touch this has only what you wrote down, and that
+  person is often you, later, with no memory of today.
+"""
+
 _SHARED_RULES = """
 Operating rules:
 - You have a limited number of steps. Spend them on tool calls that change your
@@ -124,7 +168,7 @@ Operating rules:
 - Never invent a URL, a metric, a customer, or a quote. If you did not read it from a
   tool result, do not assert it.
 - When you are done, give the answer directly. No preamble.
-"""
+""" + _HANDBOOK_RULES
 
 #: `_SHARED_RULES` with the one line that would break a repair loop removed, plus the
 #: constraints specific to editing a workspace that gets reviewed and deployed.
@@ -158,7 +202,7 @@ Operating rules:
   from a tool result, do not assert it.
 - End your final message with one line, exactly: RESULT: FIXED, RESULT: NOT_FIXED, or
   RESULT: BLOCKED -- followed by the test command you last ran and its exit code.
-"""
+""" + _HANDBOOK_RULES
 
 ROLES: dict[RoleName, AgentRole] = {
     RoleName.RESEARCHER: AgentRole(

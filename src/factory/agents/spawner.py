@@ -17,7 +17,13 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from factory.agents.roles import CALL_SITE_SCOPED_ROLES, AgentRole, RoleName, get_role
+from factory.agents.roles import (
+    CALL_SITE_SCOPED_ROLES,
+    AgentRole,
+    RoleName,
+    categories_for,
+    get_role,
+)
 from factory.agents.runtime import AgentResult, AgentRuntime
 from factory.llm.providers.base import ProviderRefusal
 from factory.llm.router import model_for
@@ -25,6 +31,7 @@ from factory.logging import get_logger
 from factory.memory import store as memory_store
 from factory.settings import EngineName, TaskType
 from factory.supervisor.context import FactoryContext
+from factory.tools.handbook import build_handbook_tools
 
 log = get_logger(__name__)
 
@@ -120,7 +127,21 @@ async def spawn(
             ),
         )
 
-    runtime = AgentRuntime(ctx.llm, settings=ctx.settings)
+    # Every employee gets the handbook, and `document_work` bound to who it actually
+    # is. Granted here rather than listed in each role's `tool_categories` because it
+    # is a fact about working here, not a per-role privilege -- the eleventh role
+    # should not be able to ship without it by forgetting a tuple entry. It adds no
+    # power over the world: three reads, plus one write that only records.
+    runtime = AgentRuntime(
+        ctx.llm,
+        settings=ctx.settings,
+        tools=build_handbook_tools(
+            role=role.name.value,
+            task_id=request.task_id,
+            product_id=request.product_id,
+            engine=request.engine,
+        ),
+    )
     log.info(
         "agent.spawned",
         role=role.name.value,
@@ -132,7 +153,7 @@ async def spawn(
         result = await runtime.run(
             objective=request.objective,
             system=role.system_prompt,
-            tool_categories=list(role.tool_categories),
+            tool_categories=categories_for(role),
             task_type=role.task_type,
             engine=request.engine,
             task_id=request.task_id,

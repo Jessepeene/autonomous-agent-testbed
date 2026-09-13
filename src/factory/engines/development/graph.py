@@ -671,9 +671,10 @@ async def _review_live_product(ctx: FactoryContext, session: AsyncSession, task:
     is pinned to this product so a model-supplied id cannot redirect a patch at a
     different one. See CALL_SITE_SCOPED_ROLES.
     """
-    from factory.agents.roles import get_role
+    from factory.agents.roles import categories_for, get_role
     from factory.agents.runtime import AgentRuntime
     from factory.tools.browser import BrowserSession, allowed_origins_for
+    from factory.tools.handbook import build_handbook_tools
     from factory.tools.product_review import ReviewVerdict, queue_review_patch
 
     product_id = task.product_id or str(task.payload.get("product_id", ""))
@@ -701,11 +702,25 @@ async def _review_live_product(ctx: FactoryContext, session: AsyncSession, task:
     )
 
     async with BrowserSession(allowed_origins=origins) as tools:
-        runtime = AgentRuntime(ctx.llm, settings=ctx.settings, tools=tools)
+        runtime = AgentRuntime(
+            ctx.llm,
+            settings=ctx.settings,
+            # A QA engineer who does not know what the product is *for* can only
+            # report that a thing is broken, never that a working thing is the
+            # wrong thing. The dossier is what makes the second judgement possible,
+            # and it is the judgement this role exists for.
+            tools=build_handbook_tools(
+                role=role.name.value,
+                task_id=task.id,
+                product_id=product_id,
+                engine=EngineName.DEVELOPMENT,
+                base=tools,
+            ),
+        )
         result = await runtime.run(
             objective=objective,
             system=role.system_prompt,
-            tool_categories=list(role.tool_categories),
+            tool_categories=categories_for(role),
             task_type=role.task_type,
             engine=EngineName.DEVELOPMENT,
             task_id=task.id,

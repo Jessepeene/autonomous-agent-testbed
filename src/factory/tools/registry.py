@@ -69,6 +69,23 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, ToolDescriptor] = {}
 
+    @classmethod
+    def extending(cls, base: ToolRegistry) -> ToolRegistry:
+        """A private registry that starts with everything `base` has.
+
+        `tools/browser.py` set the precedent for a per-run private registry, but it
+        *replaces* the global one — which is right for AUDITOR, whose only category
+        is `browser`. A tool that must be bound to the run it serves while the role
+        keeps all its normal tools needs the additive form instead: copy the
+        descriptors, then register the bound ones on top.
+
+        The copy is shallow and the descriptors are immutable, so a per-run
+        registry cannot leak a bound handler back into the process-wide one.
+        """
+        extended = cls()
+        extended._tools = dict(base._tools)
+        return extended
+
     def register(self, descriptor: ToolDescriptor) -> ToolDescriptor:
         if descriptor.name in self._tools:
             raise ValueError(f"tool {descriptor.name!r} is already registered")

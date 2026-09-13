@@ -23,6 +23,7 @@ from factory.agents.roles import (
     CALL_SITE_SCOPED_ROLES,
     PIPELINE_SCOPED_ROLES,
     ROLES,
+    UNIVERSAL_TOOL_CATEGORIES,
     WORKSPACE_SCOPED_ROLES,
     RoleName,
     get_role,
@@ -35,6 +36,20 @@ from factory.llm.providers.fake import FakeProvider
 from factory.memory import store as memory_store
 from factory.settings import EngineName
 from factory.supervisor.context import FactoryContext
+from factory.tools.handbook import build_handbook_tools
+
+#: What every employee gets on top of its own envelope. Derived from the declared
+#: `UNIVERSAL_TOOL_CATEGORIES` rather than typed out, so adding a handbook tool does
+#: not break four unrelated tests -- but adding a whole new *universal category*
+#: still has to be a deliberate edit to `roles.py`, which is the part worth
+#: guarding. The exact-set assertions below stay exact.
+HANDBOOK_TOOLS = {
+    d.name
+    for d in build_handbook_tools(
+        role="analyst", task_id=None, product_id=None, engine=None
+    ).all()
+    if d.category in UNIVERSAL_TOOL_CATEGORIES
+}
 
 
 def _completion(text: str) -> AgentTurn:
@@ -375,8 +390,8 @@ async def test_spawned_agent_only_receives_its_roles_tools(
 ) -> None:
     """ANALYST is restricted to the 'http' category. `run_in_sandbox` and
     `github_search_issues` exist in the real registry and must still never be
-    offered — the allowlist is the role's tool_categories, not "everything
-    currently unlocked by credentials"."""
+    offered — the allowlist is the role's tool_categories plus the universal
+    handbook, not "everything currently unlocked by credentials"."""
     from factory.tools import builtin  # noqa: F401 - import populates REGISTRY
 
     gemini_fake.register_turns(_completion("Nothing looks degraded."))
@@ -384,7 +399,7 @@ async def test_spawned_agent_only_receives_its_roles_tools(
 
     tools_sent = gemini_fake.conversations[0]["tools"]
     tool_names = {t["name"] for t in tools_sent}
-    assert tool_names == {"http_get"}
+    assert tool_names == {"http_get"} | HANDBOOK_TOOLS
     assert "run_in_sandbox" not in tool_names
     assert "github_search_issues" not in tool_names
 
@@ -408,7 +423,7 @@ async def test_growth_analyst_cannot_reach_channel_scouts_proposal_tool(
         "list_products_needing_growth_review",
         "start_ab_test_action",
         "request_seo_pass_action",
-    }
+    } | HANDBOOK_TOOLS
     assert "propose_channel" not in tool_names
 
 
@@ -430,7 +445,7 @@ async def test_channel_scout_cannot_reach_growth_analysts_action_tools(
         "list_products_needing_growth_review",
         "recent_channel_experiments",
         "propose_channel",
-    }
+    } | HANDBOOK_TOOLS
     assert "start_ab_test_action" not in tool_names
     assert "request_seo_pass_action" not in tool_names
 
@@ -508,4 +523,4 @@ async def test_discovery_scout_only_reaches_http_and_submit_signal(
     )
 
     tool_names = {t["name"] for t in gemini_fake.conversations[0]["tools"]}
-    assert tool_names == {"http_get", "submit_signal"}
+    assert tool_names == {"http_get", "submit_signal"} | HANDBOOK_TOOLS

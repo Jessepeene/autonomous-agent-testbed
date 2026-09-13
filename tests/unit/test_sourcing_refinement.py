@@ -20,6 +20,7 @@ from factory.engines.marketing.providers import LeadSearchPlan
 from factory.llm.providers.base import AgentTurn, LLMError, Provider, ToolCall, Usage
 from factory.llm.providers.fake import FakeProvider
 from factory.supervisor.context import FactoryContext
+from tests.unit.test_agent_spawner import HANDBOOK_TOOLS
 
 _DRAFT = LeadSearchPlan(
     job_titles=["Head of Finance"],
@@ -180,7 +181,9 @@ async def test_refinement_only_offers_the_leads_tool_category(
     ctx: FactoryContext, gemini_fake: FakeProvider, memory_session: AsyncSession
 ) -> None:
     """LEAD_SCOUT's fixed tool_categories is the containment — refinement must not
-    widen it, even implicitly."""
+    widen it, even implicitly. The universal handbook categories are the one
+    declared exception (`roles.py::UNIVERSAL_TOOL_CATEGORIES`); nothing that
+    reaches a real prospect may come in that way."""
     from factory.tools import builtin  # noqa: F401 - import populates REGISTRY
 
     gemini_fake.register_turns(_agent_turn("The plan already works."))
@@ -192,4 +195,4 @@ async def test_refinement_only_offers_the_leads_tool_category(
 
     tools_sent = gemini_fake.conversations[0]["tools"]
     tool_names = {t["name"] for t in tools_sent}
-    assert tool_names <= {"find_leads_hunter", "find_leads_apollo"}
+    assert tool_names <= {"find_leads_hunter", "find_leads_apollo"} | HANDBOOK_TOOLS

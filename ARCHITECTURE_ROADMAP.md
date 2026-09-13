@@ -308,6 +308,50 @@ prompt, and the real-MVP codegen prompt remain permanently excluded. The candida
 are the *worker* prompts (repair, review), whose failures are commercially lossy
 rather than safety-critical — the same bar every current allowlist entry meets.
 
+### 2e. Employees need documentation — to read *and* to write ✅ implemented
+
+Jesse's framing, which is the clearest statement of the gap anyone has made here:
+
+> *"If I'm a dev and I get told to implement a new feature I know what the product
+> is about, I can read documentation, I know the purpose of the product so I can
+> gauge why it would be important and how to implement it. If something is unclear
+> I can ask questions or reference other info in the project directory, and I
+> document what I do and justify my actions. And this goes for all employees."*
+
+Before this, an employee could read exactly three things: its own system prompt,
+whatever memory recall surfaced, and — only if it was a repair role — one product's
+`.factory/ARCHITECTURE.md`. It could not discover that any other employee existed,
+what happened to its work after handoff, what rules bound it, or **what the product
+it was editing was for.** That is the instrumentation principle again, pointed at
+context rather than data: an employee optimising against gates it cannot see.
+
+Built (`handbook.py`, `tools/handbook.py`):
+
+- **Generated, never hand-written.** The org directory derives from `ROLES`, the
+  policy brief from the settings and gates that actually enforce it, a product
+  dossier from that product's own rows. Hand-written docs drift, and a drifted doc
+  is worse than none because an employee acts on it confidently — the same reason
+  the living-record principle insists a record be checkable against real rows.
+- **Pull, not push.** `list_docs` / `read_doc` / `read_product_dossier` are tools,
+  not prompt padding. An employee looks something up when it has a question, which
+  is also the honest signal that it had one.
+- **Write-back is the half that was missing.** `document_work` records what an
+  employee did *and why*, to two places that answer different questions: the
+  `task_events` trail (what happened to this product, in order — read back by the
+  dossier) and `capability:<role>` memory (how this job tends to go, recalled on
+  every future run of that role, on any product).
+- **Identity is bound by code, not self-declared.** `document_work` is built
+  per-run against the `RoleName` the spawner already resolved, so a note cannot be
+  filed under an employee that did not write it. Same split as everywhere else
+  here: the agent decides the inputs, deterministic code decides the record.
+- **One declared universal grant.** `UNIVERSAL_TOOL_CATEGORIES = ("docs",)` is the
+  single exception to "a role gets exactly its `tool_categories`", declared in one
+  place so the containment tests can assert against it rather than be loosened.
+
+Still open, and deliberately: **asking a question** (2b) is the one part of Jesse's
+list not built — it needs a responder, and what a worker actually gets stuck on is
+better learned from the POC run than guessed at now.
+
 ### What carries over from the original scope
 
 Still worth doing, now as a consequence rather than the headline: feed the manager
