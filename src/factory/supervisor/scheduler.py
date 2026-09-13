@@ -139,6 +139,9 @@ class Scheduler:
         ctx = self._ctx
         if not ctx.is_enabled(EngineName.DISCOVERY):
             return
+        if not ctx.settings.discovery_enabled:
+            log.debug("discovery.disabled_by_setting")
+            return
 
         active = await repository.count_active_dev_tasks(session)
         if active >= ctx.settings.max_concurrent_builds:

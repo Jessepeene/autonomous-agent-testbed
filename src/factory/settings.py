@@ -317,6 +317,20 @@ class Settings(BaseSettings):
     # delivery first and this only fires once the human has clearly had time to see it.
     stale_interrupt_reminder_hours: int = Field(default=12, ge=1)
     discovery_interval_seconds: int = Field(default=6 * 3600, ge=60)
+    # Stops new idea cycles being scheduled at all, leaving Compliance, Development
+    # and Marketing running normally.
+    #
+    # A real switch rather than a very large `discovery_interval_seconds`, which is
+    # how this was done before: that works only by arithmetic accident (the
+    # idempotency bucket `now // interval` stops advancing), reads as a typo to the
+    # next person, and still lets one cycle through on the first tick after the
+    # change. The blunt alternative -- unsetting GEMINI_API_KEY -- disables
+    # Compliance and Marketing along with Discovery, which is exactly what you do
+    # not want when the point is to watch one existing product move through them.
+    #
+    # Deliberately does not touch work already queued or in flight; it only stops
+    # new cycles being created.
+    discovery_enabled: bool = True
     # DISCOVERY_SCOUT (see agents/roles.py) runs once per Discovery cycle alongside
     # the fixed HN/GitHub/Reddit/Product Hunt sources. Off switch for operational
     # control -- e.g. if it turns out too costly or too noisy -- without a code change.
