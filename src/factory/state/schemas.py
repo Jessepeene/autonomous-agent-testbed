@@ -579,6 +579,27 @@ class HealingInstructions(Contract):
     blocking_findings: list[ReviewFinding] = Field(default_factory=list, max_length=40)
 
 
+#: Severities that stop a deploy outright, whatever the reviewer's category.
+BLOCKING_SEVERITIES = frozenset({"critical", "high"})
+
+#: Categories where `medium` blocks too: the three that can leak data, credentials
+#: or access. This system handles real payments and real personal data, every other
+#: guard in it fails closed, and "ship a known hole and track it" is a human's call
+#: to make, not an autonomous factory's.
+#:
+#: `performance`, `dependencies` and `quality` are not here on purpose. Those are
+#: the ones that trapped a working checkout fix for a day -- real findings, worth
+#: recording, never worth holding a broken payment path hostage to.
+STRICT_CATEGORIES = frozenset({"security", "secrets", "privilege"})
+
+
+def _blocks_deploy(finding: ReviewFinding) -> bool:
+    severity = str(finding.severity).lower()
+    if severity in BLOCKING_SEVERITIES:
+        return True
+    return severity == "medium" and str(finding.category).lower() in STRICT_CATEGORIES
+
+
 class CouncilResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -588,7 +609,38 @@ class CouncilResult(BaseModel):
 
     @property
     def blocking(self) -> list[ReviewFinding]:
+        """Every finding from every reviewer that withheld approval.
+
+        The full set, used for *recording*. `deploy_blocking` is the subset that
+        actually holds a ship.
+        """
         return [f for v in self.verdicts if not v.approved for f in v.findings]
+
+    @property
+    def deploy_blocking(self) -> list[ReviewFinding]:
+        """The findings serious enough to stop a deploy.
+
+        Every finding in `blocking` used to hold the product, and the reviewer
+        prompt sets `approved=false` at "medium severity or above" -- so one medium
+        nit in a file was enough to block everything else in it indefinitely.
+
+        Observed live, and the reason this property exists: a correct fix for a
+        broken `POST /api/billing/checkout` was written on 12 September and never
+        shipped. It sat behind 8 unrelated performance/quality/security findings in
+        the same file while the live product kept returning 422 to every paying
+        customer for another day, with three heal attempts exhausting themselves
+        trying to clear the backlog before they could ship the one fix that mattered.
+
+        A human team ships the hotfix and files the rest. That is only safe if the
+        rest genuinely *are* filed, which is what `issues` now guarantees -- nothing
+        here is dropped, it is recorded and tracked (`_record_council_findings`).
+
+        Security is deliberately stricter: a medium security finding still blocks.
+        Everywhere else in this codebase the security posture fails closed, and
+        "we shipped a known hole and tracked it" is not a trade this system gets to
+        make on its own.
+        """
+        return [f for f in self.blocking if _blocks_deploy(f)]
 
 
 class GeneratedFile(Contract):

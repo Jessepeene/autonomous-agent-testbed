@@ -53,6 +53,7 @@ from factory.settings import EngineName, Settings, TaskType, get_settings
 from factory.state import repository
 from factory.state.orm import ABTest, Idea, Product, Task, new_id
 from factory.state.schemas import (
+    CouncilResult,
     InterruptReason,
     ProductStatus,
     TaskKind,
@@ -624,6 +625,50 @@ reviewer used over a description of it. Leave empty only if they truly named non
 - severity: critical, high, medium, or low. Critical means the product cannot be \
 paid for or cannot be used at all.\
 """
+
+
+async def _record_council_findings(
+    session: AsyncSession, product_id: str, council: CouncilResult
+) -> int:
+    """File every Bug Council finding as an issue. Returns how many were recorded.
+
+    This is what makes a severity-gated deploy gate safe. Letting a medium finding
+    through is only defensible if the finding survives as tracked work rather than
+    as a log line in a build that shipped; without this, "ship it and track it"
+    quietly becomes "ship it and forget".
+
+    `record_issue` deduplicates, so a finding the Council raises on every review --
+    which is most of them, since the code stays the same until someone fixes it --
+    accumulates `times_seen` on one row instead of filing a fresh copy each build.
+    That count is itself the signal a manager wants: *this has been flagged on
+    fourteen consecutive reviews and nobody has touched it.*
+    """
+    recorded = 0
+    for finding in council.blocking:
+        _, is_new = await repository.record_issue(
+            session,
+            product_id=product_id,
+            # Council findings are code-quality defects, not the user-visible kind
+            # AUDITOR files; `bug` is the honest bucket for all six categories.
+            kind="bug",
+            severity=str(finding.severity).lower(),
+            title=finding.summary,
+            # `file:line` is a genuinely stable location, which makes the identity
+            # far sharper than anything derived from a reviewer's prose.
+            location=f"{finding.file}:{finding.line or 0}",
+            expected=finding.remediation,
+            actual=finding.failure_scenario,
+            found_by=f"bug_council:{finding.category}",
+        )
+        recorded += 1
+        if is_new:
+            log.info(
+                "development.council_finding_filed",
+                product_id=product_id,
+                category=str(finding.category),
+                severity=str(finding.severity),
+            )
+    return recorded
 
 
 async def _ensure_deps_for_repair(
@@ -1384,11 +1429,24 @@ async def _verify_and_ship(
         # never route this into a heal cycle, which would spend an LLM call
         # regenerating code that was never actually found bad, or even reviewed.
         raise DevOpsError(f"Bug Council could not complete review: {exc}") from exc
-    if not council.approved:
+    # Every finding becomes an issue, whether or not it blocks. This runs *before*
+    # the gate decision on purpose: a finding must be durably recorded before it can
+    # be waved past, or "ship it and track it" degrades into "ship it and forget".
+    recorded = await _record_council_findings(session, product_id, council)
+
+    deploy_blocking = council.deploy_blocking
+    if deploy_blocking:
         healing = council.healing
         summary = healing.summary if healing else "Bug Council rejected the build."
         steps = "\n".join(healing.ordered_steps) if healing else ""
-        blocked_by = sorted({str(v.category) for v in council.verdicts if not v.approved})
+        blocked_by = sorted({str(f.category) for f in deploy_blocking})
+        log.info(
+            "development.council_blocked",
+            product_id=product_id,
+            blocking=len(deploy_blocking),
+            recorded_total=recorded,
+            categories=blocked_by,
+        )
         return await _heal(
             ctx,
             session,
@@ -1396,6 +1454,17 @@ async def _verify_and_ship(
             f"{summary}\n{steps}",
             idea_id,
             category=f"council_rejection:{','.join(blocked_by)}",
+        )
+
+    if not council.approved:
+        # Reviewers withheld approval, but nothing they found is serious enough to
+        # hold the product. The findings are issues now and will be worked on their
+        # own merits instead of as a precondition for every future deploy.
+        log.info(
+            "development.shipped_with_open_findings",
+            product_id=product_id,
+            findings=len(council.blocking),
+            recorded=recorded,
         )
 
     # is_validation products have no Stripe wiring at all (LANDING_PAGE_SYSTEM), so
