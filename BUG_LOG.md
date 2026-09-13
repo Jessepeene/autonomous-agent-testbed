@@ -1117,3 +1117,100 @@ is a drift guard asserting every `*_cents` field on `FactorySnapshot` appears in
 the prompt, so the next money field added cannot reach the model unlabelled.
 
 **Status**: Fixed locally, not yet deployed.
+
+## 23. Every defect was a first encounter — one bug filed four times in 24 days
+
+**Found**: 2026-09-13, while answering Jesse's question "an issue got made about
+this somewhere I assume?"
+
+**Symptom**: the same broken checkout on one product, filed repeatedly as
+unrelated work items:
+
+```
+attempt 4  09-12 06:43   subscription checkout fails with a 422...
+attempt 5  09-12 06:43   checkout flow is broken, returning a 422...
+attempt 6  09-12 13:38   subscription checkout fails with a 422...
+attempt 7  (later)       subscription checkout fails with a 422...
+review     09-13 15:28   $199/mo subscribe/checkout fails      ← found again
+```
+
+Attempts 4 and 5 were filed **inside the same minute** — two descriptions of one
+defect, as two separate items. The defect was first found on 20 August and was
+still live 24 days later.
+
+**Cause**: there was no such thing as an issue. A review produced a
+`ReviewVerdict`, `queue_review_patch` turned it into a `PATCH_PRODUCT` task with a
+`healing` text blob, and that was the entire record. Three consequences, each
+independently sufficient:
+
+- **No identity.** Nothing could tell two reports apart from two defects. Matching
+  on the text was never possible — an LLM never writes the same sentence twice,
+  which is exactly how BUG_LOG #20's escalation dedup failed.
+- **No state.** A task is pending/running/done. A defect is open, being fixed,
+  fixed, or verified gone, and those are different questions.
+- **No closure.** `done` meant *the patch ran*. Nothing ever re-checked the
+  symptom, so a failed repair and a successful one were indistinguishable.
+
+The system was never failing to fix this bug. It was failing to notice it was the
+same bug.
+
+**Fix**: an `issues` table (migration `0033`) plus `factory/issues.py`.
+`fingerprint` = product + kind + normalised location, with `jaccard` wording
+similarity at `memory/store.py`'s existing 0.6 threshold as a second pass when the
+reviewer describes a location rather than naming one. `status` runs
+detected→triaged→fixing→fixed→verified→closed. **`verified_at` is deliberately
+separate from `fixed_at`**: a deploy sets `fixed` (a claim about work); only a
+later review failing to find the defect sets `verified` and closes it. A review
+that reports it again reopens it, because a defect surviving a claimed repair is
+evidence the repair failed. Re-finding a *closed* issue reopens rather than
+duplicating — a regression is one row with a history.
+
+**Verification**: `tests/unit/test_issues.py` (21 tests) pins identity in both
+directions — the same defect reworded must match, two different defects must not.
+`tests/integration/test_issues_lifecycle.py` pins the state machine, including the
+one that matters most: a defect still being reported is never closed.
+
+**Status**: Fixed and deployed 2026-09-13.
+
+## 24. The circuit breaker paused a healthy provider for failing schema validation
+
+**Found**: 2026-09-13, about an hour into the DeepSeek POC, by the escalation
+monitor reporting `provider_outage: deepseek is in a sustained outage`.
+
+**It was not an outage.** DeepSeek was returning HTTP 200 to every call:
+
+```
+orchestration -> deepseek [schema_violation]           x3
+orchestration -> deepseek [schema_violation_repaired]  x4
+analysis      -> deepseek [schema_violation]           x2
+analysis      -> deepseek [schema_violation_repaired]  x2
+```
+
+**Cause**: `llm/health.py::tripped_providers` counted successes as
+`outcome == "ok"` and treated everything else as failure. A schema violation is
+the opposite kind of evidence — the provider accepted the request, billed for it,
+and returned a complete response that happened not to satisfy a Pydantic model.
+
+The consequence was a **deadlock**, not a pause. The breaker suspended DeepSeek —
+which under POC routing serves nearly every task type — and waiting could never
+clear it, because the model would miss the same schemas on resume. The factory
+stopped with a perfectly reachable provider.
+
+**Fix**: `NON_TRANSPORT_OUTCOMES` (`schema_violation`, `schema_violation_repaired`,
+`refusal`) are excluded from the reachability population entirely rather than
+counted as failures. They also must not pad `MIN_CALLS`, or two transport errors
+buried in thirty schema failures would read as an outage on a quiet provider.
+
+**The separate, real finding**: `deepseek-flash` genuinely struggles with
+structured output on `orchestration` and `analysis` — roughly 3 in 4 attempts
+missed the schema. That is the same limitation that kept DeepSeek scoped to
+`CODE_REPAIR` (tool-calling only) in the first place, now confirmed to extend
+beyond code tasks. It is a routing decision, not a breaker problem, and is
+deliberately left open for Jesse rather than silently worked around.
+
+**Verification**: `tests/integration/test_provider_health_classification.py` — a
+real outage still trips; schema violations never do; a genuine outage underneath
+schema noise is still caught; schema failures do not dilute the evidence
+threshold.
+
+**Status**: Fixed and deployed 2026-09-13.

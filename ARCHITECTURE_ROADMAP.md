@@ -390,3 +390,74 @@ The deterministic pieces that are genuinely *better* than judgment — HTTP stat
 checks, Fisher's-exact trial evaluation, budget arithmetic, dedup by source URL —
 are never replaced. Judgment is added where a rule was standing in for it, not
 where a rule is correct.
+
+---
+
+# The documentation architecture
+
+Jesse's framing, 2026-09-13, and the organising idea for everything below:
+
+> *"This type of documentation is what should create the intended workflow. A real
+> product in a real environment would have this kind of documentation."*
+
+He mapped out what a small software startup should hold — 35 document types across
+product & strategy, product definition, technical docs, testing & quality, issues,
+research & feedback, analytics, and releases & operations. That full list is the
+target. What follows is how it gets built here without becoming a graveyard.
+
+## The rule: records with types, not documents
+
+**Do not create 35 documents.** Hand-written documentation drifts, and a drifted
+document is worse than none because an employee reads it and acts confidently on
+something false. That is not a hypothesis — it is why the handbook is generated
+from `ROLES` and the product dossier assembled from real rows rather than either
+being written by hand.
+
+So: **a "document" is a query, not a file.** Most of the 35 are views over records
+the factory already writes. Build a view when an employee actually reaches for it.
+
+## The five types (Jesse's taxonomy — the real contribution)
+
+More useful than the 35-item list, because it is what an agent can reason over:
+*this is what we intended → this is what we built → this is how we tested it →
+this is what users did → therefore this is the next decision.*
+
+| Type | Question | Where it lives | State (2026-09-13) |
+|---|---|---|---|
+| **Definition** | What is the product supposed to be? | `ideas`, `products.design_brief` | Partial — no feature specs |
+| **Intent** | What are we trying to accomplish? | — | **Absent** |
+| **Execution** | What are we doing now? | `tasks`, `task_events` | Good |
+| **Evidence** | What actually happened? | `llm_calls`, `heal_attempts`, `issues`, `validation_signals`, `outreach_log`, `learning_episodes`, `page_views`, `ab_tests` | Strong |
+| **Decision** | What should we do as a result? | `entity_verdicts` (one narrow cache) | **Absent** |
+
+**The factory is excellent at recording what happened and what it is doing, and has
+no memory of what it wanted or what it chose.** That single asymmetry explains the
+observed failures: the same checkout bug rediscovered five times (no Decision
+record saying "we are fixing this"); the Orchestrator escalating about
+`spend_limit_cents` (no Intent record saying what the pool is for); `RoutingMemo`
+never checkpointed, so the Orchestrator cannot know what it decided an hour ago.
+
+**Intent and Decision are what turn a task queue into an organisation.** Evidence
+and Execution are already there.
+
+## Build order
+
+1. **Issues** ✅ implemented 2026-09-13 — see BUG_LOG #23. A finding with an
+   identity, a state, and a closure that must be earned. This is Jesse's #20 and
+   its lightweight workflow (detected → triaged → fix → test → verify → closed).
+   It is also the prerequisite for a manager being anything real: *a manager with
+   no backlog has nothing to manage.*
+2. **Decisions** — next. One record type: what was decided, by whom, why, on what
+   evidence, what alternatives, what consequence. Unifies Jesse's #5 (product
+   decisions) and #13 (technical decisions); `task_events` is the spine to hang it
+   on. This is what lets a manager reason across the chain rather than search for
+   the next task to execute.
+3. **Everything else — derive on demand.** #1, #2, #11, #14, #26, #28 and #29 are
+   already queries over existing rows; the product dossier is three of them today.
+
+## Two axes, both needed
+
+Jesse's list is **product** documentation. The handbook shipped on 2026-09-13 —
+org directory, policy brief, handoff map — is **organisational** documentation.
+Different axes: one tells an employee what it is working on, the other tells it
+where it works and what the rules are. Neither substitutes for the other.
