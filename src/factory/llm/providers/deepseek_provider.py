@@ -93,9 +93,12 @@ class DeepSeekProvider(AnthropicProvider):
         with `tool_choice` forcing it. The model cannot answer in prose because the
         only move available to it is the call.
 
-        `tools` is ignored deliberately: `tool_choice` is already pinned to the one
-        tool that carries the result, and offering others would give the model a way
-        to avoid answering.
+        `tools` is ignored deliberately: exactly one tool is offered and
+        `tool_choice` requires it, so passing others would give the model a way to
+        avoid answering.
+
+        The response carries a `thinking` block alongside the `tool_use` one; the
+        scan below ignores anything that is not the result tool.
         """
         tool_name = "emit_result"
         kwargs: dict[str, Any] = {
@@ -113,7 +116,15 @@ class DeepSeekProvider(AnthropicProvider):
                     "input_schema": json_schema_for(schema),
                 }
             ],
-            "tool_choice": {"type": "tool", "name": tool_name},
+            # `any` (use one of the supplied tools), not `{"type": "tool", "name":
+            # ...}`. The named form is what Anthropic documents for forcing one
+            # specific tool, and DeepSeek rejects it outright with
+            # `400: "Thinking mode does not support this tool_choice"` -- flash runs
+            # thinking by default. Probed against the live endpoint 2026-09-13:
+            # `any`, `auto` and no tool_choice all succeed; only the named form 400s.
+            #
+            # Exactly one tool is offered, so `any` forces it just as precisely.
+            "tool_choice": {"type": "any"},
         }
 
         started = time.perf_counter()
