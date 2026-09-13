@@ -691,3 +691,30 @@ class WorkRequirements(Contract):
     must: list[AcceptanceCriterion] = Field(min_length=1, max_length=12)
     should: list[AcceptanceCriterion] = Field(default_factory=list, max_length=12)
     out_of_scope: list[str] = Field(default_factory=list, max_length=12)
+
+
+class ReleaseDecision(Contract):
+    """A judgement about whether to put this in front of a real person.
+
+    Replaces `if not deploy_blocking: ship`. The four options exist because a human
+    team has four; a system with one has a retry loop, which is what this factory
+    had -- Council blocks, heal, regenerate, repeat, until a counter runs out.
+
+    `accepted_issues` is what makes "done" reachable. Shipping with known flaws,
+    named and on the record, is a normal engineering decision; the old gate could
+    only express "nothing blocking remains", which is unbounded because there is
+    always another finding.
+    """
+
+    decision: Literal["ship", "fix_first", "rethink", "abandon"]
+    rationale: str = Field(min_length=30, max_length=1500)
+    #: MUST criteria this build does not meet. Non-empty is close to decisive: a
+    #: product that does not do what it had to do is not shippable, whatever else is
+    #: true of it.
+    unmet_must: list[str] = Field(default_factory=list, max_length=12)
+    #: Known problems being shipped with, deliberately. Recorded so the acceptance
+    #: is a decision someone made rather than something nobody noticed.
+    accepted_issues: list[str] = Field(default_factory=list, max_length=20)
+    #: For `fix_first`: the fewest changes that would make this shippable. Not every
+    #: finding -- a long list here is how a product never ships.
+    fix_first: list[str] = Field(default_factory=list, max_length=10)

@@ -55,7 +55,25 @@ def _no_real_db(monkeypatch: pytest.MonkeyPatch) -> None:
         # see _verify_and_ship's price lookup.
         return _FakeIdeaRow()
 
+
+    async def fake_live_requirements(
+        session: object, subject_kind: str, subject_id: str
+    ) -> None:
+        # No stated standard, which is the pre-requirements world every one of
+        # these tests was written against -- `decide_release` says so in its
+        # rationale rather than inventing one.
+        return None
+
+    async def fake_open_issues_for(session: object, product_id: str) -> list[object]:
+        return []
+
+    async def fake_record_task_event(session: object, **kwargs: object) -> None:
+        return None
+
     monkeypatch.setattr(repository, "set_product_status", fake_set_product_status)
+    monkeypatch.setattr(repository, "live_requirements", fake_live_requirements)
+    monkeypatch.setattr(repository, "open_issues_for", fake_open_issues_for)
+    monkeypatch.setattr(repository, "record_task_event", fake_record_task_event)
     monkeypatch.setattr(
         repository, "resolve_pending_heal_attempts", fake_resolve_pending_heal_attempts
     )

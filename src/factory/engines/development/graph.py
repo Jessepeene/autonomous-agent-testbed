@@ -29,6 +29,7 @@ from factory.engines.development import (
     seo,
 )
 from factory.engines.development import deploy as deploy_module
+from factory.engines.development.release import decide_release
 from factory.engines.development.requirements import (
     render_for_prompt,
     write_landing_page_requirements,
@@ -792,6 +793,19 @@ async def _review_live_product(ctx: FactoryContext, session: AsyncSession, task:
         "Open it, work out what it is offering, and then actually try to do that "
         "thing yourself. Report anything genuinely wrong; if it is fine, say so."
     )
+
+    # The standard, if anyone wrote one. Without it a reviewer can only judge the
+    # product against itself -- which finds things that look wrong but never things
+    # that are missing, because it has no idea what was supposed to be there.
+    stored_requirements = await repository.live_requirements(session, "product", product_id)
+    requirements = _requirements_from_row(stored_requirements) if stored_requirements else None
+    if requirements is not None:
+        objective += (
+            "\n\nThis product was built to meet the criteria below. Check it against "
+            "them specifically -- a MUST that is not met is a real finding even if "
+            "nothing looks broken, and anything listed as out of scope is absent on "
+            "purpose and is not a defect.\n\n" + render_for_prompt(requirements)
+        )
     recalled = await memory_store.recall_block(
         session,
         query=f"{product.name} live page defect",
@@ -1473,14 +1487,72 @@ async def _verify_and_ship(
     recorded = await _record_council_findings(session, product_id, council)
 
     deploy_blocking = council.deploy_blocking
-    if deploy_blocking:
+
+    # The release judgement, where an `if` used to be. Whether this is good enough
+    # to put in front of a real person is the highest-judgement moment in the
+    # company, and it was a boolean -- which is what made the build a retry loop
+    # rather than a process: every transition was automatic, so the system had one
+    # move and made it until a counter ran out.
+    product_row = await repository.get_product(session, product_id)
+    stored_requirements = await repository.live_requirements(session, "product", product_id)
+    decision = await decide_release(
+        ctx,
+        session,
+        product_id=product_id,
+        product_name=product_name,
+        council=council,
+        requirements=_requirements_from_row(stored_requirements) if stored_requirements else None,
+        heal_attempts=product_row.heal_attempts if product_row else 0,
+        task_id=task_id,
+    )
+
+    if decision is not None and decision.decision in ("rethink", "abandon"):
+        # Both say more patching will not help, which is a conclusion no amount of
+        # repair budget reaches on its own -- and retiring a product is a human's
+        # call, so this asks rather than acts.
+        await interrupts.request(
+            session,
+            reason=InterruptReason.HEAL_EXHAUSTED,
+            subject=f"{product_name[:80]} — {decision.decision}",
+            detail=(
+                f"The release decision was **{decision.decision}**, not a defect list.\n\n"
+                f"{decision.rationale}\n\n"
+                + (
+                    "Requirements not met: " + "; ".join(decision.unmet_must)
+                    if decision.unmet_must
+                    else "No specific requirement was called out as unmet."
+                )
+            ),
+            headline=f"\U0001f9ed Release decision: {decision.decision}",
+            reply_hint=(
+                "Reply with guidance to try again, or REJECT to retire this product."
+            ),
+            product_id=product_id,
+        )
+        await repository.set_product_status(session, product_id, ProductStatus.PLANNED)
+        await repository.release_product_lock(session, product_id)
+        return f"development: release decision for {product_id} was {decision.decision}"
+
+    ships = decision is not None and decision.decision == "ship"
+    if deploy_blocking or (decision is not None and not ships):
         healing = council.healing
         summary = healing.summary if healing else "Bug Council rejected the build."
         steps = "\n".join(healing.ordered_steps) if healing else ""
-        blocked_by = sorted({str(f.category) for f in deploy_blocking})
+        blocked_by = sorted({str(f.category) for f in deploy_blocking}) or ["release_decision"]
+        # The decision names the fewest changes that would make this shippable;
+        # Council's own healing text is the fallback for when no judgement ran. This
+        # is the triage step nothing previously did -- "fix all findings" is how a
+        # product never ships.
+        brief = (
+            f"{decision.rationale}\n\nFix these, and only these:\n"
+            + "\n".join(f"- {item}" for item in decision.fix_first)
+            if decision is not None and decision.fix_first
+            else f"{summary}\n{steps}"
+        )
         log.info(
-            "development.council_blocked",
+            "development.release_blocked",
             product_id=product_id,
+            decision=decision.decision if decision else "none",
             blocking=len(deploy_blocking),
             recorded_total=recorded,
             categories=blocked_by,
@@ -1489,19 +1561,20 @@ async def _verify_and_ship(
             ctx,
             session,
             product_id,
-            f"{summary}\n{steps}",
+            brief,
             idea_id,
             category=f"council_rejection:{','.join(blocked_by)}",
         )
 
     if not council.approved:
-        # Reviewers withheld approval, but nothing they found is serious enough to
-        # hold the product. The findings are issues now and will be worked on their
-        # own merits instead of as a precondition for every future deploy.
+        # Reviewers withheld approval and the release decision shipped anyway, with
+        # the remaining findings accepted deliberately. They are issues now, worked
+        # on their own merits rather than as a precondition for every future deploy.
         log.info(
             "development.shipped_with_open_findings",
             product_id=product_id,
             findings=len(council.blocking),
+            accepted=len(decision.accepted_issues) if decision else 0,
             recorded=recorded,
         )
 
