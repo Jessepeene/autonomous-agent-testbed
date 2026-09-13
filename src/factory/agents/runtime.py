@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -42,6 +43,31 @@ _MAX_LOGGED_INVOCATIONS = 40
 _MAX_LOGGED_ARG_CHARS = 300
 
 
+#: The closed vocabulary `_REPAIR_RULES` mandates. Matched case-insensitively and
+#: anywhere in the final message rather than only as the last line: the rule says
+#: "end your final message with one line, exactly" and models approximate that
+#: instruction more often than they follow it, so a strict match would silently
+#: discard most real reports -- which is the failure this whole channel exists to
+#: end.
+_RESULT_SENTINEL = re.compile(
+    r"RESULT:\s*(FIXED|NOT_FIXED|BLOCKED)\b[ \t]*(?P<detail>[^\n]*)", re.IGNORECASE
+)
+
+
+def parse_reported_result(answer: str) -> tuple[str, str]:
+    """``(verdict, detail)`` from an agent's own final message, or ``("", "")``.
+
+    The last occurrence wins: an agent that narrates its plan ("I will end with
+    RESULT: FIXED once the tests pass") and then reports for real should be taken
+    at its final word, not its first.
+    """
+    matches = list(_RESULT_SENTINEL.finditer(answer or ""))
+    if not matches:
+        return "", ""
+    last = matches[-1]
+    return last.group(1).upper(), last.group("detail").strip()[:500]
+
+
 def _summarise_arguments(arguments: dict[str, Any]) -> dict[str, str]:
     """Tool arguments, truncated, for the run's audit line.
 
@@ -57,6 +83,8 @@ def _summarise_arguments(arguments: dict[str, Any]) -> dict[str, str]:
             text[:_MAX_LOGGED_ARG_CHARS] + "..." if len(text) > _MAX_LOGGED_ARG_CHARS else text
         )
     return summarised
+
+
 _MAX_RESULT_CHARS = 20_000
 
 #: Marker inserted where `_truncate_middle` removed content, so the model can tell a
@@ -164,10 +192,34 @@ class AgentResult:
     #: step regardless of whether `max_context_chars` was ever set or exceeded --
     #: instrumentation for tuning a role's budget, not just a compaction artifact.
     peak_context_chars: int = 0
+    #: What the agent itself said it achieved: FIXED / NOT_FIXED / BLOCKED, or ""
+    #: when it did not report.
+    #:
+    #: This is a channel that already existed and nothing read. `_REPAIR_RULES`
+    #: (agents/roles.py) has always instructed every repair agent to end with
+    #: `RESULT: <verdict>` plus the command it ran and its exit code, and
+    #: `_SHARED_RULES` tells every other role to "say so plainly and state exactly
+    #: what is missing" when it cannot proceed. No code anywhere parsed either, so
+    #: agents reported blocked status into the void while the decision was made
+    #: from file diffs. A repair agent spent three separate runs discovering its
+    #: toolchain had been deleted, said so, and was recorded as having simply
+    #: failed.
+    #:
+    #: Deliberately advisory, not authoritative. `stopped_because` (set by the
+    #: runtime) and the file diff (checked by `repair.audit_edits`) remain the
+    #: source of truth for *what happened*; this is the agent's account of *why*,
+    #: which is the part nothing else can supply.
+    reported_result: str = ""
+    reported_detail: str = ""
 
     @property
     def succeeded(self) -> bool:
         return self.stopped_because == "completed"
+
+    @property
+    def reported_blocked(self) -> bool:
+        """The agent said it could not proceed for a reason outside its control."""
+        return self.reported_result == "BLOCKED"
 
     @property
     def used_tools(self) -> bool:
@@ -315,6 +367,12 @@ class AgentRuntime:
             _accumulate(result.usage, turn.usage)
             if turn.text:
                 result.answer = turn.text
+                # Re-parsed on every text turn, not only the last: a run that
+                # reports and is then cut off by its step ceiling still has its
+                # account captured, which is exactly the case that was being lost.
+                verdict, detail = parse_reported_result(turn.text)
+                if verdict:
+                    result.reported_result, result.reported_detail = verdict, detail
 
             if not turn.wants_tools:
                 # stop_reason was previously never consulted here: any turn with no

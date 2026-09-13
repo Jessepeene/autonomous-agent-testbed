@@ -108,7 +108,16 @@ async def spawn(
         recalled = await memory_store.recall_block(
             session,
             query=f"{request.objective} {request.context}",
-            scopes=memory_store.scopes_for(engine=request.engine, product_id=request.product_id),
+            scopes=memory_store.scopes_for(
+                engine=request.engine,
+                product_id=request.product_id,
+                # The role's own accumulated notes. Without this scope a lesson
+                # about how a *job* goes had nowhere to live -- it recurs on every
+                # product, so product scope is wrong, and engine scope is too coarse
+                # to recall against reliably -- and was rediscovered at full cost on
+                # every run.
+                role=role.name.value,
+            ),
         )
 
     runtime = AgentRuntime(ctx.llm, settings=ctx.settings)
@@ -152,6 +161,25 @@ async def spawn(
             content=result.answer[: memory_store.MAX_MEMORY_CHARS],
             kind=memory_store.MemoryKind.LESSON,
             scope=memory_store.scope_for(engine=request.engine, product_id=request.product_id),
+            source_task_id=request.task_id,
+            origin=f"agent:{role.name.value}",
+        )
+
+    # A run that ended without finishing is filed against the *capability*, not the
+    # product. "I ran out of budget before I could finish" and "the tool I was told
+    # I had was not there" are facts about the job, true of the next product too --
+    # and with nowhere to record them they were re-learned at full cost every run.
+    # Kept separate from the lesson above on purpose: that one requires success and
+    # real tool evidence, and this is precisely the failure case.
+    if session is not None and not result.succeeded and result.answer.strip():
+        await memory_store.remember(
+            session,
+            content=(
+                f"A {role.name.value} run stopped early ({result.stopped_because}) after "
+                f"{result.steps} step(s). What it reported: {result.answer[:800]}"
+            ),
+            kind=memory_store.MemoryKind.FAILURE,
+            scope=memory_store.capability_scope(role.name.value),
             source_task_id=request.task_id,
             origin=f"agent:{role.name.value}",
         )

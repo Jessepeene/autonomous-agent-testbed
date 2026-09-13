@@ -150,6 +150,21 @@ async def _run_engine(
             return {"note": f"{engine.value}: nothing ready", "task_id": None}
         task_id = task.id
         task_kind = task.kind
+        task_product_id = task.product_id
+        # The parent link. A task enqueued from inside another task's handler
+        # carries its origin here, which is what turns a pile of rows into a
+        # readable chain -- review found a defect, which queued a patch, which
+        # exhausted its budget, which escalated.
+        caused_by = str(task.payload.get("caused_by_task_id") or "") or None
+        await repository.record_task_event(
+            session,
+            event="engine.start",
+            task_id=task_id,
+            product_id=task_product_id,
+            engine=engine,
+            detail={"kind": task_kind, "attempt": task.attempt_count},
+            caused_by_task_id=caused_by,
+        )
 
     log.info("engine.start", engine=str(engine), task_id=task_id, kind=task_kind)
     try:
@@ -159,6 +174,14 @@ async def _run_engine(
             assert claimed is not None
             note = await runner(ctx, session, claimed)
             await repository.complete_task(session, task_id)
+            await repository.record_task_event(
+                session,
+                event="engine.done",
+                task_id=task_id,
+                product_id=task_product_id,
+                engine=engine,
+                detail={"kind": task_kind, "note": note[:500]},
+            )
     except ProviderRefusal as exc:
         # A model declined on policy grounds. Retrying is pointless and switching
         # vendors to get a different answer is not something we do, so this is the
@@ -227,6 +250,7 @@ async def _run_engine(
                 session,
                 task_id,
                 not_before=datetime.now(UTC) + timedelta(seconds=DELIVERABILITY_RECHECK),
+                reason="marketing_frozen",
             )
         log.info("engine.marketing_frozen", engine=str(engine), task_id=task_id)
         return {"task_id": task_id, "note": f"marketing frozen: {exc}"[:500], "error": None}
@@ -235,7 +259,8 @@ async def _run_engine(
         # that takes days does not exhaust the task's retries or escalate it.
         async with session_scope(ctx.settings) as session:
             await repository.defer_task(
-                session, task_id, not_before=datetime.now(UTC) + timedelta(seconds=RECHECK_SECONDS)
+                session, task_id, not_before=datetime.now(UTC) + timedelta(seconds=RECHECK_SECONDS),
+                reason="awaiting_campaign_approval",
             )
         log.info("engine.awaiting_campaign_approval", engine=str(engine), task_id=task_id)
         return {"task_id": task_id, "note": str(exc)[:500], "error": None}
@@ -246,7 +271,12 @@ async def _run_engine(
         # idea -- capacity freeing up costs no extra LLM spend to detect.
         recheck = timedelta(seconds=VALIDATION_CAPACITY_RECHECK_SECONDS)
         async with session_scope(ctx.settings) as session:
-            await repository.defer_task(session, task_id, not_before=datetime.now(UTC) + recheck)
+            await repository.defer_task(
+                session,
+                task_id,
+                not_before=datetime.now(UTC) + recheck,
+                reason="validation_capacity_exceeded",
+            )
         log.info("engine.awaiting_validation_capacity", engine=str(engine), task_id=task_id)
         return {"task_id": task_id, "note": str(exc)[:500], "error": None}
     except RepairBlocked as exc:
@@ -262,6 +292,7 @@ async def _run_engine(
                 session,
                 task_id,
                 not_before=datetime.now(UTC) + timedelta(seconds=REPAIR_RECHECK_SECONDS),
+                reason="repair_blocked",
             )
         log.info(
             "engine.repair_blocked", engine=str(engine), task_id=task_id, detail=str(exc)[:200]
@@ -296,6 +327,7 @@ async def _run_engine(
                 session,
                 task_id,
                 not_before=datetime.now(UTC) + timedelta(seconds=PROVIDER_OUTAGE_RECHECK),
+                reason=f"provider_outage:{exc.provider.value}",
             )
         log.info("engine.provider_circuit_open", engine=str(engine), task_id=task_id)
         return {"task_id": task_id, "note": str(exc)[:500], "error": None}

@@ -47,6 +47,7 @@ from factory.state.orm import (
     ScrapeDomainFailure,
     Subscription,
     Task,
+    TaskEvent,
     ValidationSignal,
     new_id,
 )
@@ -351,13 +352,22 @@ async def enqueue_guided_patch(
     )
 
 
-async def defer_task(session: AsyncSession, task_id: str, *, not_before: datetime) -> None:
+async def defer_task(
+    session: AsyncSession, task_id: str, *, not_before: datetime, reason: str = "unspecified"
+) -> None:
     """Return a task to the queue without counting it as a failed attempt.
 
     Distinct from `fail_task`: a task blocked on an external event it cannot control
     (a pending human approval) has not failed and must never move toward
     `max_task_attempts` exhaustion — it should simply be tried again later, for as
     long as it takes.
+
+    ``reason`` is recorded to the causal trail. Before it existed, a deferral stored
+    only a future timestamp, so a campaign-approval wait, a marketing freeze, a
+    validation-capacity hold, a blocked repair and a provider outage were
+    **indistinguishable in the database** -- the difference survived only in a log
+    line that the next deploy destroyed. A queue that stops moving could not be told
+    apart from one that was waiting on a human.
     """
     await session.execute(
         update(Task)
@@ -368,6 +378,15 @@ async def defer_task(session: AsyncSession, task_id: str, *, not_before: datetim
             lease_expires_at=None,
             not_before=not_before,
         )
+    )
+    task = await session.get(Task, task_id)
+    await record_task_event(
+        session,
+        event="task.deferred",
+        task_id=task_id,
+        product_id=task.product_id if task else None,
+        engine=EngineName(task.engine) if task and task.engine else None,
+        detail={"reason": reason, "not_before": not_before.isoformat()},
     )
 
 
@@ -714,6 +733,58 @@ async def get_product_by_workspace(session: AsyncSession, workspace: str) -> Pro
     cannot recover the owning product any other way."""
     stmt = select(Product).where(Product.workspace_path == workspace)
     return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def record_task_event(
+    session: AsyncSession,
+    *,
+    event: str,
+    task_id: str | None = None,
+    product_id: str | None = None,
+    engine: EngineName | None = None,
+    detail: dict[str, Any] | None = None,
+    caused_by_task_id: str | None = None,
+) -> None:
+    """Append one line to the causal trail. Never raises.
+
+    Called from the hot path of every engine tick, so a failure to record history
+    must never take down the work being recorded -- an observability write that can
+    break the thing it observes is worse than no observability. Swallowed and
+    logged, deliberately.
+    """
+    try:
+        session.add(
+            TaskEvent(
+                task_id=task_id,
+                product_id=product_id,
+                engine=engine.value if engine else None,
+                event=event[:64],
+                detail=detail or {},
+                caused_by_task_id=caused_by_task_id,
+            )
+        )
+        await session.flush()
+    except Exception as exc:  # pragma: no cover - defensive; see docstring
+        # `event_name=`, not `event=`: structlog's first positional argument *is*
+        # the event name, so passing one would collide with it.
+        log.warning("task_event.write_failed", event_name=event, detail=str(exc)[:200])
+
+
+async def product_history(
+    session: AsyncSession, product_id: str, *, limit: int = 100
+) -> list[TaskEvent]:
+    """One product's whole story in order -- the query that did not exist before.
+
+    Answering "what happened to this product" previously meant joining tasks,
+    heal_attempts, llm_calls and interrupts by hand and inferring the gaps.
+    """
+    stmt = (
+        select(TaskEvent)
+        .where(TaskEvent.product_id == product_id)
+        .order_by(TaskEvent.created_at.asc())
+        .limit(limit)
+    )
+    return list((await session.execute(stmt)).scalars().all())
 
 
 async def record_heal_attempt(

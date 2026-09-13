@@ -513,6 +513,13 @@ async def attempt_repair(
             stopped=result.stopped_because,
             steps=result.steps,
             changed_files=len(changed_when_capped),
+            # What the agent said about its own run, which `_REPAIR_RULES` has
+            # always demanded and nothing has ever read. It stays advisory -- the
+            # file diff above decides whether work happened -- but it is the only
+            # thing that can say *why* not, and three separate runs reported a
+            # deleted toolchain into the void before this was wired up.
+            reported=result.reported_result or "none",
+            reported_detail=result.reported_detail[:200],
         )
         if not changed_when_capped:
             return RepairOutcome(

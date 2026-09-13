@@ -68,8 +68,35 @@ class Recalled:
     relevance: float
 
 
-def scope_for(*, engine: EngineName | None = None, product_id: str | None = None) -> str:
-    """The most specific scope a writer should file a memory under."""
+def capability_scope(role: str) -> str:
+    """Where a lesson about a *job* lives, as opposed to a product or a department.
+
+    The gap this fills, found the expensive way: "the repair sandbox has no
+    dependencies installed" is a fact about the repair *capability*. It recurs on
+    every product, so `product:` is wrong; `engine:development` is too coarse to
+    recall reliably against. With nowhere to put it, the lesson had no home and was
+    rediscovered from scratch on every run, at full cost, three times in one day.
+
+    Written by an agent about its own work and recalled on every future spawn of
+    that role -- the notes a worker keeps, which is what makes a human employee
+    non-stateless despite going home every night.
+    """
+    return f"capability:{role}"
+
+
+def scope_for(
+    *,
+    engine: EngineName | None = None,
+    product_id: str | None = None,
+    role: str | None = None,
+) -> str:
+    """The most specific scope a writer should file a memory under.
+
+    ``role`` is checked first: a lesson about how a job goes belongs to the job,
+    not to whichever product happened to surface it.
+    """
+    if role:
+        return capability_scope(role)
     if product_id:
         return f"product:{product_id}"
     if engine:
@@ -77,14 +104,22 @@ def scope_for(*, engine: EngineName | None = None, product_id: str | None = None
     return GLOBAL_SCOPE
 
 
-def scopes_for(*, engine: EngineName | None = None, product_id: str | None = None) -> list[str]:
+def scopes_for(
+    *,
+    engine: EngineName | None = None,
+    product_id: str | None = None,
+    role: str | None = None,
+) -> list[str]:
     """Scopes a reader may draw on, narrowest first.
 
-    Global lessons always apply; a product's lessons apply only to that product.
+    Global lessons always apply; a product's lessons apply only to that product; a
+    capability's lessons apply to every run of that role, on any product.
     """
     scopes = [GLOBAL_SCOPE]
     if engine:
         scopes.append(f"engine:{engine.value}")
+    if role:
+        scopes.append(capability_scope(role))
     if product_id:
         scopes.append(f"product:{product_id}")
     return scopes

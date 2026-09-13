@@ -350,6 +350,17 @@ class Settings(BaseSettings):
     # CODE_REVIEW's parse()-based structured output, which DeepSeek's
     # Anthropic-compatible endpoint does not reliably produce.
     model_deepseek: str = "deepseek-v4-pro"
+    #: POC mode: route EVERY task type to DeepSeek on this one model, overriding the
+    #: routing table entirely (see `llm/router.py::model_for` for why, and why it
+    #: does not weaken NO_FAILOVER). `deepseek-flash` is DeepSeek-V4.1-Flash: 1M
+    #: context, native tool calls, JSON output, Anthropic-format endpoint -- so the
+    #: existing DeepSeek provider serves it without a new adapter.
+    #:
+    #: Unset (the default) means the routing table applies exactly as written. A
+    #: wrong id here is unusually costly: CODE_REPAIR cannot fail over, so a typo
+    #: takes repair offline entirely -- `preflight` verifies it against the
+    #: provider's own model list rather than trusting the string.
+    poc_model_override: str | None = None
     # Used only when a Gemini-routed call (orchestration/discovery/analysis/
     # compliance/marketing copy -- all normally cheap, high-frequency work) fails
     # over to Anthropic. CODE_GENERATION/CODE_REVIEW are in `router.NO_FAILOVER` and

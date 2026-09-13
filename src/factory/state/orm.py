@@ -1125,6 +1125,53 @@ class LearningEpisode(Base):
     )
 
 
+class TaskEvent(Base):
+    """What happened, in order, and what caused it.
+
+    The factory had data but no narrative. `heal_attempts`, `page_views`,
+    `llm_calls` and `tasks.last_error` are rows a query can assemble into an answer
+    *if someone already knows to ask* -- and `last_error` is overwritten on every
+    attempt, so the earlier ones are simply gone. Diagnosing real incidents meant
+    reconstructing them from inference across four tables, and the log lines that
+    would have explained them were destroyed on the next deploy.
+
+    `caused_by_task_id` is the column that makes this a trail rather than another
+    log: it answers "what caused what", which no existing query can. A task that
+    enqueues another records the parent, so a product's whole history -- review
+    found a defect, which queued a patch, which exhausted its budget, which
+    escalated -- reads as one ordered chain instead of four disconnected tables.
+
+    Deliberately append-only and never read for a decision. This is the record
+    (see ARCHITECTURE_ROADMAP.md's living-record principle), and a record that
+    something branches on becomes a coupling nobody expects.
+    """
+
+    __tablename__ = "task_events"
+
+    id: Mapped[str] = _pk()
+    #: Nullable and no FK: events outlive the rows they describe (a task can be
+    #: deleted during cleanup) and the trail losing its subject is worse than a
+    #: dangling id.
+    task_id: Mapped[str | None] = mapped_column(String(32))
+    product_id: Mapped[str | None] = mapped_column(String(32))
+    engine: Mapped[str | None] = mapped_column(String(32))
+    #: Dotted, matching the structlog event names already used throughout
+    #: (`engine.start`, `repair.budget_exhausted`), so the trail and the logs share
+    #: one vocabulary rather than inventing a second.
+    event: Mapped[str] = mapped_column(String(64), nullable=False)
+    detail: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    caused_by_task_id: Mapped[str | None] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_task_events_product", "product_id", "created_at"),
+        Index("ix_task_events_task", "task_id", "created_at"),
+        Index("ix_task_events_caused_by", "caused_by_task_id"),
+    )
+
+
 class HealAttempt(Base):
     """Pairs one heal cycle's ``healing`` instructions with its eventual outcome.
 

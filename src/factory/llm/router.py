@@ -46,7 +46,15 @@ NO_FAILOVER: frozenset[TaskType] = frozenset(
 GENERAL_FALLBACK_PROVIDERS: frozenset[Provider] = frozenset({Provider.GEMINI, Provider.ANTHROPIC})
 
 
-def provider_for(task_type: TaskType) -> Provider:
+def provider_for(task_type: TaskType, settings: Settings | None = None) -> Provider:
+    """Which vendor serves this task type.
+
+    `POC_MODEL_OVERRIDE` sends every task type to DeepSeek instead -- see
+    `model_for` for what that mode is and why it does not weaken `NO_FAILOVER`.
+    """
+    settings = settings or get_settings()
+    if settings.poc_model_override:
+        return Provider.DEEPSEEK
     try:
         return ROUTING[task_type]
     except KeyError as exc:  # pragma: no cover - unreachable while the enum is exhaustive
@@ -62,11 +70,25 @@ def model_for(task_type: TaskType, settings: Settings | None = None) -> str:
 
     Orchestration runs on every tick and produces a tightly-constrained decision, so
     it uses the fast model; everything judgement-heavy uses the general model.
+
+    `POC_MODEL_OVERRIDE` replaces all of that with one model for every task type.
+    It exists because two days of live debugging produced twelve bugs and not one
+    of them was a reasoning failure -- they were caps, orderings and dropped
+    payloads. A cheap model exposes that class of problem *better* than a strong
+    one, which papers over a thin brief by inferring what was meant.
+
+    This deliberately overrides the ROUTING table above, including its
+    Anthropic-only code paths. It does **not** weaken `NO_FAILOVER`: that rule
+    exists so code is never *silently* served by a vendor nobody chose, and this is
+    a single explicit vendor chosen by an operator setting one value. Nothing falls
+    back, and clearing the setting restores the table exactly as written.
     """
     settings = settings or get_settings()
+    if settings.poc_model_override:
+        return settings.poc_model_override
     if task_type is TaskType.ORCHESTRATION:
         return settings.model_fast
-    provider = provider_for(task_type)
+    provider = provider_for(task_type, settings)
     if provider is Provider.ANTHROPIC:
         return settings.model_code
     if provider is Provider.DEEPSEEK:

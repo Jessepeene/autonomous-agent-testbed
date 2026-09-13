@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
+import httpx
+
 from factory.logging import configure_logging, get_logger
 from factory.settings import EngineName, Settings, get_settings
 
@@ -162,6 +164,70 @@ class PreflightReport:
         return [e for e in EngineName if e not in self.disabled_engines]
 
 
+def check_poc_model_override(settings: Settings) -> Finding | None:
+    """Verify `POC_MODEL_OVERRIDE` names a model the provider actually serves.
+
+    Checked against DeepSeek's own model list rather than trusted as a string,
+    because this setting is unusually unforgiving: it routes *every* task type to
+    DeepSeek, and CODE_REPAIR is in `router.NO_FAILOVER`, so a typo does not
+    degrade anything -- it takes the whole factory offline with a model-not-found
+    error on every call. Exactly the kind of failure that reads like a design
+    problem for an hour before anyone checks the spelling.
+
+    A network failure here is not a hard block: the run continues and the finding
+    says the check could not be made, since refusing to boot because a status
+    endpoint was briefly unreachable would be worse than the risk it guards.
+    """
+    override = settings.poc_model_override
+    if not override:
+        return None
+
+    key = settings.secret("DEEPSEEK_API_KEY")
+    if key is None:
+        return Finding(
+            subject="POC_MODEL_OVERRIDE",
+            severity=Severity.HARD_BLOCK,
+            detail=(
+                f"POC_MODEL_OVERRIDE is set to {override!r}, which routes every task "
+                "type to DeepSeek, but DEEPSEEK_API_KEY is not configured."
+            ),
+            remedy="Set DEEPSEEK_API_KEY, or unset POC_MODEL_OVERRIDE to restore normal routing.",
+        )
+
+    try:
+        response = httpx.get(
+            "https://api.deepseek.com/models",
+            headers={"Authorization": f"Bearer {key}"},
+            timeout=15.0,
+        )
+        response.raise_for_status()
+        available = {m.get("id") for m in response.json().get("data", [])}
+    except (httpx.HTTPError, ValueError, KeyError) as exc:
+        return Finding(
+            subject="POC_MODEL_OVERRIDE",
+            severity=Severity.DEGRADES,
+            detail=(
+                f"Could not verify POC_MODEL_OVERRIDE={override!r} against DeepSeek's "
+                f"model list: {str(exc)[:200]}"
+            ),
+            remedy="Confirm the id by hand if calls start failing with model-not-found.",
+        )
+
+    if override not in available:
+        return Finding(
+            subject="POC_MODEL_OVERRIDE",
+            severity=Severity.HARD_BLOCK,
+            detail=(
+                f"POC_MODEL_OVERRIDE={override!r} is not a model DeepSeek serves. "
+                f"Available: {', '.join(sorted(a for a in available if a))}. Every task "
+                "type routes here in POC mode and CODE_REPAIR cannot fail over, so this "
+                "would fail every call rather than degrade."
+            ),
+            remedy="Use one of the ids listed above, or unset POC_MODEL_OVERRIDE.",
+        )
+    return None
+
+
 def check_sandbox_workspace_sharing(settings: Settings) -> Finding | None:
     """Prove the factory process and its sandbox containers actually share a
     filesystem, rather than assuming it from configuration.
@@ -286,6 +352,10 @@ def run_preflight(settings: Settings | None = None) -> PreflightReport:
                 remedy="Set GEMINI_API_KEY or ANTHROPIC_API_KEY (both is strongly preferred).",
             )
         )
+
+    poc_finding = check_poc_model_override(settings)
+    if poc_finding is not None:
+        report.findings.append(poc_finding)
 
     report.docker_available = docker_available()
     if not report.docker_available:
