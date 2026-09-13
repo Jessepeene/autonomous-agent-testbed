@@ -303,7 +303,9 @@ async def resolve_reply(session: AsyncSession, target: Interrupt, answer: str) -
         # that branch's "anything but REJECT means code-patch guidance."
         action = await _act_on_lead_sourcing_reply(session, target.product_id, answer)
     elif target.product_id and not target.task_id:
-        action = await _act_on_product_reply(session, target.id, target.product_id, answer)
+        action = await _act_on_product_reply(
+            session, target.id, target.product_id, answer, escalation_detail=target.detail
+        )
     log.info("hitl.resolved", interrupt_id=target.id, action=action)
     return action
 
@@ -334,7 +336,12 @@ async def _act_on_idea_reply(session: AsyncSession, idea_id: str, answer: str) -
 
 
 async def _act_on_product_reply(
-    session: AsyncSession, interrupt_id: str, product_id: str, answer: str
+    session: AsyncSession,
+    interrupt_id: str,
+    product_id: str,
+    answer: str,
+    *,
+    escalation_detail: str = "",
 ) -> str:
     if _REJECT_WORD.search(answer):
         retired = await repository.retire_product(session, product_id)
@@ -353,8 +360,28 @@ async def _act_on_product_reply(
         return "deployed_with_accepted_risk"
     if not answer:
         return "none"
+    # The reply is added to the escalation, not substituted for it.
+    #
+    # Previously the human's words *replaced* the brief entirely, so a reply of
+    # "Try again" reached the repair agent as its whole task description and the
+    # findings it was meant to act on -- eight Bug Council items naming specific
+    # files and lines -- were dropped. Observed live: the agent read the entire
+    # codebase hunting for what it was supposed to do, grepped for the security
+    # finding by name, found the suite passing, and correctly concluded there was
+    # nothing actionable. It behaved exactly as an engineer handed a two-word
+    # ticket would.
+    #
+    # A human replying to a thread expects the thread to still be there. The
+    # escalation's own detail is that thread, so it is carried forward and the
+    # reply is framed as what it is: additional instruction on top.
+    guidance = answer
+    if escalation_detail.strip():
+        guidance = (
+            f"What was blocking this product:\n{escalation_detail.strip()}\n\n"
+            f"What the operator replied when shown the above:\n{answer}"
+        )
     task_id = await repository.enqueue_guided_patch(
-        session, product_id=product_id, guidance=answer, interrupt_id=interrupt_id
+        session, product_id=product_id, guidance=guidance, interrupt_id=interrupt_id
     )
     return "patch_queued" if task_id else "none"
 
