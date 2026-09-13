@@ -18,6 +18,7 @@ from sqlalchemy import CursorResult, case, delete, func, or_, select, text, upda
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from factory import issues
 from factory.engines.compliance.minimize import minimize
 from factory.logging import get_logger
 from factory.settings import EngineName, Settings, get_settings
@@ -33,6 +34,7 @@ from factory.state.orm import (
     Idea,
     IntegrationAlert,
     Interrupt,
+    Issue,
     Lead,
     LedgerEntry,
     LLMCall,
@@ -2901,3 +2903,179 @@ async def record_llm_call(
             tunable_parameter_id=tunable_parameter_id,
         )
     )
+
+
+# --- issues: a finding with an identity, a state, and an earned closure ---------
+
+
+async def record_issue(
+    session: AsyncSession,
+    *,
+    product_id: str,
+    kind: str,
+    severity: str,
+    title: str,
+    location: str = "",
+    expected: str = "",
+    actual: str = "",
+    evidence: str = "",
+    found_by: str | None = None,
+) -> tuple[Issue, bool]:
+    """File a finding, or recognise one already on the books.
+
+    Returns ``(issue, is_new)``. This is the function whose absence let one broken
+    checkout be filed four times over 24 days.
+
+    Re-finding an issue does not create a row: it bumps `times_seen` and
+    `last_seen_at`, which is how "we have seen this every day for three weeks"
+    becomes visible at all. Re-finding a *closed* issue reopens it rather than
+    filing a fresh one -- a defect that comes back is a regression, and that is
+    worth seeing as one row with a history instead of two rows with none.
+    """
+    fingerprint = issues.fingerprint_for(
+        product_id=product_id, kind=kind, location=location, title=title
+    )
+    existing = (
+        await session.execute(
+            select(Issue).where(Issue.product_id == product_id, Issue.fingerprint == fingerprint)
+        )
+    ).scalar_one_or_none()
+
+    if existing is None:
+        # The fingerprint missed. Before filing, check the wording against this
+        # product's other live issues -- the reviewer may have named the same
+        # defect a different way ("the subscribe button" vs "#subscribe-btn").
+        for candidate in await open_issues_for(session, product_id):
+            if issues.looks_like_same_issue(
+                title, location, candidate.title, candidate.location or ""
+            ):
+                existing = candidate
+                break
+
+    if existing is not None:
+        existing.times_seen += 1
+        existing.last_seen_at = _now()
+        # `fixed` belongs in this list: a defect reported again after someone
+        # claimed to repair it means the repair did not work, and leaving it
+        # `fixed` would let the next verification pass close it as gone.
+        if existing.status in ("closed", "verified", "fixed"):
+            existing.status = "open"
+            existing.fixed_at = None
+            existing.verified_at = None
+            existing.closed_at = None
+            existing.resolution = None
+            existing.fix_task_id = None
+            log.info(
+                "issue.reopened",
+                issue_id=existing.id,
+                product_id=product_id,
+                times_seen=existing.times_seen,
+            )
+        await session.flush()
+        return existing, False
+
+    issue = Issue(
+        product_id=product_id,
+        fingerprint=fingerprint,
+        kind=kind,
+        severity=severity,
+        title=title[:500],
+        location=location[:500] or None,
+        expected=expected or None,
+        actual=actual or None,
+        evidence=evidence or None,
+        status="open",
+        found_by=found_by,
+        detail={},
+    )
+    session.add(issue)
+    await session.flush()
+    log.info("issue.opened", issue_id=issue.id, product_id=product_id, kind=kind, severity=severity)
+    return issue, True
+
+
+async def open_issues_for(session: AsyncSession, product_id: str) -> list[Issue]:
+    """Everything still believed present on this product, worst first.
+
+    This is the backlog -- the thing a department manager manages and an employee
+    reads before deciding what matters.
+    """
+    severity_rank = case(
+        (Issue.severity == "critical", 0),
+        (Issue.severity == "high", 1),
+        (Issue.severity == "medium", 2),
+        else_=3,
+    )
+    stmt = (
+        select(Issue)
+        .where(
+            Issue.product_id == product_id,
+            Issue.status.in_([*issues.OPEN_STATUSES, *issues.PENDING_VERIFICATION]),
+        )
+        .order_by(severity_rank, Issue.first_seen_at.asc())
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def assign_issue_fix(
+    session: AsyncSession, issue_id: str, *, task_id: str, assigned_to: str
+) -> None:
+    """Link an issue to the work commissioned for it. This is the delegation step."""
+    await session.execute(
+        update(Issue)
+        .where(Issue.id == issue_id)
+        .values(status="fixing", fix_task_id=task_id, assigned_to=assigned_to)
+    )
+    log.info("issue.assigned", issue_id=issue_id, task_id=task_id, assigned_to=assigned_to)
+
+
+async def mark_issue_fixed(session: AsyncSession, *, task_id: str, resolution: str) -> None:
+    """A repair finished. That is ``fixed``, deliberately not ``closed``.
+
+    The distinction is the whole point of the table: a patch completing says work
+    happened, not that the symptom is gone. Only `verify_unseen_issues` -- a later
+    review looking and *not* finding it -- may close an issue.
+    """
+    await session.execute(
+        update(Issue)
+        .where(Issue.fix_task_id == task_id, Issue.status == "fixing")
+        .values(status="fixed", fixed_at=_now(), resolution=resolution[:1000])
+    )
+
+
+async def verify_unseen_issues(
+    session: AsyncSession, product_id: str, *, review_started_at: datetime, reviewed_by: str
+) -> int:
+    """Close the issues a fresh review looked for and did not find.
+
+    Closure has to be *earned by evidence*, and this is the only place it is. An
+    issue marked `fixed` that a subsequent review no longer reports is verified and
+    closed; one still being reported stays open however many patches it has had.
+
+    "Did not find" is decided by `last_seen_at` against the moment this review
+    started, rather than by the caller passing a list of what it saw. Re-finding an
+    issue always bumps `last_seen_at` (see `record_issue`), so the timestamp is the
+    same evidence with no bookkeeping to get wrong -- and getting it wrong in the
+    optimistic direction would close a defect that is still there, which is the
+    single failure this table exists to prevent.
+
+    Scoped to `fixed` only: an `open` issue the reviewer did not mention may simply
+    not have been looked at. Only a defect someone claimed to have repaired is a
+    candidate for "confirmed gone".
+    """
+    stmt = select(Issue).where(
+        Issue.product_id == product_id,
+        Issue.status.in_(issues.PENDING_VERIFICATION),
+        Issue.last_seen_at < review_started_at,
+    )
+    closed = 0
+    for issue in (await session.execute(stmt)).scalars().all():
+        issue.status = "closed"
+        issue.verified_at = _now()
+        issue.closed_at = _now()
+        issue.detail = {**(issue.detail or {}), "verified_by": reviewed_by}
+        closed += 1
+        log.info("issue.closed", issue_id=issue.id, product_id=product_id, verified_by=reviewed_by)
+    if closed:
+        await session.flush()
+    return closed

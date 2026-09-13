@@ -61,6 +61,25 @@ MIN_CALLS = 8
 #: flapping one does not.
 MIN_RECOVERY_SUCCESSES = 3
 
+#: Outcomes that say nothing about whether the *provider* is reachable.
+#:
+#: This breaker answers one question: is this vendor wholly, persistently gone? A
+#: schema violation is the opposite kind of evidence -- the provider accepted the
+#: request, billed for it, and returned a complete response that happened not to
+#: satisfy a Pydantic model. Counting that as an outage produces a deadlock:
+#: the breaker pauses a healthy provider, and pausing changes nothing, because the
+#: model will fail the same schema whenever it resumes.
+#:
+#: Observed live within an hour of the POC starting. `deepseek-flash` returned
+#: HTTP 200 to every call and missed the schema on most orchestration and analysis
+#: requests; the breaker declared "8 call(s) in the last 30m, none succeeded",
+#: paused DeepSeek -- which under POC routing is nearly every task type -- and the
+#: factory stopped with a perfectly reachable provider.
+#:
+#: A model that cannot hold a schema is a real problem and a different one, fixed
+#: by changing model or task routing, never by waiting.
+NON_TRANSPORT_OUTCOMES = ("schema_violation", "schema_violation_repaired", "refusal")
+
 
 async def tripped_providers(
     session: AsyncSession,
@@ -86,7 +105,12 @@ async def tripped_providers(
             func.count().label("total"),
             func.count().filter(LLMCall.outcome == "ok").label("succeeded"),
         )
-        .where(LLMCall.created_at >= since)
+        # Only transport evidence decides reachability. A call the provider answered
+        # -- and charged for -- is proof it is up, whatever the body turned out to
+        # contain, so schema violations and refusals are excluded from the
+        # population entirely rather than counted as failures. See
+        # NON_TRANSPORT_OUTCOMES.
+        .where(LLMCall.created_at >= since, LLMCall.outcome.notin_(NON_TRANSPORT_OUTCOMES))
         .group_by(LLMCall.provider)
     )
     tripped: dict[Provider, str] = {}

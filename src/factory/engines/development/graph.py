@@ -612,7 +612,17 @@ state.
 
 Length matters: keep summary to one sentence under 200 characters, and details \
 under 1500. Be specific but do not restate the reviewer's whole transcript -- the \
-engineer needs the finding, not the narration.\
+engineer needs the finding, not the narration.
+
+Also set:
+- location: where the defect lives, as precisely as the reviewer reported it -- an \
+endpoint like "POST /api/billing/checkout", a selector like "#subscribe-btn", or a \
+file:line. This is how the same defect found again next week is recognised as the \
+same one instead of being filed a second time, so prefer the exact string the \
+reviewer used over a description of it. Leave empty only if they truly named none.
+- kind: bug, ui, content, regression, improvement, or feature_request.
+- severity: critical, high, medium, or low. Critical means the product cannot be \
+paid for or cannot be used at all.\
 """
 
 
@@ -705,6 +715,11 @@ async def _review_live_product(ctx: FactoryContext, session: AsyncSession, task:
         scopes=memory_store.scopes_for(engine=EngineName.DEVELOPMENT, product_id=product_id),
     )
 
+    # Captured before the agent runs: anything it re-reports bumps that issue's
+    # `last_seen_at` past this mark, which is how verification tells "looked and did
+    # not find it" from "did not look".
+    review_started_at = datetime.now(UTC)
+
     async with BrowserSession(allowed_origins=origins) as tools:
         runtime = AgentRuntime(
             ctx.llm,
@@ -767,6 +782,22 @@ async def _review_live_product(ctx: FactoryContext, session: AsyncSession, task:
     patch_id, reason = await queue_review_patch(
         session, product_id=product_id, verdict=verdict, dry_run=ctx.dry_run
     )
+
+    # Closure, and the only place it happens. An issue previously marked `fixed`
+    # that this review did *not* re-report is now verified gone and closed; one
+    # still being reported stays open however many patches it has had.
+    #
+    # A patch completing only ever means work happened. Treating that as closure is
+    # what let a broken checkout be "fixed" four times and still be broken on the
+    # fifth review, 24 days after it was first found.
+    closed = await repository.verify_unseen_issues(
+        session,
+        product_id,
+        review_started_at=review_started_at,
+        reviewed_by=f"auditor:{task.id}",
+    )
+    if closed:
+        log.info("development.issues_verified_closed", product_id=product_id, closed=closed)
 
     # Recorded either way: "this looked fine on <date>" is exactly the prior the
     # next review should start from, and without it every run re-derives the same
@@ -1426,6 +1457,16 @@ async def _verify_and_ship(
     await repository.set_product_status(
         session, product_id, ProductStatus.LIVE, deploy_url=result.url, heal_attempts=0
     )
+    # The work this issue was assigned shipped. That is `fixed` -- a claim, not a
+    # conclusion. The next review either fails to find the defect (and closes it) or
+    # reports it again (and reopens it). Nothing here may close an issue, because
+    # "the patch deployed" and "the defect is gone" are different facts and treating
+    # them as one is what let a broken checkout be repaired four times and stay
+    # broken.
+    if task_id:
+        await repository.mark_issue_fixed(
+            session, task_id=task_id, resolution=f"Patch deployed to {result.url}"
+        )
     if result.project:
         await repository.set_vercel_project(session, product_id, result.project)
     await repository.enqueue_task(

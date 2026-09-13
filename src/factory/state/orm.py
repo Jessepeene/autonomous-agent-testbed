@@ -1203,3 +1203,70 @@ class HealAttempt(Base):
         ),
         UniqueConstraint("product_id", "attempt_number", name="uq_heal_attempts_product_attempt"),
     )
+
+
+class Issue(Base):
+    """One defect, with an identity that survives being described differently.
+
+    Before this table every finding was a first encounter: the reviewer reported a
+    defect, `queue_review_patch` turned it into a `PATCH_PRODUCT` task carrying a
+    text blob, the task went ``done``, and nothing linked any of it. ``done`` meant
+    the patch *ran*, never that the symptom was gone. One broken checkout was filed
+    four separate times over 24 days -- twice inside the same minute -- and was
+    still broken when the fifth review found it.
+
+    Unlike `TaskEvent`, this table is explicitly *read for decisions*: it is the
+    backlog a department manager manages, and the thing that answers "is this new,
+    or the one we have been failing to fix since August".
+    """
+
+    __tablename__ = "issues"
+
+    id: Mapped[str] = _pk()
+    product_id: Mapped[str | None] = mapped_column(String(32))
+    #: Derived from what the defect *is*, never from how it was worded -- see
+    #: `factory.issues.fingerprint_for`. Free text cannot carry identity here: an
+    #: LLM never writes the same sentence twice even when nothing has changed,
+    #: which is exactly how BUG_LOG #20's escalation dedup failed.
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    location: Mapped[str | None] = mapped_column(Text)
+    expected: Mapped[str | None] = mapped_column(Text)
+    actual: Mapped[str | None] = mapped_column(Text)
+    evidence: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="open")
+    found_by: Mapped[str | None] = mapped_column(String(32))
+    #: A role, not a person. "Adding a role is a code change a human reviews", so a
+    #: role name is the most specific owner this organisation has.
+    assigned_to: Mapped[str | None] = mapped_column(String(32))
+    #: No FK: a task can be cleaned up, and an issue outliving its task is better
+    #: than a dangling constraint blocking the cleanup.
+    fix_task_id: Mapped[str | None] = mapped_column(String(32))
+    times_seen: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    resolution: Mapped[str | None] = mapped_column(Text)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    fixed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: Separate from `fixed_at`, and the reason closure means anything. A patch
+    #: completing sets `fixed`; only a later review failing to find the symptom
+    #: sets `verified`. Nothing else may close an issue.
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    detail: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('open','triaged','fixing','fixed','verified','closed','wont_fix')",
+            name="issue_status_valid",
+        ),
+        CheckConstraint(
+            "severity IN ('critical','high','medium','low')", name="issue_severity_valid"
+        ),
+        UniqueConstraint("product_id", "fingerprint", name="uq_issues_product_fingerprint"),
+    )

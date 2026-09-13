@@ -190,6 +190,19 @@ async def product_dossier(session: AsyncSession, product_id: str) -> str:
             for e in history[-20:]
         ]
 
+    # The backlog, before the repair history: what is wrong with this product right
+    # now is more useful to an employee about to touch it than what was tried
+    # before, and `times_seen` is the line that says "this one keeps coming back".
+    open_issues = await repository.open_issues_for(session, product_id)
+    if open_issues:
+        lines += ["", "## Known open issues"]
+        lines += [
+            f"- [{i.severity}] {i.title}"
+            + (f" (at {i.location})" if i.location else "")
+            + f" — {i.status}, seen {i.times_seen}x since {i.first_seen_at:%Y-%m-%d}"
+            for i in open_issues[:12]
+        ]
+
     attempts = await repository.heal_attempts_for(session, product_id)
     if attempts:
         lines += ["", "## Repairs already attempted (do not repeat these blindly)"]

@@ -25,6 +25,7 @@ import time
 from pydantic import Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from factory import issues
 from factory.logging import get_logger
 from factory.settings import EngineName
 from factory.state import repository
@@ -66,6 +67,14 @@ class ReviewVerdict(Contract):
     #: a task payload, and `queue_review_patch` truncates what it forwards anyway.
     summary: str = Field(default="", max_length=500)
     details: str = Field(default="", max_length=4000)
+    #: Where the defect lives -- an endpoint, a selector, a file:line, a page area.
+    #: This is what gives a finding an identity that survives rewording, so the
+    #: same defect found next week matches the existing issue instead of filing a
+    #: fifth copy of it (see `factory/issues.py`). Best-effort: a reviewer that
+    #: cannot name one still gets an issue, matched on wording instead.
+    location: str = Field(default="", max_length=300)
+    kind: str = Field(default="bug", max_length=24)
+    severity: str = Field(default="medium", max_length=16)
 
 
 async def queue_review_patch(
@@ -74,6 +83,7 @@ async def queue_review_patch(
     product_id: str,
     verdict: ReviewVerdict,
     dry_run: bool,
+    found_by: str = "auditor",
 ) -> tuple[str | None, str]:
     """Commission a fix for a real finding. Returns ``(task_id, reason)``.
 
@@ -104,6 +114,28 @@ async def queue_review_patch(
         # patching mid-build fights `product_lock`.
         return None, f"product is {product.status}, not live -- a patch would collide"
 
+    # File the finding *before* commissioning work, and file it whether or not the
+    # patch is queued. The issue is the durable record; the task is one attempt at
+    # it. Getting this order wrong is how a defect blocked by the once-a-day patch
+    # bucket used to vanish entirely.
+    issue, is_new = await repository.record_issue(
+        session,
+        product_id=product_id,
+        kind=verdict.kind if issues.is_actionable(verdict.kind) else "bug",
+        severity=verdict.severity if verdict.severity in issues.SEVERITIES else "medium",
+        title=verdict.summary.strip(),
+        location=verdict.location.strip(),
+        actual=verdict.details.strip(),
+        found_by=found_by,
+    )
+    if not is_new:
+        log.info(
+            "product_review.known_issue",
+            issue_id=issue.id,
+            times_seen=issue.times_seen,
+            first_seen=issue.first_seen_at.isoformat(),
+        )
+
     bucket = int(time.time()) // PATCH_BUCKET_SECONDS
     healing = f"{verdict.summary.strip()}\n\n{verdict.details.strip()}"
     task_id = await repository.enqueue_task(
@@ -125,6 +157,15 @@ async def queue_review_patch(
         priority=60,
     )
     if task_id is None:
-        return None, "a review-requested patch is already queued for this product today"
-    log.info("product_review.patch_requested", product_id=product_id, task_id=task_id)
-    return task_id, "patch queued"
+        return None, f"issue {issue.id} recorded; a patch is already queued for it today"
+
+    # The delegation step, and the link that makes closure possible: this issue is
+    # now with this role, being worked by this task. Without it, "done" on the task
+    # could never mean anything about the defect.
+    await repository.assign_issue_fix(
+        session, issue.id, task_id=task_id, assigned_to="repair_engineer"
+    )
+    log.info(
+        "product_review.patch_requested", product_id=product_id, task_id=task_id, issue=issue.id
+    )
+    return task_id, f"issue {issue.id} queued for repair"
