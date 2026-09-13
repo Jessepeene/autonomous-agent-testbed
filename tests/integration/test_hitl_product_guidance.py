@@ -137,7 +137,18 @@ async def test_guidance_reply_enqueues_exactly_one_patch_task(session: AsyncSess
     )
     assert len(tasks) == 1
     assert tasks[0].status == TaskStatus.PENDING.value
-    assert tasks[0].payload["healing"] == guidance
+
+    # The reply is *added* to the escalation, not substituted for it.
+    #
+    # This used to assert equality, which passively encoded the bug: the operator's
+    # words became the repair agent's entire brief and the escalation that prompted
+    # them was dropped. Observed live with a reply of "Try again" -- eight Bug
+    # Council findings naming specific files and lines vanished, and the agent read
+    # the whole codebase hunting for what it was meant to do, exactly as an engineer
+    # handed a two-word ticket would.
+    healing = tasks[0].payload["healing"]
+    assert guidance in healing
+    assert "failed 3 heal cycles" in healing
 
 
 async def test_a_second_escalation_after_a_guided_retry_can_also_be_guided(
