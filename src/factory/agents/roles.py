@@ -330,9 +330,14 @@ ROLES: dict[RoleName, AgentRole] = {
             "Reproduce first: run the test command and read the real failure before "
             "you change anything. Then read the file it points at. Change the "
             "smallest thing that fixes the root cause, and run the test command "
-            "again to confirm. Do not refactor code that is not implicated.\n" + _REPAIR_RULES
+            "again to confirm. Do not refactor code that is not implicated.\n\n"
+            "Before you finish, call `review_my_work` on what you touched. Those are "
+            "the same reviewers that decide whether your change is allowed to ship, "
+            "so a finding you fix now costs you a step and a finding you leave costs "
+            "a whole repair cycle -- which is how this loop has failed twice, trading "
+            "one set of blockers for another and never converging.\n" + _REPAIR_RULES
         ),
-        tool_categories=("workspace",),
+        tool_categories=("workspace", "review"),
         task_type=TaskType.CODE_REPAIR,
         # 8, not the repair_engineer's 14: an agent loop re-sends its whole transcript
         # every step, so cost grows superlinearly in step count -- past roughly this

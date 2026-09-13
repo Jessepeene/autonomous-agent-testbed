@@ -38,6 +38,8 @@ from factory.sandbox.runner import resolve_workspace
 from factory.settings import EngineName, Settings
 from factory.supervisor.context import FactoryContext
 from factory.tools.handbook import build_handbook_tools
+from factory.tools.registry import ToolRegistry
+from factory.tools.review import build_review_tools
 from factory.tools.workspace import build_workspace_tools
 
 log = get_logger(__name__)
@@ -124,6 +126,31 @@ GUIDED_MAX_STEPS = 16
 _TEST_PATH = re.compile(r"(^|/)(tests?/|test_[^/]*\.py$|[^/]*_test\.py$)")
 _ASSERT = re.compile(r"\bassert\b")
 _WEAKENER = re.compile(r"@pytest\.mark\.(skip|xfail)\b|pytest\.(skip|xfail)\(")
+
+
+
+def _workspace_and_review_tools(
+    ctx: FactoryContext, workspace: str, test_command: str
+) -> ToolRegistry:
+    """The engineer's own toolkit: edit the workspace, and check the work before
+    declaring it done.
+
+    Bug Council still gates the deploy -- that rail does not move. What this adds is
+    the half a human team has always had alongside CI: a developer running the
+    linter locally before pushing. Without it the loop was repair, finish, gate,
+    findings, new heal cycle, repeatedly trading one set of blockers for another.
+    """
+    registry = ToolRegistry.extending(
+        build_workspace_tools(
+            workspace=workspace,
+            settings=ctx.settings,
+            sandbox=ctx.sandbox,
+            test_command=test_command,
+        )
+    )
+    for descriptor in build_review_tools(ctx, workspace=workspace).all():
+        registry.register(descriptor)
+    return registry
 
 
 class RepairBlocked(RuntimeError):
@@ -474,12 +501,7 @@ async def attempt_repair(
             task_id=task_id,
             product_id=product_id,
             engine=EngineName.DEVELOPMENT,
-            base=build_workspace_tools(
-                workspace=workspace,
-                settings=ctx.settings,
-                sandbox=ctx.sandbox,
-                test_command=test_command,
-            ),
+            base=_workspace_and_review_tools(ctx, workspace, test_command),
         ),
     )
     result = await runtime.run(
