@@ -21,6 +21,7 @@ routing was wired into the live system.
 
 from __future__ import annotations
 
+import copy
 import time
 from typing import Any, TypeVar
 
@@ -41,11 +42,62 @@ from factory.llm.providers.base import (
     SchemaViolation,
 )
 from factory.llm.schema import json_schema_for
+from factory.logging import get_logger
 from factory.settings import TaskType
+
+log = get_logger(__name__)
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
 _BASE_URL = "https://api.deepseek.com/anthropic"
+
+
+
+def _validate_tolerating_extras(schema: type[SchemaT], payload: Any) -> SchemaT:
+    """Validate `payload`, salvaging the one failure mode DeepSeek actually causes.
+
+    `Contract` sets `extra="forbid"` deliberately -- a field the schema never
+    defined is usually a sign the model misunderstood the task, and catching that is
+    worth having. But DeepSeek does not enforce `additionalProperties: false` during
+    tool-call decoding (the schema says it; the endpoint treats it as advice), and
+    the result is real work destroyed by noise: one reviewer attached an empty
+    `line_placeholder` to each finding and the whole Bug Council review was rejected,
+    escalating a patch that had nothing wrong with it.
+
+    So exactly one rescue is allowed: if *every* error is `extra_forbidden`, drop
+    precisely those keys and revalidate. Any other error -- a missing required
+    field, a bad enum, a constraint violation -- still fails, because those are the
+    ones that mean the model got the task wrong rather than the shape.
+
+    Dropped keys are logged, never silently discarded: if a model starts inventing
+    fields regularly that is a signal about the prompt or the schema, not something
+    to bury.
+    """
+    try:
+        return schema.model_validate(payload)
+    except ValidationError as exc:
+        errors = exc.errors()
+        if not errors or not all(e.get("type") == "extra_forbidden" for e in errors):
+            raise
+        pruned = copy.deepcopy(payload)
+        dropped: list[str] = []
+        for error in errors:
+            location = error.get("loc", ())
+            if not location:
+                continue
+            node: Any = pruned
+            try:
+                for key in location[:-1]:
+                    node = node[key]
+                del node[location[-1]]
+            except (KeyError, IndexError, TypeError):
+                # The path did not survive an earlier deletion, or is not indexable.
+                # Revalidation below decides the outcome either way.
+                continue
+            dropped.append(".".join(str(part) for part in location))
+        value = schema.model_validate(pruned)
+        log.warning("deepseek.dropped_extra_fields", schema=schema.__name__, fields=dropped)
+        return value
 
 
 class DeepSeekProvider(AnthropicProvider):
@@ -152,17 +204,18 @@ class DeepSeekProvider(AnthropicProvider):
             )
             if is_result:
                 try:
-                    return Completion(
-                        value=schema.model_validate(block.input),
-                        provider=self.name,
-                        model=str(getattr(response, "model", model)),
-                        usage=self._usage(response, elapsed_ms),
-                    )
+                    value = _validate_tolerating_extras(schema, block.input)
                 except ValidationError as exc:
                     raise SchemaViolation(
                         f"deepseek output failed {schema.__name__} validation: {exc}",
                         usage=self._usage(response, elapsed_ms),
                     ) from exc
+                return Completion(
+                    value=value,
+                    provider=self.name,
+                    model=str(getattr(response, "model", model)),
+                    usage=self._usage(response, elapsed_ms),
+                )
 
         # Forced tool choice means this should be unreachable. If it happens, the
         # endpoint has stopped honouring `tool_choice` too, and the useful thing is
