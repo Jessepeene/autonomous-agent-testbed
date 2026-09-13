@@ -45,6 +45,7 @@ from factory.state.orm import (
     ProductLock,
     PypiPackageCheck,
     RateLimitBucket,
+    Requirement,
     ScoutSignal,
     ScrapeDomainFailure,
     Subscription,
@@ -61,6 +62,7 @@ from factory.state.schemas import (
     TaskKind,
     TaskStatus,
     ValidatedIdea,
+    WorkRequirements,
 )
 
 log = get_logger(__name__)
@@ -3083,3 +3085,58 @@ async def verify_unseen_issues(
     if closed:
         await session.flush()
     return closed
+
+
+# --- requirements: what work is for, before anyone starts it --------------------
+
+
+async def record_requirements(
+    session: AsyncSession,
+    *,
+    subject_kind: str,
+    subject_id: str,
+    requirements: WorkRequirements,
+    created_by: str | None = None,
+    source_task_id: str | None = None,
+) -> str:
+    """Store the acceptance criteria for one subject, superseding any earlier set.
+
+    Superseding rather than updating: a build judged against an older standard was
+    judged honestly at the time, and rewriting the row in place would make the
+    record claim otherwise. It also makes scope change visible as a new row rather
+    than an argument nobody wrote down.
+    """
+    await session.execute(
+        update(Requirement)
+        .where(
+            Requirement.subject_kind == subject_kind,
+            Requirement.subject_id == subject_id,
+            Requirement.superseded_at.is_(None),
+        )
+        .values(superseded_at=_now())
+    )
+    row = Requirement(
+        subject_kind=subject_kind,
+        subject_id=subject_id,
+        goal=requirements.goal,
+        must=[c.model_dump() for c in requirements.must],
+        should=[c.model_dump() for c in requirements.should],
+        out_of_scope=list(requirements.out_of_scope),
+        created_by=created_by,
+        source_task_id=source_task_id,
+    )
+    session.add(row)
+    await session.flush()
+    return row.id
+
+
+async def live_requirements(
+    session: AsyncSession, subject_kind: str, subject_id: str
+) -> Requirement | None:
+    """The standard this work is currently held to, or None if nobody wrote one."""
+    stmt = select(Requirement).where(
+        Requirement.subject_kind == subject_kind,
+        Requirement.subject_id == subject_id,
+        Requirement.superseded_at.is_(None),
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()

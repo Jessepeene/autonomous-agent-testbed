@@ -653,3 +653,41 @@ class ScaffoldPlan(Contract):
     summary: str = Field(min_length=20, max_length=2000)
     files: list[GeneratedFile] = Field(min_length=1, max_length=80)
     test_command: str = Field(min_length=1, max_length=400)
+
+
+class AcceptanceCriterion(Contract):
+    """One checkable statement about finished work.
+
+    `criterion` has to be verifiable by looking at the product -- "a visitor can
+    submit an email and sees a confirmation message" rather than "good UX". A
+    criterion nobody can check is a wish, and it makes every downstream judgement
+    that references it unfalsifiable too.
+    """
+
+    criterion: str = Field(min_length=10, max_length=300)
+    #: Why this matters, so a release decision can weigh it rather than only tick
+    #: it. A reviewer that knows *why* a criterion exists can tell a near-miss from
+    #: a real failure; one that only has the rule cannot.
+    why: str = Field(min_length=10, max_length=300)
+
+
+class WorkRequirements(Contract):
+    """What a piece of work must achieve, before anyone starts it.
+
+    The three lists are the point. A single flat list of requirements is just a
+    longer blocking gate, and the old deploy gate already proved where that leads:
+    "done" meant "no blocking findings", which is unbounded, because there is always
+    another finding.
+
+    - `must` is non-negotiable. Failing one means not done.
+    - `should` is valuable and not blocking -- what a release judgement *weighs*
+      rather than obeys, and what makes "done, with known issues accepted" sayable.
+    - `out_of_scope` stops a reviewer flagging the absence of things nobody intended
+      to build, and makes scope creep visible as a change to this record rather than
+      an argument nobody wrote down.
+    """
+
+    goal: str = Field(min_length=20, max_length=500)
+    must: list[AcceptanceCriterion] = Field(min_length=1, max_length=12)
+    should: list[AcceptanceCriterion] = Field(default_factory=list, max_length=12)
+    out_of_scope: list[str] = Field(default_factory=list, max_length=12)

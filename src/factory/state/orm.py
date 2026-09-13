@@ -1270,3 +1270,49 @@ class Issue(Base):
         ),
         UniqueConstraint("product_id", "fingerprint", name="uq_issues_product_fingerprint"),
     )
+
+
+class Requirement(Base):
+    """What a piece of work must achieve, and how anyone can tell it has.
+
+    Nothing in this factory ever wrote this down. The landing-page prompt carries
+    requirements, but generic ones -- the same form, beacon and SEO tags for every
+    product ever generated. What *this* page must do for *this* idea existed
+    nowhere, so every judgement downstream had nothing to judge against: Bug Council
+    reviews categories rather than intent, AUDITOR infers the goal by looking at the
+    product, and release was `if not deploy_blocking`.
+
+    The `must`/`should`/`out_of_scope` split is what makes this more than a longer
+    checklist. It is what lets a product be **done without being perfect** -- meets
+    its must-haves, with known issues accepted deliberately -- which is a state the
+    old gate could not express, because there is always another finding.
+
+    Generic in subject rather than product-scoped: a repair task, a campaign and a
+    discovery cycle all have "what is this for and when is it done", and a human
+    team writes that down for each. Products are just the first subject.
+    """
+
+    __tablename__ = "requirements"
+
+    id: Mapped[str] = _pk()
+    subject_kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    subject_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    goal: Mapped[str] = mapped_column(Text, nullable=False)
+    must: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    should: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
+    out_of_scope: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    created_by: Mapped[str | None] = mapped_column(String(64))
+    source_task_id: Mapped[str | None] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    #: Superseded rather than rewritten, so "the old build was judged against a
+    #: different standard" stays visible instead of being erased by the next version.
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "subject_kind IN ('product','task','issue','campaign')",
+            name="requirement_subject_kind_valid",
+        ),
+    )

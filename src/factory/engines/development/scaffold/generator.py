@@ -315,6 +315,11 @@ async def generate_landing_page(
     task_id: str | None = None,
     existing_files: dict[str, str] | None = None,
     ab_variants: tuple[str, str] | None = None,
+    #: This page's own acceptance criteria, rendered by
+    #: `development/requirements.py::render_for_prompt`. Optional because a
+    #: build with none is exactly what happened before they existed -- a
+    #: degradation, never a reason to refuse to build.
+    requirements: str | None = None,
 ) -> ScaffoldPlan:
     """A cheap, pitch-only page for the idea validation gate -- see
     `development/graph.py::_build_landing_page`. Unlike `generate_scaffold` (whose
@@ -364,6 +369,14 @@ async def generate_landing_page(
                 f"--- {path} ---\n{contents}" for path, contents in existing_files.items()
             )
             + "\n\n"
+        )
+    if requirements:
+        # Ahead of the instruction, because it is the standard the result is judged
+        # against -- not a hint. The generic requirements in LANDING_PAGE_SYSTEM say
+        # what every page needs; these say what *this* one is for.
+        prompt += (
+            "ACCEPTANCE CRITERIA for this specific page -- it will be reviewed "
+            "against exactly these:\n\n" + requirements + "\n\n"
         )
     prompt += "Produce the complete validation page."
     return await ctx.llm.parse(

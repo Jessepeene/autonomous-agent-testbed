@@ -190,6 +190,21 @@ async def product_dossier(session: AsyncSession, product_id: str) -> str:
             for e in history[-20:]
         ]
 
+    # What this product is held to, ahead of everything except what it is for.
+    # An employee that knows the requirements can tell a defect from a thing that
+    # was never meant to exist -- and can tell "done" from "perfect", which the
+    # must/should split is there to make sayable.
+    requirements = await repository.live_requirements(session, "product", product_id)
+    if requirements is not None:
+        lines += ["", "## What it must do (the standard it is judged against)", requirements.goal]
+        lines += [f"- MUST: {c.get('criterion', '')}" for c in requirements.must]
+        lines += [f"- SHOULD: {c.get('criterion', '')}" for c in requirements.should]
+        if requirements.out_of_scope:
+            lines += [
+                "- OUT OF SCOPE (deliberately absent, not defects): "
+                + "; ".join(requirements.out_of_scope)
+            ]
+
     # The backlog, before the repair history: what is wrong with this product right
     # now is more useful to an employee about to touch it than what was tried
     # before, and `times_seen` is the line that says "this one keeps coming back".

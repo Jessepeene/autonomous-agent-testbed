@@ -29,6 +29,10 @@ from factory.engines.development import (
     seo,
 )
 from factory.engines.development import deploy as deploy_module
+from factory.engines.development.requirements import (
+    render_for_prompt,
+    write_landing_page_requirements,
+)
 from factory.engines.development.scaffold.generator import (
     LANDING_PAGE_SYSTEM,
     clear_workspace,
@@ -51,13 +55,15 @@ from factory.sandbox.runner import (
 )
 from factory.settings import EngineName, Settings, TaskType, get_settings
 from factory.state import repository
-from factory.state.orm import ABTest, Idea, Product, Task, new_id
+from factory.state.orm import ABTest, Idea, Product, Requirement, Task, new_id
 from factory.state.schemas import (
+    AcceptanceCriterion,
     CouncilResult,
     InterruptReason,
     ProductStatus,
     TaskKind,
     ValidatedIdea,
+    WorkRequirements,
 )
 from factory.supervisor.concurrency import LockUnavailable, product_lock
 from factory.supervisor.context import FactoryContext
@@ -293,6 +299,18 @@ async def _build_landing_page(ctx: FactoryContext, session: AsyncSession, task: 
                 if running_test is not None
                 else None
             )
+            # Written before the build, not after: this is the standard the
+            # builder works to, the reviewer judges against, and the release
+            # decision weighs. Generated once per product and superseded rather
+            # than rewritten, so a regeneration is held to the same bar as the
+            # build it replaces.
+            requirements = await write_landing_page_requirements(
+                ctx, session, product_id=product_id, idea=idea, task_id=task.id
+            )
+            if requirements is None:
+                stored = await repository.live_requirements(session, "product", product_id)
+                requirements = _requirements_from_row(stored) if stored else None
+
             plan = await generate_landing_page(
                 ctx,
                 idea,
@@ -301,6 +319,7 @@ async def _build_landing_page(ctx: FactoryContext, session: AsyncSession, task: 
                 tunable_parameter_id=prompt_version,
                 task_id=task.id,
                 ab_variants=ab_variants,
+                requirements=render_for_prompt(requirements) if requirements else None,
             )
             clear_workspace(workspace, ctx.settings)
             written = write_plan(plan, workspace, ctx.settings)
@@ -627,6 +646,23 @@ reviewer used over a description of it. Leave empty only if they truly named non
 - severity: critical, high, medium, or low. Critical means the product cannot be \
 paid for or cannot be used at all.\
 """
+
+
+def _requirements_from_row(row: Requirement) -> WorkRequirements | None:
+    """Rehydrate stored requirements into the shared contract.
+
+    So the builder, the reviewer and a release decision all read one rendering of
+    one standard, whether it was just written or read back from an earlier run.
+    """
+    try:
+        return WorkRequirements(
+            goal=row.goal,
+            must=[AcceptanceCriterion(**c) for c in row.must],
+            should=[AcceptanceCriterion(**c) for c in row.should],
+            out_of_scope=list(row.out_of_scope),
+        )
+    except (TypeError, ValueError):  # pragma: no cover - a row written by an older shape
+        return None
 
 
 async def _record_council_findings(
