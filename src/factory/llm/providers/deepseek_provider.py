@@ -21,10 +21,29 @@ routing was wired into the live system.
 
 from __future__ import annotations
 
-import anthropic
+import time
+from typing import Any, TypeVar
 
-from factory.llm.providers.anthropic_provider import AnthropicProvider
-from factory.llm.providers.base import Provider, ProviderUnavailable
+import anthropic
+from pydantic import BaseModel, ValidationError
+
+from factory.llm.providers.anthropic_provider import (
+    _STREAM_THRESHOLD,
+    AnthropicProvider,
+    _classify_status_error,
+    _system_blocks,
+)
+from factory.llm.providers.base import (
+    Completion,
+    Provider,
+    ProviderRefusal,
+    ProviderUnavailable,
+    SchemaViolation,
+)
+from factory.llm.schema import json_schema_for
+from factory.settings import TaskType
+
+SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
 _BASE_URL = "https://api.deepseek.com/anthropic"
 
@@ -43,3 +62,104 @@ class DeepSeekProvider(AnthropicProvider):
                 raise ProviderUnavailable(self.name, "DEEPSEEK_API_KEY is not set")
             self._client = anthropic.AsyncAnthropic(api_key=key, base_url=_BASE_URL)
         return self._client
+
+    async def parse(
+        self,
+        schema: type[SchemaT],
+        *,
+        system: str,
+        prompt: str,
+        task_type: TaskType,
+        model: str,
+        max_tokens: int = 8192,
+        tools: list[dict[str, Any]] | None = None,
+        cache_prefix: str | None = None,
+    ) -> Completion[SchemaT]:
+        """Structured output through a forced tool call, not `output_config`.
+
+        The inherited implementation asks for `output_config.format=json_schema`.
+        **DeepSeek's Anthropic-compatible endpoint accepts that parameter and
+        ignores it** -- no error, no warning; the schema simply becomes a polite
+        suggestion and the model answers in whatever shape it likes. That is why
+        this provider was scoped to CODE_REPAIR in the first place (see the module
+        docstring), and it is exactly what happened when the POC override routed
+        every `parse()` task type here: the Orchestrator emitted `## Verdict`,
+        `**target_engine:` and YAML, and produced zero usable decisions across an
+        entire afternoon while the factory ran on its deterministic fallback.
+
+        The endpoint *does* honour tool calling -- that path was verified against a
+        real broken-test-suite fixture before this provider went live. So the
+        contract is expressed as a single tool whose `input_schema` is the schema,
+        with `tool_choice` forcing it. The model cannot answer in prose because the
+        only move available to it is the call.
+
+        `tools` is ignored deliberately: `tool_choice` is already pinned to the one
+        tool that carries the result, and offering others would give the model a way
+        to avoid answering.
+        """
+        tool_name = "emit_result"
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": _system_blocks(system, cache_prefix),
+            "messages": [{"role": "user", "content": prompt}],
+            "tools": [
+                {
+                    "name": tool_name,
+                    "description": (
+                        f"Return the {schema.__name__} result. Call this exactly once, "
+                        "with every required field populated."
+                    ),
+                    "input_schema": json_schema_for(schema),
+                }
+            ],
+            "tool_choice": {"type": "tool", "name": tool_name},
+        }
+
+        started = time.perf_counter()
+        try:
+            response = await self._request(kwargs, stream=max_tokens > _STREAM_THRESHOLD)
+        except anthropic.APIStatusError as exc:
+            raise _classify_status_error(self.name, exc) from exc
+        except anthropic.APIConnectionError as exc:
+            raise ProviderUnavailable(self.name, f"deepseek connection error: {exc}") from exc
+
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+
+        if getattr(response, "stop_reason", None) == "refusal":
+            details = getattr(response, "stop_details", None)
+            raise ProviderRefusal(
+                self.name,
+                getattr(details, "category", None),
+                f"deepseek declined the request ({getattr(details, 'category', 'unspecified')})",
+                usage=self._usage(response, elapsed_ms),
+            )
+
+        for block in response.content:
+            is_result = getattr(block, "type", None) == "tool_use" and (
+                getattr(block, "name", None) == tool_name
+            )
+            if is_result:
+                try:
+                    return Completion(
+                        value=schema.model_validate(block.input),
+                        provider=self.name,
+                        model=str(getattr(response, "model", model)),
+                        usage=self._usage(response, elapsed_ms),
+                    )
+                except ValidationError as exc:
+                    raise SchemaViolation(
+                        f"deepseek output failed {schema.__name__} validation: {exc}",
+                        usage=self._usage(response, elapsed_ms),
+                    ) from exc
+
+        # Forced tool choice means this should be unreachable. If it happens, the
+        # endpoint has stopped honouring `tool_choice` too, and the useful thing is
+        # to say so plainly rather than to guess at the prose that came back.
+        block_types = [getattr(block, "type", "?") for block in response.content]
+        raise SchemaViolation(
+            f"deepseek ignored a forced tool_choice for {schema.__name__} "
+            f"(stop_reason={getattr(response, 'stop_reason', None)!r}, "
+            f"content_block_types={block_types})",
+            usage=self._usage(response, elapsed_ms),
+        )

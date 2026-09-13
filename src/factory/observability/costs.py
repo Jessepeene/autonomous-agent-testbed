@@ -15,7 +15,10 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from factory.logging import get_logger
 from factory.state.orm import LLMCall
+
+log = get_logger(__name__)
 
 #: USD per million tokens, (input, output). Update alongside provider pricing.
 #:
@@ -42,7 +45,15 @@ PRICE_TABLE: dict[str, tuple[float, float]] = {
     "gemini-2.5-flash": (0.30, 2.50),
     "gemini-pro-latest": (1.25, 10.00),
     "gemini-flash-latest": (0.30, 2.50),
-    "deepseek-v4-pro": (0.435, 0.87),
+    # Peak rates, deliberately, for both DeepSeek entries. The published prices are
+    # time-of-day dependent (peak 01:00-04:00 and 06:00-10:00 UTC Mon-Fri, off-peak
+    # otherwise) and this table has no time dimension. A cost *guard* must never
+    # under-estimate -- an over-estimate stops work early and is visible, an
+    # under-estimate silently lets a cap be exceeded -- so the higher rate wins.
+    # Verified against api-docs.deepseek.com/quick_start/pricing 2026-09-13;
+    # off-peak is flash (0.15, 0.60) and pro (0.66, 1.98).
+    "deepseek-flash": (0.30, 1.20),
+    "deepseek-v4-pro": (1.32, 3.96),
 }
 
 _DEFAULT_PRICE = (3.00, 15.00)
@@ -75,6 +86,14 @@ def estimate_usd(
     usage boundary before it ever reaches this function. One formula cannot serve
     both conventions, so there is exactly one convention and exactly one place that
     enforces it."""
+    if model not in PRICE_TABLE:
+        # Loud, because silence here has now cost three times. A missing key does not
+        # fail -- it quietly prices the call at Claude Sonnet's rate, which is a
+        # 13x overstatement for deepseek-flash and inverts every decision made from
+        # the number: a repair agent cut off by a cost cap it never actually reached,
+        # a breaker reading spend that did not happen, and a POC whose entire
+        # cost rationale is invisible in its own metrics.
+        log.warning("costs.model_not_priced", model=model, fallback_usd_per_m=_DEFAULT_PRICE)
     price_in, price_out = PRICE_TABLE.get(model, _DEFAULT_PRICE)
     cost = (
         (input_tokens / 1_000_000) * price_in

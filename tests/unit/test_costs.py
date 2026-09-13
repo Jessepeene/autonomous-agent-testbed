@@ -47,3 +47,51 @@ def test_an_unrecognised_model_falls_back_to_the_default_price() -> None:
 
 def test_zero_usage_costs_nothing() -> None:
     assert estimate_usd("claude-opus-5", input_tokens=0, output_tokens=0) == 0.0
+
+
+# --- the price table cannot silently miss a model we actually call --------------
+
+
+def test_every_model_the_router_can_choose_is_priced() -> None:
+    """Three times now, a model the factory really calls has been missing from
+    PRICE_TABLE and silently billed at Claude Sonnet's rate:
+
+      1. gemini-pro-latest / gemini-flash-latest -- production uses Google's rolling
+         aliases, never the dated names the table held.
+      2. deepseek-v4-pro -- never added when CODE_REPAIR was routed to it.
+      3. deepseek-flash -- never added when POC_MODEL_OVERRIDE was introduced.
+
+    The third one inverted every decision made from the number: a repair agent cut
+    off by a cost cap it had not actually reached, a spend breaker reading spend
+    that never happened, and a cheap-model POC whose entire cost rationale was
+    invisible in its own metrics -- a 13x overstatement.
+
+    A comment warning about it was already in the file and did not prevent the third
+    occurrence, so this is the guard instead."""
+    from factory.llm.router import model_for
+    from factory.observability.costs import PRICE_TABLE
+    from factory.settings import Settings, TaskType
+
+    for label, settings in (
+        ("default routing", Settings()),
+        ("POC override", Settings(poc_model_override="deepseek-flash")),
+    ):
+        for task_type in TaskType:
+            model = model_for(task_type, settings)
+            assert model in PRICE_TABLE, (
+                f"{label}: {task_type.value} routes to {model!r}, which is not in "
+                "PRICE_TABLE and would be billed at Claude Sonnet's rate"
+            )
+
+
+def test_deepseek_is_priced_below_claude() -> None:
+    """The whole reason DeepSeek is used. If its entry ever drifts above Claude's,
+    the cheap path is no longer cheap and someone should find out from a failing
+    test rather than from a bill."""
+    from factory.observability.costs import PRICE_TABLE
+
+    claude_in, claude_out = PRICE_TABLE["claude-sonnet-5"]
+    for model in ("deepseek-flash", "deepseek-v4-pro"):
+        price_in, price_out = PRICE_TABLE[model]
+        assert price_in < claude_in
+        assert price_out < claude_out
