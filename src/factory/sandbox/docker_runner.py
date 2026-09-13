@@ -120,6 +120,25 @@ class DockerSandbox:
             # separately tmpfs-mounting every path a build tool might invent.
             "--env",
             "HOME=/tmp",
+            # The sandbox writes into a bind-mounted workspace as uid 10001, and the
+            # host process that later has to clear that workspace runs as a different
+            # uid. Unlinking a file needs write permission on its *directory*, so an
+            # `app/__pycache__/` created in here is not removable from out there --
+            # `clear_workspace` logged "Permission denied" and "Directory not empty",
+            # then wrote a fresh scaffold on top, leaving a workspace holding new
+            # source and the previous generation's bytecode.
+            #
+            # Observed cost: a repair agent found that leftover `__pycache__`, could
+            # not tell whether it matched the source, and spent six of its sixteen
+            # steps unpacking the .pyc header to compare embedded mtime and size
+            # against the real file. It ran out of budget before acting on the
+            # diagnosis it had been building.
+            #
+            # Not writing the bytecode at all removes the whole class. Nothing here
+            # benefits from a warm __pycache__: every sandbox run is a fresh
+            # container, so the cache is written once and never read.
+            "--env",
+            "PYTHONDONTWRITEBYTECODE=1",
         ]
         for key, value in (env or {}).items():
             argv += ["--env", f"{key}={value}"]

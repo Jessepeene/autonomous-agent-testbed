@@ -137,7 +137,18 @@ async def queue_review_patch(
         )
 
     bucket = int(time.time()) // PATCH_BUCKET_SECONDS
-    healing = f"{verdict.summary.strip()}\n\n{verdict.details.strip()}"
+    # Where it was seen leads the brief, because that is what the engineer receiving
+    # it cannot otherwise work out. A repair agent handed "checkout returns 422" and
+    # shown source that already contains a fix has a genuine contradiction on its
+    # hands: it cannot tell whether the report is stale or the fix is unshipped.
+    # Observed live -- one spent six of sixteen steps unpacking a .pyc header trying
+    # to infer which build was real, and ran out of budget before acting.
+    healing = (
+        f"Observed on the running deployment at {product.deploy_url}, by an "
+        "automated QA review that used the product as a visitor would. Not "
+        "reproduced from this workspace, and not from a failing test.\n\n"
+        f"{verdict.summary.strip()}\n\n{verdict.details.strip()}"
+    )
     task_id = await repository.enqueue_task(
         session,
         kind=TaskKind.PATCH_PRODUCT,

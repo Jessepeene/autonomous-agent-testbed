@@ -53,7 +53,7 @@ _BASE_URL = "https://api.deepseek.com/anthropic"
 
 
 
-def _validate_tolerating_extras(schema: type[SchemaT], payload: Any) -> SchemaT:
+def _validate_tolerating_extras[T: BaseModel](schema: type[T], payload: Any) -> T:
     """Validate `payload`, salvaging the one failure mode DeepSeek actually causes.
 
     `Contract` sets `extra="forbid"` deliberately -- a field the schema never

@@ -341,7 +341,11 @@ async def enqueue_guided_patch(
         payload={
             "product_id": product_id,
             "idea_id": product.idea_id,
-            "healing": guidance[:6000],
+            # Provenance leads the brief, matching `queue_review_patch`: the repair
+            # agent's framing asks where a symptom was seen, and "the operator said
+            # so" is a different kind of evidence from "a QA pass reproduced it on
+            # the deployment" -- one is an instruction, the other an observation.
+            "healing": f"From the human operator, in reply to an escalation.\n\n{guidance}"[:6000],
             # Routes to the surgical repair path (see `_should_repair_surgically`).
             # A human who has diagnosed the problem and said what to change is the
             # single best case for editing in place: regenerating an entire live

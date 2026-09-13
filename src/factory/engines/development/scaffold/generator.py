@@ -12,7 +12,7 @@ import shutil
 from pathlib import Path
 
 from factory.logging import get_logger
-from factory.sandbox.runner import resolve_workspace
+from factory.sandbox.runner import DevOpsError, resolve_workspace
 from factory.settings import EngineName, Settings, TaskType
 from factory.state.schemas import ScaffoldPlan, ValidatedIdea
 from factory.supervisor.context import FactoryContext
@@ -231,6 +231,17 @@ class UnsafeGeneratedPath(ValueError):
     """A generated file path tried to escape the product workspace."""
 
 
+class WorkspaceNotCleared(DevOpsError):
+    """The workspace could not be emptied, so a fresh scaffold must not be written.
+
+    A host/environment failure rather than a code defect -- the usual cause is a
+    file the host uid cannot unlink because a sandbox uid created the directory
+    holding it. Callers route it accordingly (`is_infra_failure`), because handing
+    it to a repair agent as a code bug would waste a heal cycle on something no
+    edit to the product can fix.
+    """
+
+
 async def generate_scaffold(
     ctx: FactoryContext,
     idea: ValidatedIdea,
@@ -401,6 +412,26 @@ def clear_workspace(workspace: str, settings: Settings | None = None) -> None:
             shutil.rmtree(child, onexc=_log_delete_failure)
         else:
             child.unlink(missing_ok=True)
+
+    # The docstring above calls this "the deterministic guarantee". It was not one:
+    # every deletion failure was logged and then `write_plan` wrote a fresh scaffold
+    # over whatever survived, producing exactly the hybrid workspace this function
+    # exists to prevent -- new source beside the previous generation's files.
+    #
+    # Seen live: sandbox-created `app/__pycache__` (uid 10001, not removable by the
+    # host uid) survived, and the next repair agent spent six of sixteen steps
+    # working out whether that bytecode matched the source.
+    #
+    # Refusing is the honest outcome. A caller that cannot get a clean workspace
+    # should stop, not build on an unknown mixture -- and `PYTHONDONTWRITEBYTECODE`
+    # in the sandbox now removes the one cause seen in practice, so this should be
+    # unreachable rather than routine.
+    leftovers = sorted(child.name for child in root.iterdir())
+    if leftovers:
+        raise WorkspaceNotCleared(
+            f"{workspace} still holds {len(leftovers)} entr(ies) after clearing "
+            f"({', '.join(leftovers[:8])}) -- refusing to write a scaffold over them"
+        )
 
 
 def write_plan(plan: ScaffoldPlan, workspace: str, settings: Settings | None = None) -> list[str]:

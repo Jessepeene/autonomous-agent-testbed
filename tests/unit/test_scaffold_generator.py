@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from factory.engines.development.scaffold.generator import (
+    WorkspaceNotCleared,
     clear_workspace,
     generate_landing_page,
     generate_scaffold,
@@ -27,6 +28,7 @@ from factory.llm.providers.base import Provider
 from factory.llm.providers.fake import FakeProvider
 from factory.llm.router import ProviderRegistry
 from factory.sandbox.disabled import DisabledSandbox
+from factory.sandbox.runner import DevOpsError
 from factory.settings import EngineName, Settings
 from factory.state.schemas import GeneratedFile, ScaffoldPlan, ValidatedIdea
 from factory.supervisor.context import FactoryContext
@@ -160,10 +162,21 @@ def test_clear_workspace_on_an_already_empty_workspace_does_not_crash(tmp_path: 
 def test_clear_workspace_logs_a_deletion_failure_instead_of_swallowing_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Regression test: `ignore_errors=True` previously swallowed every deletion
-    failure (a permission error, a locked file, a symlink edge case) with no trace
-    at all -- exactly the "stale files silently persist" failure this function
-    exists to prevent, one layer deeper. Must not crash the caller either way."""
+    """Regression test, twice over.
+
+    `ignore_errors=True` originally swallowed every deletion failure (a permission
+    error, a locked file, a symlink edge case) with no trace at all -- the "stale
+    files silently persist" failure this function exists to prevent, one layer
+    deeper. Logging fixed the trace but not the outcome: the caller carried on and
+    `write_plan` wrote a fresh scaffold over whatever survived.
+
+    Seen live: sandbox-created `app/__pycache__` (uid 10001, not unlinkable by the
+    host uid) survived a clear, the regenerated product was written beside the
+    previous generation's bytecode, and the next repair agent spent six of sixteen
+    steps working out whether that bytecode matched the source.
+
+    So a failed clear must now both log *and* refuse. A caller that cannot get a
+    clean workspace has to stop rather than build on an unknown mixture."""
     import os
 
     from factory.engines.development.scaffold import generator as generator_module
@@ -187,9 +200,17 @@ def test_clear_workspace_logs_a_deletion_failure_instead_of_swallowing_it(
 
     monkeypatch.setattr(os, "unlink", failing_unlink)
 
-    clear_workspace("product-1", settings)  # must not raise
+    with pytest.raises(WorkspaceNotCleared) as caught:
+        clear_workspace("product-1", settings)
 
     assert any(entry["event"] == "scaffold.clear_workspace_failed" for entry in logged)
+    # Names the surviving top-level entry; the exact paths are in the warnings.
+    assert "app" in str(caught.value)
+    assert any("main.py" in str(entry.get("path", "")) for entry in logged)
+    # Routed as an environment failure, never as a code bug -- no edit to the
+    # product can fix a file the host uid cannot unlink, so handing it to a repair
+    # agent would burn a heal cycle on nothing.
+    assert isinstance(caught.value, DevOpsError)
 
 
 def test_a_second_write_plan_after_clear_leaves_no_trace_of_the_old_layout(

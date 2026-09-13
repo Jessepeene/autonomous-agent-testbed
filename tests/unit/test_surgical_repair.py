@@ -206,7 +206,12 @@ async def test_a_guided_patch_is_never_told_the_test_suite_is_failing(
         healing="Read STRIPE_API_KEY, not STRIPE_SECRET_KEY.",
     )
     assert "test suite for this product is failing" not in objective
-    assert "human" in objective.lower()
+    # Framed as guidance to act on, not a failure to reproduce. Deliberately not
+    # asserting the word "human": `guided` also carries AUDITOR's live-product
+    # findings, and telling a repair agent a QA pass was "a human" is both false and
+    # the wrong provenance -- the brief itself now states where a symptom was seen.
+    assert "specific guidance" in objective.lower()
+    assert "act on exactly what they said" in objective.lower()
     assert "Read STRIPE_API_KEY, not STRIPE_SECRET_KEY." in objective
 
 

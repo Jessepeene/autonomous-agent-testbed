@@ -114,11 +114,17 @@ class TestArgvHardening:
         assert {"STRIPE_KEY=sk_test_x", "OTHER=value"} <= set(env_pairs)
 
     def test_no_caller_env_flags_when_none_are_given(self, sandbox: DockerSandbox) -> None:
-        """Only the always-on HOME=/tmp should appear -- nothing from a prior call
-        or an implicit default leaks in when the caller passes no env at all."""
+        """Only the always-on platform env should appear -- nothing from a prior
+        call or an implicit default leaks in when the caller passes no env at all.
+
+        Both entries are deliberate and neither is caller-supplied: HOME=/tmp gives
+        uid 10001 a writable cache dir on a read-only rootfs, and
+        PYTHONDONTWRITEBYTECODE stops the sandbox creating __pycache__ the host uid
+        cannot then unlink -- which left stale bytecode beside freshly generated
+        source and cost a repair agent six of its sixteen steps."""
         argv = sandbox._argv("echo hi", workspace_path="/tmp/ws", network=False, env=None)
         env_pairs = [argv[i + 1] for i, arg in enumerate(argv) if arg == "--env"]
-        assert env_pairs == ["HOME=/tmp"]
+        assert env_pairs == ["HOME=/tmp", "PYTHONDONTWRITEBYTECODE=1"]
 
     def test_home_is_always_pointed_at_the_writable_tmpfs(self, sandbox: DockerSandbox) -> None:
         """uid 10001 has no /etc/passwd entry, so $HOME is otherwise unset. Observed

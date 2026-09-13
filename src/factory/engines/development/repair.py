@@ -432,10 +432,19 @@ async def attempt_repair(
     elif category == "guided":
         role = get_role(RoleName.WORKSPACE_SURGEON)
         objective = (
-            "The test suite already passes. A human reviewed this product and "
-            "gave you specific guidance -- there is no failing test to chase; "
-            "act on exactly what they said.\n\n"
+            "The test suite already passes. A reviewer looked at this product and "
+            "gave you specific guidance -- there is no failing test to chase; act "
+            "on exactly what they said. The guidance below states where it was "
+            "observed.\n\n"
             f"Their guidance:\n{healing}\n\n"
+            "If it was observed on the running deployment, two things follow. The "
+            "workspace can be *ahead* of what is live -- an earlier fix may be "
+            "sitting here unshipped -- so source that already looks correct does "
+            "not mean the report is stale, and it is not evidence the bug is gone. "
+            "And you cannot reproduce it by running the suite; reason from the code "
+            "path the report names instead. Do not go looking for the deployed "
+            "build: you cannot see it from here, and nothing in this workspace "
+            "is a reliable proxy for it.\n\n"
             f"Verify your change with exactly this command when you are done:\n"
             f"    {test_command}"
         )
