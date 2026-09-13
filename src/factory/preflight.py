@@ -312,7 +312,7 @@ def docker_available() -> bool:
     if shutil.which("docker") is None:
         return False
     try:
-        result = subprocess.run(  # noqa: S603 - argv is a hardcoded literal, no untrusted input
+        result = subprocess.run(
             # Resolved from PATH by design: Docker's install location varies per OS.
             ["docker", "info", "--format", "{{.ServerVersion}}"],  # noqa: S607
             capture_output=True,

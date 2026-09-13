@@ -67,7 +67,7 @@ class WeightsCandidate(Contract):
     rationale: str = Field(min_length=20, max_length=1000)
 
     @model_validator(mode="after")
-    def _weights_sum_to_one(self) -> "WeightsCandidate":
+    def _weights_sum_to_one(self) -> WeightsCandidate:
         """`ScoredIdea.weighted_score` is a plain weighted sum with no normalisation
         by the weights' own total, and `SCORE_THRESHOLD` (0.55) is a fixed constant
         calibrated against weights that sum to 1.0 -- bounding each weight to [0,1]

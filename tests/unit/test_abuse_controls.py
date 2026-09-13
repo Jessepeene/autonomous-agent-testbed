@@ -12,8 +12,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
-
 from factory.api.abuse import hash_ip
 from factory.settings import Settings
 
