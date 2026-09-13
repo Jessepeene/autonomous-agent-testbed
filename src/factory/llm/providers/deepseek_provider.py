@@ -168,6 +168,23 @@ class DeepSeekProvider(AnthropicProvider):
                     "input_schema": json_schema_for(schema),
                 }
             ],
+            # Thinking and the answer share `max_tokens`, and on a large input
+            # thinking will take all of it. Observed live on a Bug Council review,
+            # whose corpus is an entire codebase: `stop_reason='max_tokens'` with a
+            # single `thinking` block and no `tool_use` at all, so the review was
+            # lost. `max_tokens_for(CODE_REVIEW)` is 16_000 and thinking spent it.
+            #
+            # This is the same failure `max_tokens_for`'s CODE_GENERATION comment
+            # describes on Claude Sonnet 5, where the only available lever was a
+            # bigger ceiling because `budget_tokens` is rejected outright there.
+            # DeepSeek accepts it -- verified against the live endpoint -- so the
+            # cause can be fixed directly instead of out-spent: cap thinking so the
+            # answer is always guaranteed room.
+            #
+            # Half, with the API's 1024 floor. Generous enough that reasoning quality
+            # is not the thing being traded away, and it makes the failure
+            # impossible rather than less likely.
+            "thinking": {"type": "enabled", "budget_tokens": max(1024, max_tokens // 2)},
             # `any` (use one of the supplied tools), not `{"type": "tool", "name":
             # ...}`. The named form is what Anthropic documents for forcing one
             # specific tool, and DeepSeek rejects it outright with
@@ -217,13 +234,22 @@ class DeepSeekProvider(AnthropicProvider):
                     usage=self._usage(response, elapsed_ms),
                 )
 
-        # Forced tool choice means this should be unreachable. If it happens, the
-        # endpoint has stopped honouring `tool_choice` too, and the useful thing is
-        # to say so plainly rather than to guess at the prose that came back.
         block_types = [getattr(block, "type", "?") for block in response.content]
+        stop_reason = getattr(response, "stop_reason", None)
+
+        # Two very different causes, and conflating them sent me hunting the wrong
+        # one: this message used to read "ignored a forced tool_choice" for a
+        # response that had simply run out of room mid-thought.
+        if stop_reason == "max_tokens":
+            raise SchemaViolation(
+                f"deepseek ran out of tokens before emitting the {schema.__name__} "
+                f"tool call (max_tokens={max_tokens}, content_block_types="
+                f"{block_types}) -- thinking consumed the budget; raise max_tokens "
+                "or lower the thinking budget for this task type",
+                usage=self._usage(response, elapsed_ms),
+            )
         raise SchemaViolation(
             f"deepseek ignored a forced tool_choice for {schema.__name__} "
-            f"(stop_reason={getattr(response, 'stop_reason', None)!r}, "
-            f"content_block_types={block_types})",
+            f"(stop_reason={stop_reason!r}, content_block_types={block_types})",
             usage=self._usage(response, elapsed_ms),
         )
