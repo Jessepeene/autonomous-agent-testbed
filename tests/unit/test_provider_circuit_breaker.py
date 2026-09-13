@@ -126,6 +126,20 @@ def test_a_guided_repair_gets_a_bigger_step_budget_than_a_test_failure() -> None
     assert GUIDED_MAX_STEPS > get_role(RoleName.WORKSPACE_SURGEON).max_steps
 
 
+def test_recovery_needs_more_than_one_lucky_call() -> None:
+    """The hysteresis. The first version tripped on "no successes" but cleared on
+    *any* success, so a provider returning 429 that intermittently let one call
+    through oscillated -- tripped 23:06, recovered 23:34, tripped again 00:06 --
+    and since the notice auto-closes on recovery, every cycle raised a fresh
+    escalation. One unchanged condition, an escalation every half hour."""
+    from factory.llm.health import MIN_CALLS, MIN_RECOVERY_SUCCESSES
+
+    assert MIN_RECOVERY_SUCCESSES > 1, "one success must not clear a sustained outage"
+    # Asymmetric on purpose: harder to trip than to clear would flap; the reverse
+    # is what damps it.
+    assert MIN_RECOVERY_SUCCESSES < MIN_CALLS
+
+
 def test_circuit_open_is_a_provider_unavailable_subclass() -> None:
     """Load-bearing: every existing `except LLMError` degradation path and
     `except ProviderUnavailable` failover path must keep working unchanged. Only

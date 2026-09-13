@@ -46,21 +46,38 @@ WINDOW_MINUTES = 30
 #: outage -- one failed call on a quiet provider proves nothing.
 MIN_CALLS = 8
 
+#: Successes required before a tripped provider counts as healthy again.
+#:
+#: The hysteresis, and it is load-bearing. The first version tripped on "no
+#: successes" but cleared on *any* success, so a provider returning
+#: `429 RESOURCE_EXHAUSTED` that intermittently let one call through oscillated:
+#: tripped 23:06, recovered 23:34, tripped again 00:06 -- and because the notice
+#: auto-closes on recovery, each cycle raised a brand-new escalation. One unchanged
+#: condition would have produced an escalation every half hour overnight, which is
+#: the same storm this breaker exists to prevent, wearing a different hat.
+#:
+#: Asymmetric on purpose: one failure is not enough to trip, and one success is not
+#: enough to clear. A provider genuinely back up produces successes easily; a
+#: flapping one does not.
+MIN_RECOVERY_SUCCESSES = 3
+
 
 async def tripped_providers(
     session: AsyncSession,
     *,
     window_minutes: int = WINDOW_MINUTES,
     min_calls: int = MIN_CALLS,
+    min_recovery_successes: int = MIN_RECOVERY_SUCCESSES,
 ) -> dict[Provider, str]:
-    """Providers that have failed every recent call, mapped to a human-readable
-    reason.
+    """Providers in a sustained outage, mapped to a human-readable reason.
 
-    The test is deliberately "zero successes", not a failure *rate*: a provider
-    that is half working is degraded, and the retry/failover machinery already
-    handles degraded correctly. What that machinery cannot handle is a provider
-    that is wholly, persistently gone -- which is exactly the case worth pausing
-    on, and exactly the case a rate threshold would take longest to detect.
+    Not a failure *rate*: a provider that is half working is degraded, and the
+    retry/failover machinery already handles degraded correctly. What that
+    machinery cannot handle is a provider that is wholly, persistently gone.
+
+    "Wholly gone" allows a couple of stray successes, because that is what a
+    depleted-quota provider actually looks like from outside -- see
+    MIN_RECOVERY_SUCCESSES.
     """
     since = datetime.now(UTC) - timedelta(minutes=window_minutes)
     stmt = (
@@ -74,13 +91,22 @@ async def tripped_providers(
     )
     tripped: dict[Provider, str] = {}
     for provider_name, total, succeeded in (await session.execute(stmt)).all():
-        if total < min_calls or succeeded:
+        if total < min_calls or succeeded >= min_recovery_successes:
+            continue
+        failed = total - succeeded
+        if failed < min_calls:
+            # Mostly quiet rather than mostly failing -- not enough failure to call
+            # it an outage, whatever the success count happens to be.
             continue
         try:
             provider = Provider(provider_name)
         except ValueError:  # pragma: no cover - a provider no longer in the enum
             continue
-        tripped[provider] = f"{total} call(s) in the last {window_minutes}m, none succeeded"
+        tripped[provider] = (
+            f"{failed} of {total} call(s) failed in the last {window_minutes}m"
+            if succeeded
+            else f"{total} call(s) in the last {window_minutes}m, none succeeded"
+        )
     return tripped
 
 
