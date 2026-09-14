@@ -795,7 +795,15 @@ async def _review_live_product(ctx: FactoryContext, session: AsyncSession, task:
         f"Review the live product at {product.deploy_url}.\n\n"
         f"It is meant to be: {product.name}.\n\n"
         "Open it, work out what it is offering, and then actually try to do that "
-        "thing yourself. Report anything genuinely wrong; if it is fine, say so."
+        "thing yourself. Report anything genuinely wrong; if it is fine, say so.\n\n"
+        "If it asks for an email address, submit exactly this one: "
+        f"{preship.SELF_TEST_EMAIL}\n"
+        "It is a reserved self-test address -- the endpoint answers it exactly like "
+        "a real submission but records nothing and mails nothing. Using any other "
+        "address files a fake signup against the very demand signal this product "
+        "exists to measure, and a review that corrupts what it is measuring is "
+        "worse than no review. Observed: a run invented "
+        "`qa.tester.lead@example-agency.test` and it landed in the real table."
     )
 
     # The standard, if anyone wrote one. Without it a reviewer can only judge the
