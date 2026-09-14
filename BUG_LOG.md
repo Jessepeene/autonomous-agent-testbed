@@ -44,6 +44,7 @@ time it's fixed, not batched up afterward.**
 30. [No CORS anywhere: every interest form on every page ever shipped failed in the browser](#30-no-cors-anywhere-every-interest-form-on-every-page-ever-shipped-failed-in-the-browser)
 31. [Validation pages never got a design brief — the call sat below the early return](#31-validation-pages-never-got-a-design-brief--the-call-sat-below-the-early-return)
 32. [The landing page published its own internal provenance to customers](#32-the-landing-page-published-its-own-internal-provenance-to-customers)
+33. [Convergence compared the current state against itself, so every `fix_first` walled on attempt one](#33-convergence-compared-the-current-state-against-itself-so-every-fix_first-walled-on-attempt-one)
 
 ---
 
@@ -459,6 +460,73 @@ sells, rather than announcing they are not real, since a page that says the
 product does not exist measures nothing. Two limits written into the prompt as
 firm: never invent evidence (testimonials, logos, usage counts, press), and never
 imply the visitor can buy now, because the page only ever collects an email.
+
+---
+
+## 33. Convergence compared the current state against itself, so every `fix_first` walled on attempt one
+
+**Found**: 2026-09-14, auditing my own day's work after Jesse asked *"is
+everything that needs to be still judgement based? And are there no quick fix
+shortcuts that only fix one issue?"*
+
+**Severity**: Every `fix_first` release decision escalated instead of repairing,
+on the first attempt, always. Two of the day's escalations were this. It also
+makes this the most instructive entry in the log, because the morning's fix for
+it was itself the shortcut the question was asking about.
+
+**Root cause**: `product_progress` read `blocking_at_last_attempt` from the most
+recent `release.decided` task event. `_verify_and_ship` *writes* that event and
+then calls `_heal`, which lands in `product_progress` and reads it back:
+
+```
+decide_release()  -> writes release.decided with open_blocking = N
+                  -> returns fix_first
+_heal()           -> product_progress() reads the latest release.decided
+                  -> blocking_before = N, written seconds earlier, same pass
+                  -> N < N is False -> "not converging" -> wall
+```
+
+Both numbers came from the same moment. The comparison was against itself and
+therefore false unconditionally.
+
+**Why the morning fix was not a fix.** Entry #28 made `converging` return `None`
+when `blocking_now == 0`, after watching a build with zero gaps and a `ship`
+decision escalate on `0 < 0`. That was a real observation and the wrong
+conclusion: zero was simply where a universal fault happened to be *visible*. The
+non-zero case kept self-comparing, which is why the very next escalation looked
+identical with `blocking_now=1 blocking_before=1`. Fixing the manifestation you
+can see, and stopping there, is the whole failure mode.
+
+**Fix**: convergence is a claim about *repair attempts*, so it now anchors on one.
+`HealAttempt.blocking_at_attempt` (migration 0037) records how much was blocking
+when each repair was commissioned, and `product_progress` compares against the
+last attempt rather than the last decision. A first attempt has nothing to compare
+against and correctly yields `None`.
+
+The zero guard stays, correctly demoted to what it always was: `_heal` also
+handles deploy failures, which produce no issues at all, so `blocking_now` is
+structurally zero there and a count comparison is meaningless.
+
+**Three more rule-shaped patches found in the same audit**, all from the same
+day's work:
+
+- **Any failed request blocked the ship** (`preship.py`). A 404 on a favicon would
+  have held a release with no judgement applied -- the unbounded-findings gate the
+  release judgement exists to replace, reintroduced one layer down. Only a failure
+  of the interest endpoint blocks now; that is a stated requirement failing, not a
+  defect to be weighed.
+- **`credibility` findings blocked deterministically**, overruling the release
+  judgement built to weigh exactly that. Only `broken` blocks from here.
+- **The static-deploy filter was a denylist of four filenames**, which fixed the
+  file that broke that day and nothing else -- `poetry.lock`, `setup.cfg`,
+  `Dockerfile`, `.python-version` would each have been a fresh outage with an
+  identical cause. Now an allowlist of what a browser can request. Its own test
+  immediately caught that `.txt` is genuinely ambiguous (`robots.txt` vs
+  `requirements.txt`), so served `.txt` files are named -- a short closed list of
+  web conventions rather than an enumeration of build files.
+
+**Verified**: 1,279 unit tests, 9 integration tests against real Postgres, and
+migration 0037 applied live.
 
 ---
 
