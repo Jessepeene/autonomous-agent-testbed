@@ -1843,3 +1843,91 @@ schema noise is still caught; schema failures do not dilute the evidence
 threshold.
 
 **Status**: Fixed and deployed 2026-09-13.
+
+## 25. A null `content` field on an HTTP 200 stopped every engine for fifteen minutes
+
+**Found**: 2026-09-14, live, as a total stall — no engine ran at all and nothing
+in the dashboard said why.
+
+DeepSeek returned a successful 200 whose `content` field was `null`. Every path
+that read a response iterated it directly:
+
+```python
+for block in response.content:   # TypeError: 'NoneType' object is not iterable
+```
+
+**The missing content was not the damage; the kind of error was.** A provider
+returning nothing usable is an ordinary provider failure, and `SchemaViolation`
+is the existing shape for "answered, but not with what was asked for" — retry,
+failover and the circuit breaker all know what to do with it. A `TypeError`
+escapes every one of those and kills the caller instead.
+
+The caller here was the Orchestrator's own `parse()` — the one call every tick
+makes. So every tick died at the same line, and the factory did not degrade, it
+stopped.
+
+**Fix**: `AnthropicProvider._content_blocks()`, raising `SchemaViolation` when
+`content` is absent. Guarded in the shared base class rather than at the call
+sites: `DeepSeekProvider` extends `AnthropicProvider`, so both inherit it, and
+fixing the five sites individually would have left the sixth one somebody adds
+next.
+
+An **empty** list is deliberately passed through. Each caller already has a far
+better message for it — naming the stop reason and the block types it did get,
+which is what distinguishes "thinking consumed the whole budget" from "ignored a
+forced `tool_choice`". A generic guard would have replaced a real diagnosis with
+nothing. The first version of this fix made exactly that mistake.
+
+**Verification**: `tests/unit/test_anthropic_provider.py` — a null `content`
+raises `SchemaViolation` rather than `TypeError`; an empty list still reaches the
+caller's own message.
+
+**Status**: Fixed 2026-09-14, commit `b75c350`. Not yet deployed.
+
+## 26. A department manager that asked a question and commissioned nothing dropped the question
+
+**Found**: 2026-09-14, while generalising the comms channel — not in production,
+because the ask path had not shipped yet.
+
+`run_manager_tick` returned early on `if not decision.actions`, before raising
+the questions the manager had said it needed answered:
+
+```python
+if not decision.actions:
+    return f"design: nothing worth doing -- {decision.assessment[:200]}"
+
+asked = await comms.raise_decision_questions(...)   # unreachable in that case
+```
+
+**"I cannot establish whether this matters, so I am asking" is the likeliest
+shape of a tick with questions, not an edge case** — it is exactly what the
+Design manager did on its first live run. So the branch that dropped the question
+was the one that would fire almost every time asking mattered.
+
+Nothing would have errored. The department would have logged `nothing worth
+doing` — in a tone that reads as a judgement it made — and waited indefinitely
+for a fact nobody was ever asked for.
+
+**A second bug in the same function**: the answers a parked tick was resuming on
+were fetched into `answered_block` and never interpolated into the prompt. The
+round trip would have bought nothing: released by an answer, the tick would have
+asked the identical question again, every six hours, forever.
+
+**Fix**: raise the questions before the empty-actions check, and put the answers
+in the prompt. Both are now general — `comms.raise_decision_questions` and
+`comms.answers_for` — so the next manager cannot reintroduce either.
+
+**Third, found by the same pass**: `DESIGN` was missing from `comms.ANSWERABLE`,
+so no department could ask Design anything. A question routed to a department
+whose runner drops it is worse than having no channel: it is recorded, delivered,
+and waited on forever, which from outside looks exactly like a hang. A test now
+pins that every answerable department's runner actually handles
+`ANSWER_QUESTION`.
+
+**Verification**: `tests/unit/test_design_manager.py` — a manager with only a
+question still asks it and parks; asking does not cancel work it was already sure
+about; a manager with nothing to do is not parked; an answer reaches the prompt.
+`tests/unit/test_comms.py` drives the whole path with a department that does not
+exist, which is what "general" has to mean.
+
+**Status**: Fixed 2026-09-14, commit `b75c350`. Not yet deployed.
