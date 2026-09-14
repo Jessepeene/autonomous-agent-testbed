@@ -3270,3 +3270,47 @@ async def close_issues_as_invalid(
     if closed:
         await session.flush()
     return closed
+
+
+async def close_resolved_issues(
+    session: AsyncSession,
+    *,
+    product_id: str,
+    found_by: str,
+    still_present: set[str],
+    verified_by: str,
+) -> int:
+    """Close open issues a source examined exhaustively and did not re-find.
+
+    Only sound for a check that looks at *everything* every run and reports all of
+    it: the codegen contract, the SEO check, the requirements comparison. For those,
+    "absent from this run's output" really does mean the defect is gone. It is not
+    sound for Bug Council, whose silence about a category is not evidence of
+    absence -- which is why `verify_unseen_issues` stays narrow and cautious.
+
+    Without this the convergence signal is a lie. An issue filed `open` closes only
+    if something marked it `fixed` first, so a defect quietly repaired left its issue
+    open forever -- `blocking_now` never falls, every run reads "not converging",
+    and the heal loop walls on the second attempt. Observed exactly that way: the
+    contract check reported zero violations while its own high-severity issue from
+    the previous run was still sitting open.
+    """
+    stmt = select(Issue).where(
+        Issue.product_id == product_id,
+        Issue.found_by == found_by,
+        Issue.status.in_(("open", "triaged", "fixing")),
+    )
+    closed = 0
+    for issue in (await session.execute(stmt)).scalars().all():
+        if issue.fingerprint in still_present:
+            continue
+        issue.status = "closed"
+        issue.verified_at = _now()
+        issue.closed_at = _now()
+        issue.resolution = f"No longer reported by {found_by}."
+        issue.detail = {**(issue.detail or {}), "verified_by": verified_by}
+        closed += 1
+    if closed:
+        await session.flush()
+        log.info("issue.closed_resolved", product_id=product_id, source=found_by, closed=closed)
+    return closed

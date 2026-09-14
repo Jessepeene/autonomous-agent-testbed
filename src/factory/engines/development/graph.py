@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from factory import issues as issues_mod
 from factory.agents.roles import RoleName
 from factory.agents.spawner import SpawnRequest, spawn
 from factory.engines.development import (
@@ -1518,6 +1519,35 @@ async def _verify_and_ship(
             location=f"contract: {item[:120]}",
             found_by="contract_check",
         )
+    # Both checks are deterministic and examine everything every run, so anything
+    # they reported before and do not report now is genuinely gone. Closing it is
+    # what keeps the convergence signal honest: an issue filed `open` closes only if
+    # something marked it `fixed` first, so without this a quietly-repaired defect
+    # left its issue open forever and every later run read "not converging".
+    await repository.close_resolved_issues(
+        session,
+        product_id=product_id,
+        found_by="seo_check",
+        still_present={
+            issues_mod.fingerprint_for(
+                product_id=product_id, kind="ui", location=f"seo: {item[:120]}", title=item
+            )
+            for item in missing_seo
+        },
+        verified_by="seo_check",
+    )
+    await repository.close_resolved_issues(
+        session,
+        product_id=product_id,
+        found_by="contract_check",
+        still_present={
+            issues_mod.fingerprint_for(
+                product_id=product_id, kind="bug", location=f"contract: {item[:120]}", title=item
+            )
+            for item in missing_contract
+        },
+        verified_by="contract_check",
+    )
     if missing_seo or missing_contract:
         log.info(
             "development.gate_findings",

@@ -199,6 +199,13 @@ def _no_real_db(monkeypatch: pytest.MonkeyPatch) -> None:
             last_decision=None,
         )
 
+    async def fake_close_resolved_issues(session: object, **kwargs: object) -> int:
+        # The deterministic checks close what they no longer find, so their silence
+        # can lower `blocking_now`. Nothing here exercises that; it just needs the
+        # write path stubbed like every other repository call in this fixture.
+        return 0
+
+    monkeypatch.setattr(repository, "close_resolved_issues", fake_close_resolved_issues)
     monkeypatch.setattr(repository, "set_product_status", fake_set_product_status)
     monkeypatch.setattr(repository, "product_progress", fake_product_progress)
     monkeypatch.setattr(repository, "get_build_kind", fake_get_build_kind)

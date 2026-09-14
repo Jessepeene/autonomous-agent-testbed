@@ -38,6 +38,8 @@ _build_kind = {"value": "mvp"}
 
 #: What the gate checks filed this test, for assertions below.
 recorded_issues: list[dict[str, object]] = []
+#: Which sources ran a close-what-I-no-longer-find pass, and with what fingerprints.
+closed_by: list[dict[str, object]] = []
 
 
 @pytest.fixture(autouse=True)
@@ -48,6 +50,7 @@ def _no_real_db(monkeypatch: pytest.MonkeyPatch) -> None:
     test_devops_error_routing.py's identical fixture for the first of these."""
     _build_kind["value"] = "mvp"
     recorded_issues.clear()
+    closed_by.clear()
 
     async def fake_set_product_status(
         session: object, product_id: str, status: ProductStatus, **fields: object
@@ -108,6 +111,13 @@ def _no_real_db(monkeypatch: pytest.MonkeyPatch) -> None:
         return object(), True
 
 
+    async def fake_close_resolved_issues(session: object, **kwargs: object) -> int:
+        # A check that examined everything closes what it no longer finds. Recorded
+        # so the tests below can assert a clean pass really does clear its own old
+        # issues rather than leaving them open to poison the convergence signal.
+        closed_by.append(kwargs)
+        return 0
+
     async def fake_product_progress(session: object, product_id: str) -> object:
         # The convergence thread, assembled from rows in production. Nothing here
         # exercises it, so a first-attempt shape (nothing to compare against) keeps
@@ -122,6 +132,7 @@ def _no_real_db(monkeypatch: pytest.MonkeyPatch) -> None:
             last_decision=None,
         )
 
+    monkeypatch.setattr(repository, "close_resolved_issues", fake_close_resolved_issues)
     monkeypatch.setattr(repository, "set_product_status", fake_set_product_status)
     monkeypatch.setattr(repository, "product_progress", fake_product_progress)
     monkeypatch.setattr(repository, "record_issue", fake_record_issue)
@@ -436,3 +447,64 @@ async def test_a_validation_page_is_not_flagged_for_missing_stripe_wiring(
 
 async def test_contract_incomplete_is_a_surgical_category() -> None:
     assert "contract_incomplete" in dev_graph.SURGICAL_CATEGORIES
+
+
+async def test_a_clean_pass_closes_the_issues_its_own_earlier_run_filed(
+    ctx: FactoryContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A check that finds nothing must close what it found last time.
+
+    This is what keeps convergence honest. Issues are filed `open` and close only
+    once something marks them `fixed`, so a defect quietly repaired used to leave
+    its issue open forever: `blocking_now` never fell, every later run read "not
+    converging", and the heal loop walled on the second attempt while the product
+    was passing every gate. Observed exactly that way in production -- the contract
+    check reporting zero violations with its own high-severity issue still open
+    from the run before.
+
+    Both deterministic checks examine everything every run, so their silence is
+    real evidence about the product, and this asserts they act on it.
+    """
+    ctx.sandbox = _passing_sandbox()
+    _write_workspace(
+        ctx,
+        "product-1",
+        {
+            "app/index.html": _COMPLETE_HTML,
+            "app/sitemap.xml": "<urlset></urlset>",
+            "app/robots.txt": "User-agent: *\nAllow: /\n",
+            "app/main.py": _COMPLETE_BACKEND_PY,
+            "app/privacy.html": "<html><body>We collect an email address.</body></html>",
+        },
+    )
+
+    async def fake_convene(*args: object, **kwargs: object) -> CouncilResult:
+        return CouncilResult(approved=True, verdicts=[])
+
+    async def fake_deploy(*args: object, **kwargs: object) -> object:
+        from factory.engines.development import deploy as deploy_module
+
+        return deploy_module.DeployResult(ok=True, url="https://example.test", detail="ok")
+
+    monkeypatch.setattr(bug_council, "convene", fake_convene)
+    monkeypatch.setattr(dev_graph.deploy_module, "deploy", fake_deploy)
+
+    await dev_graph._verify_and_ship(
+        ctx,
+        None,  # type: ignore[arg-type]
+        product_id="prod-1",
+        product_name="Test Product",
+        workspace="product-1",
+        test_command="pytest -q",
+        idea_id="idea-1",
+    )
+
+    by_source = {call["found_by"]: call for call in closed_by}
+    assert {"seo_check", "contract_check"} <= set(by_source), (
+        "a clean pass must close its own stale issues, or `blocking_now` can never "
+        f"fall and every later run reads 'not converging'; only {set(by_source)} ran"
+    )
+    for source in ("seo_check", "contract_check"):
+        assert by_source[source]["still_present"] == set(), (
+            f"{source} found nothing this run, so it may hold nothing open"
+        )

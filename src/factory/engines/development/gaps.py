@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from factory import issues
 from factory.engines.development.bug_council import render_sources, review_corpus
 from factory.engines.development.requirements import render_for_prompt
 from factory.logging import get_logger
@@ -134,10 +135,19 @@ async def record_gaps_as_issues(
     unmet after three attempts is a different situation from three different ones.
     """
     blocking = 0
+    present: set[str] = set()
     for gap in report.gaps:
         severity = _TIER_SEVERITY.get(gap.tier, "low")
         if severity == "high":
             blocking += 1
+        present.add(
+            issues.fingerprint_for(
+                product_id=product_id,
+                kind="bug",
+                location=f"requirement: {gap.criterion[:150]}",
+                title=f"{gap.tier.upper()} not met: {gap.criterion}",
+            )
+        )
         await repository.record_issue(
             session,
             product_id=product_id,
@@ -151,6 +161,17 @@ async def record_gaps_as_issues(
             actual=gap.evidence,
             found_by="requirements_gap_check",
         )
+    # This pass looked at every criterion, so a gap it previously reported and did
+    # not report now is met. Without closing it the issue stays open forever,
+    # `blocking_now` never falls, and the convergence signal reads "not converging"
+    # on a run that is working.
+    await repository.close_resolved_issues(
+        session,
+        product_id=product_id,
+        found_by="requirements_gap_check",
+        still_present=present,
+        verified_by="requirements_gap_check",
+    )
     log.info(
         "gaps.recorded",
         product_id=product_id,
