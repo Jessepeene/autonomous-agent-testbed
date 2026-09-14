@@ -1234,6 +1234,21 @@ async def _patch_surgically(
         repair.restore_snapshot(workspace, ctx.settings)
         raise
 
+    if outcome.no_change_needed:
+        # The agent investigated and concluded the brief was wrong. That ends the
+        # work: spending the remaining heal budget trying to make a false premise
+        # true is exactly what this used to do, because usability was
+        # `bool(changed_files)` and a reasoned refusal looked like a failed attempt.
+        repair.restore_snapshot(workspace, ctx.settings)
+        await repository.set_product_status(session, product_id, ProductStatus.LIVE)
+        await repository.release_product_lock(session, product_id)
+        log.info(
+            "development.repair_not_needed",
+            product_id=product_id,
+            detail=outcome.summary[:200],
+        )
+        return f"development: no change needed for {product_id} -- {outcome.answer[:300]}"
+
     if not outcome.usable:
         repair.restore_snapshot(workspace, ctx.settings)
         reason = outcome.rejected_because or "no usable repair"

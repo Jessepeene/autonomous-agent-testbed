@@ -50,7 +50,8 @@ _MAX_LOGGED_ARG_CHARS = 300
 #: discard most real reports -- which is the failure this whole channel exists to
 #: end.
 _RESULT_SENTINEL = re.compile(
-    r"RESULT:\s*(FIXED|NOT_FIXED|BLOCKED)\b[ \t]*(?P<detail>[^\n]*)", re.IGNORECASE
+    r"RESULT:\s*(FIXED|NOT_FIXED|NOT_NEEDED|BLOCKED)\b[ \t]*(?P<detail>[^\n]*)",
+    re.IGNORECASE,
 )
 
 

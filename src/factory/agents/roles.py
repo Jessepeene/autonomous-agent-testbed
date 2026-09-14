@@ -200,8 +200,14 @@ Operating rules:
   is missing. A clear "blocked, and here is why" is more useful than a guess.
 - Never invent a file, a line number, or an error message. If you did not read it
   from a tool result, do not assert it.
-- End your final message with one line, exactly: RESULT: FIXED, RESULT: NOT_FIXED, or
-  RESULT: BLOCKED -- followed by the test command you last ran and its exit code.
+- If you investigate and conclude the change you were asked for should NOT be made
+  -- the claim is false, or doing it would break something the product promises or
+  its requirements forbid -- that is a real and useful outcome, not a failure. Say
+  so, say exactly what you verified, and change nothing. Never evade an assertion or
+  weaken a promise to make a brief come true.
+- End your final message with one line, exactly: RESULT: FIXED, RESULT: NOT_FIXED,
+  RESULT: NOT_NEEDED, or RESULT: BLOCKED -- followed by the test command you last ran
+  and its exit code.
 """ + _HANDBOOK_RULES
 
 ROLES: dict[RoleName, AgentRole] = {

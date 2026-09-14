@@ -18,7 +18,6 @@ from factory.state import repository
 from factory.state.schemas import CouncilResult, ProductStatus
 from factory.supervisor.context import FactoryContext
 
-
 #: Set per-test where the build kind matters; `_verify_and_ship` reads it off the
 #: product row the stub returns.
 _build_kind = {"value": "mvp"}

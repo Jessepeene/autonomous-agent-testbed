@@ -200,10 +200,31 @@ class RepairOutcome:
     answer: str
     summary: str
     rejected_because: str | None = None
+    #: The agent investigated and concluded the brief should not be actioned.
+    #:
+    #: Its own words, from the run that forced this to exist: "Made NO code change.
+    #: Investigated the reviewer guidance and concluded it must not be actioned,
+    #: because both halves are either already satisfied or directly forbidden by
+    #: this product's own acceptance criteria." It had verified the claims, found
+    #: them false, and refused to evade an assertion to satisfy them.
+    #:
+    #: That was scored `repair_unusable: the agent changed nothing` and burned a
+    #: heal cycle, because usability was `bool(changed_files)` -- so a reasoned
+    #: refusal was indistinguishable from an agent that tried and failed. The same
+    #: shape as RESULT: BLOCKED being mandated by the rules and read by nothing.
+    #:
+    #: A brief that turns out to be wrong is a *finding*, and the loop should end
+    #: there rather than spend its remaining budget trying to make it true.
+    no_change_needed: bool = False
 
     @property
     def usable(self) -> bool:
         return bool(self.changed_files) and self.rejected_because is None
+
+    @property
+    def concluded(self) -> bool:
+        """The run reached a real conclusion -- either work, or a reasoned refusal."""
+        return self.usable or self.no_change_needed
 
 
 def _snapshot_path(workspace: str, settings: Settings) -> Path:
@@ -627,6 +648,22 @@ async def attempt_repair(
     # turn with no tool calls, so a confident prose diagnosis that never touched a
     # file reports success just as loudly as a real fix would.
     if not result.invocations or not changed:
+        # "I investigated and nothing should change" is only credible from an agent
+        # that actually investigated -- `invocations` is the evidence, the same bar
+        # `spawner.py` uses before trusting an answer enough to remember it.
+        if result.invocations and result.reported_result == "NOT_NEEDED":
+            log.info(
+                "repair.no_change_needed",
+                product_id=product_id,
+                steps=result.steps,
+                detail=result.reported_detail[:200],
+            )
+            return RepairOutcome(
+                changed_files=set(),
+                answer=result.answer,
+                summary=result.summary(),
+                no_change_needed=True,
+            )
         return RepairOutcome(
             changed_files=set(),
             answer=result.answer,
