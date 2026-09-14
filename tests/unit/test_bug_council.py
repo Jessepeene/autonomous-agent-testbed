@@ -16,6 +16,7 @@ from factory.llm.providers.fake import FakeProvider
 from factory.state.schemas import (
     CouncilResult,
     ReviewCategory,
+    ReviewFinding,
     ReviewVerdict,
     ScaffoldPlan,
 )
@@ -155,19 +156,69 @@ def test_healing_orders_by_severity() -> None:
 # --- deploy gate ------------------------------------------------------------
 
 
-def test_deploy_refuses_unapproved_build() -> None:
+def test_deploy_refuses_a_build_with_a_severe_finding() -> None:
+    """The rail: nothing critical or high ships, in any category. The gate reads
+    `deploy_blocking` rather than `approved` now -- a reviewer sets `approved=False`
+    for anything medium or above, which makes it "nobody found anything worth
+    mentioning", an unbounded bar no real build clears."""
+    severe = ReviewFinding(
+        category=ReviewCategory.SECURITY,
+        severity="high",
+        file="app/main.py",
+        line=12,
+        summary="Session tokens are generated with a predictable seed.",
+        failure_scenario="An attacker can guess a valid session token and take an account.",
+        remediation="Use secrets.token_urlsafe for session identifiers.",
+    )
     with pytest.raises(DeployNotPermitted):
-        deploy_requires_approval(CouncilResult(approved=False, verdicts=[]))
+        deploy_requires_approval(
+            CouncilResult(
+                approved=False,
+                verdicts=[
+                    ReviewVerdict(
+                        category=ReviewCategory.SECURITY, approved=False, findings=[severe]
+                    )
+                ],
+            )
+        )
+
+
+def test_deploy_permits_a_build_whose_findings_are_all_minor() -> None:
+    """Observed live, and why this changed: a blank-slate landing page met every one
+    of its acceptance criteria -- 0 gaps, 0 unmet MUSTs -- the release judgement
+    weighed three medium/low dependency findings and shipped it with them accepted on
+    the record, and the old `approved` boolean refused. A judgement that cannot read
+    a requirement should not be able to overrule one that can."""
+    minor = ReviewFinding(
+        category=ReviewCategory.DEPENDENCIES,
+        severity="medium",
+        file="requirements.txt",
+        line=1,
+        summary="Dependencies use loose version ranges rather than exact pins.",
+        failure_scenario="A future install could resolve a different minor version.",
+        remediation="Pin exact versions and commit a lockfile.",
+    )
+    deploy_requires_approval(
+        CouncilResult(
+            approved=False,
+            verdicts=[
+                ReviewVerdict(
+                    category=ReviewCategory.DEPENDENCIES, approved=False, findings=[minor]
+                )
+            ],
+        )
+    )
 
 
 def test_deploy_permits_approved_build() -> None:
     deploy_requires_approval(CouncilResult(approved=True, verdicts=[]))
 
 
-def test_deploy_refuses_unapproved_build_with_no_council_at_all() -> None:
+def test_deploy_refuses_a_build_with_no_council_at_all() -> None:
     """`council=None` is the shape `graph.py::deploy_accepting_risk` passes when
-    there was never a real Council verdict to reference -- must fail exactly like
-    an explicit rejection, not crash on a missing `.approved` attribute."""
+    there was never a real Council verdict to reference. Nothing ships unreviewed:
+    no review at all is refused, which is a different thing from a review that found
+    only minor problems."""
     with pytest.raises(DeployNotPermitted):
         deploy_requires_approval(None)
 

@@ -77,9 +77,30 @@ def deploy_requires_approval(
     # corrupt exactly that record everywhere else `council.approved` is read.
     if override_reason is not None:
         return
-    if council is None or not council.approved:
+    if council is None:
         raise DeployNotPermitted(
-            "the Bug Council did not approve this build; deployment is not permitted"
+            "no Bug Council review exists for this build; deployment is not permitted"
+        )
+    # `deploy_blocking`, not `approved`. A reviewer sets `approved=False` for
+    # anything medium or above, so `approved` is "nobody found anything worth
+    # mentioning" -- an unbounded bar that no real build clears, because there is
+    # always another finding.
+    #
+    # Observed live, and the reason this changed: a blank-slate landing page met
+    # every one of its acceptance criteria (0 gaps, 0 unmet MUSTs), the release
+    # judgement weighed three medium/low dependency findings and shipped it with
+    # them accepted on the record -- and this line refused, on a boolean that cannot
+    # read a requirement and does not know what the product is for.
+    #
+    # What survives is the part that was always the real rail: nothing critical or
+    # high ships, in any category, and nothing medium ships in security, secrets or
+    # privilege. Those cannot be waved past by any judgement. See
+    # `CouncilResult.deploy_blocking`.
+    blocking = council.deploy_blocking
+    if blocking:
+        raise DeployNotPermitted(
+            f"{len(blocking)} finding(s) at a severity that cannot ship: "
+            + "; ".join(f"[{f.severity}/{f.category}] {f.summary}" for f in blocking[:5])
         )
 
 
