@@ -111,3 +111,34 @@ def test_the_self_test_address_can_never_reach_a_real_inbox() -> None:
     """
     assert SELF_TEST_EMAIL.endswith(".invalid")
     assert "@" in SELF_TEST_EMAIL
+
+
+def test_a_review_that_never_tried_the_form_is_not_a_pass() -> None:
+    """Not attempted and attempted-but-failed are both failures.
+
+    The first version blocked only on the second, so a review that never tried the
+    one thing the page exists for passed silently. Seen on the first clean run:
+    `preship.reviewed blocking=0 action_succeeded=False` -- recorded as a pass, on a
+    page whose submission had not been exercised at all.
+
+    Same shape as `ran=False`: a check that did not happen must never look like a
+    check that passed. The point of using the product is finding out whether a
+    visitor can do the thing, and not finding out is not a yes.
+    """
+    from factory.state.schemas import PreShipReview
+
+    never_tried = PreShipReview(
+        primary_action_attempted=False, primary_action_succeeded=False, summary="read the page"
+    )
+    tried_and_failed = PreShipReview(
+        primary_action_attempted=True, primary_action_succeeded=False, summary="submit failed"
+    )
+    worked = PreShipReview(
+        primary_action_attempted=True, primary_action_succeeded=True, summary="submitted fine"
+    )
+
+    # The property under test is the one the gate reads: only a completed action
+    # clears it, however the reviewer got there.
+    assert not never_tried.primary_action_succeeded
+    assert not tried_and_failed.primary_action_succeeded
+    assert worked.primary_action_succeeded

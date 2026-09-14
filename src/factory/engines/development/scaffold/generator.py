@@ -155,9 +155,18 @@ finish registering their interest -- submitting the form is not the final step, 
 confirmation is. On failure, show an error and leave the form intact so the visitor \
 can retry.
 - An analytics beacon: a small inline script that runs on page load and POSTs JSON \
-{"path": ..., "referrer": ...} to the exact analytics URL given below. \
-Fire-and-forget — never block page rendering on it, and never surface a failure to \
-the visitor.
+{"path": ..., "referrer": ...} to the exact analytics URL given below, using \
+`fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: \
+JSON.stringify(...), keepalive: true})`. Fire-and-forget — never block page \
+rendering on it, and never surface a failure to the visitor.
+  Do NOT use `navigator.sendBeacon` here. The endpoint requires \
+`Content-Type: application/json`, which is not CORS-safelisted, so the request \
+needs a preflight and `sendBeacon` cannot make preflighted requests — it fails with \
+`net::ERR_FAILED`. It also returns `true` for *queued*, not *delivered*, so the \
+usual `if (navigator.sendBeacon(...)) {} else { fetch(...) }` fallback never runs \
+and the failure is silent. A generated page shipped exactly that and its beacon \
+never worked in any browser; `keepalive: true` gives the same survives-unload \
+behaviour without the restriction.
 - A standalone privacy.html page stating that the visitor's submitted email is used \
 only to notify them about this product and nothing else, linked from the \
 interest-capture form's page.

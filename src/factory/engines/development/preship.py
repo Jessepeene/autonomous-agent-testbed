@@ -274,10 +274,24 @@ async def review_before_ship(
         return outcome
 
     outcome.summary = review.summary or outcome.summary
-    if review.primary_action_attempted and not review.primary_action_succeeded:
+    if not review.primary_action_succeeded:
+        # Not attempted and attempted-but-failed are both failures here, and the
+        # first version only blocked on the second -- so a review that never tried
+        # the one thing the page exists for passed silently. Seen on the first clean
+        # run: `action_succeeded=False` with `blocking=0`, recorded as a pass.
+        #
+        # This is the same shape as `ran=False`: a check that did not happen must
+        # never be indistinguishable from a check that passed. The whole point of
+        # using the product is finding out whether a visitor can do the thing, and
+        # not finding out is not a yes.
+        detail = (
+            "could not complete"
+            if review.primary_action_attempted
+            else "never attempted -- a review that does not try the page's one job "
+            "cannot clear it"
+        )
         outcome.blocking.append(
-            "The reviewer could not complete the action the page exists for: "
-            f"{review.summary[:400]}"
+            f"The action the page exists for was {detail}: {review.summary[:400]}"
         )
     for finding in review.findings:
         line = f"[{finding.kind}] {finding.summary}" + (
