@@ -1473,32 +1473,50 @@ async def _verify_and_ship(
     # regardless. Deliberately not part of Bug Council's own gate -- see seo.py's
     # module docstring for why this is a separate, surgically-repairable category.
     missing_seo = seo.missing_seo_requirements(sources)
-    if missing_seo:
-        return await _heal(
-            ctx,
-            session,
-            product_id,
-            "SEO requirements from the system prompt were not met:\n"
-            + "\n".join(f"- {item}" for item in missing_seo),
-            idea_id,
-            category="seo_incomplete",
-        )
-
-    # Same reasoning as the SEO check immediately above: no LLM call, so a missing
-    # PRODUCT_PRICE_CENTS read or an unlinked privacy page is caught before ever
-    # paying for Bug Council to review code that was going to heal regardless.
+    # Neither of these heals on its own any more. They used to short-circuit, and
+    # the cost was serial discovery: a missing <title> meant the contract gaps, the
+    # Council findings and the requirement gaps were never even looked for. Fix the
+    # title, rebuild, meet the next one, repeat. A human running CI gets every
+    # failure at once; this now does too.
+    #
+    # What they lose is the veto, not the check. Both still run and both file
+    # issues; the contract's environment facts still hold a release, below.
     missing_contract = contract.missing_contract_requirements(
         sources, product_id=product_id, is_validation=is_validation
     )
-    if missing_contract:
-        return await _heal(
-            ctx,
+    for item in missing_seo:
+        # Quality, not breakage. A page with no <title> is worse, not broken, and a
+        # release judgement can weigh that against the cost of not shipping -- which
+        # is exactly the trade `should` exists for.
+        await repository.record_issue(
             session,
-            product_id,
-            "Codegen contract requirements from the system prompt were not met:\n"
-            + "\n".join(f"- {item}" for item in missing_contract),
-            idea_id,
-            category="contract_incomplete",
+            product_id=product_id,
+            kind="ui",
+            severity="low",
+            title=item,
+            location=f"seo: {item[:120]}",
+            found_by="seo_check",
+        )
+    for item in missing_contract:
+        # Environment facts nothing else in the company knows: which exact key name
+        # the deploy pipeline sets, which exact URL captured emails must reach.
+        # Getting one wrong is silent, total breakage -- billing fails closed, or
+        # addresses go nowhere -- so these stay high and still hold a release.
+        await repository.record_issue(
+            session,
+            product_id=product_id,
+            kind="bug",
+            severity="high",
+            title=item,
+            location=f"contract: {item[:120]}",
+            found_by="contract_check",
+        )
+    if missing_seo or missing_contract:
+        log.info(
+            "development.gate_findings",
+            product_id=product_id,
+            seo=len(missing_seo),
+            contract=len(missing_contract),
         )
 
     try:
@@ -1514,6 +1532,10 @@ async def _verify_and_ship(
     recorded = await _record_council_findings(session, product_id, council)
 
     deploy_blocking = council.deploy_blocking
+    # The contract's environment facts are a rail, not a review: a wrong key name
+    # or a wrong capture URL is silent, total breakage. They lost the power to
+    # short-circuit the rest of verification, not the power to stop a release.
+    hard_blocked = bool(deploy_blocking or missing_contract)
 
     # The one comparison that asks whether this build does what it was for.
     # Everything above judges it against something else -- the codegen contract
@@ -1580,11 +1602,13 @@ async def _verify_and_ship(
         return f"development: release decision for {product_id} was {decision.decision}"
 
     ships = decision is not None and decision.decision == "ship"
-    if deploy_blocking or (decision is not None and not ships):
+    if hard_blocked or (decision is not None and not ships):
         healing = council.healing
         summary = healing.summary if healing else "Bug Council rejected the build."
         steps = "\n".join(healing.ordered_steps) if healing else ""
-        blocked_by = sorted({str(f.category) for f in deploy_blocking}) or ["release_decision"]
+        blocked_by = sorted({str(f.category) for f in deploy_blocking}) or (
+            ["contract"] if missing_contract else ["release_decision"]
+        )
         # The decision names the fewest changes that would make this shippable;
         # Council's own healing text is the fallback for when no judgement ran. This
         # is the triage step nothing previously did -- "fix all findings" is how a
@@ -1595,6 +1619,17 @@ async def _verify_and_ship(
             if decision is not None and decision.fix_first
             else f"{summary}\n{steps}"
         )
+        # Everything found in one brief, not one gate's half. Previously the SEO and
+        # contract checks each healed alone, so a repair only ever saw the first
+        # thing that tripped and the rest were discovered a rebuild at a time.
+        if missing_contract:
+            brief = (
+                "These are environment facts and they hold the release regardless of "
+                "anything else here:\n"
+                + "\n".join(f"- {item}" for item in missing_contract)
+                + "\n\n"
+                + brief
+            )
         log.info(
             "development.release_blocked",
             product_id=product_id,

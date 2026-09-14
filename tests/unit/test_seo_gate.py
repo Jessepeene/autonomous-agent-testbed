@@ -1,8 +1,22 @@
-"""`_verify_and_ship` routes a missing SEO requirement to a surgical heal cycle,
-before Bug Council ever runs.
+"""What the cheap deterministic gates do when they find something.
 
-The ordering is the point: catching a missing <title> costs nothing (no LLM call),
-where finding out about it only after paying for three Opus reviewers would not.
+These used to short-circuit: a missing <title> healed immediately, before Bug
+Council, the requirement comparison or anything else ran. The reasoning was sound
+when Council was three Opus reviewers -- paying for them to review code that was
+going to heal anyway is waste.
+
+It has since inverted. Under the current routing a full Council pass costs cents,
+while the thing serial discovery actually costs is a *rebuild per finding*: fix the
+title, rebuild, meet the contract complaint, rebuild, meet the Council findings,
+rebuild. Finding everything in one pass is now both cheaper and more useful, which
+is what a human running CI gets by default.
+
+What survives is the distinction between the two gates, which was always the real
+one. SEO is quality -- a page with no <title> is worse, not broken -- so it is
+recorded and weighed. The codegen contract is environment facts nothing else in the
+company knows: which exact key name the deploy pipeline sets, which exact URL
+captured emails must reach. Getting one wrong is silent, total breakage, so it
+still holds a release.
 """
 
 from __future__ import annotations
@@ -22,14 +36,18 @@ from factory.supervisor.context import FactoryContext
 #: product row the stub returns.
 _build_kind = {"value": "mvp"}
 
+#: What the gate checks filed this test, for assertions below.
+recorded_issues: list[dict[str, object]] = []
+
 
 @pytest.fixture(autouse=True)
 def _no_real_db(monkeypatch: pytest.MonkeyPatch) -> None:
-    _build_kind["value"] = "mvp"
     """`_verify_and_ship` writes to the database at several points (status
-    transitions, resolving heal attempts, enqueueing the post-deploy harvest) --
-    all stubbed rather than standing up a real session, matching
+    transitions, resolving heal attempts, filing what the gates found) -- all
+    stubbed rather than standing up a real session, matching
     test_devops_error_routing.py's identical fixture for the first of these."""
+    _build_kind["value"] = "mvp"
+    recorded_issues.clear()
 
     async def fake_set_product_status(
         session: object, product_id: str, status: ProductStatus, **fields: object
@@ -82,7 +100,15 @@ def _no_real_db(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_record_task_event(session: object, **kwargs: object) -> None:
         return None
 
+
+    async def fake_record_issue(session: object, **kwargs: object) -> tuple[object, bool]:
+        # The SEO and contract checks now file what they find instead of healing on
+        # it, so this fixture needs the write path stubbed like every other one here.
+        recorded_issues.append(kwargs)
+        return object(), True
+
     monkeypatch.setattr(repository, "set_product_status", fake_set_product_status)
+    monkeypatch.setattr(repository, "record_issue", fake_record_issue)
     monkeypatch.setattr(repository, "live_requirements", fake_live_requirements)
     monkeypatch.setattr(repository, "open_issues_for", fake_open_issues_for)
     monkeypatch.setattr(repository, "record_task_event", fake_record_task_event)
@@ -148,7 +174,7 @@ _COMPLETE_BACKEND_PY = (
 )
 
 
-async def test_a_missing_seo_requirement_heals_before_bug_council_runs(
+async def test_a_missing_seo_requirement_is_recorded_and_does_not_short_circuit(
     ctx: FactoryContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ctx.sandbox = _passing_sandbox()
@@ -189,10 +215,16 @@ async def test_a_missing_seo_requirement_heals_before_bug_council_runs(
         idea_id="idea-1",
     )
 
-    assert result == "healed"
-    assert healed_with["category"] == "seo_incomplete"
-    assert "title" in str(healed_with["healing"])
-    assert convened is False, "Bug Council must not run for a build that already needs a heal"
+    # The short circuit is gone, and the reasoning behind it inverted rather than
+    # being ignored. It existed because Council was three Opus reviewers, so paying
+    # for them to review code that was going to heal anyway was waste. Under the
+    # current routing a full Council pass is cents, while a rebuild cycle -- which is
+    # what serial discovery costs, once per finding -- is the expensive part. Finding
+    # everything at once is now the cheaper order as well as the more useful one.
+    assert convened is True, "everything must be looked at in one pass, not one finding at a time"
+    # SEO is quality, not breakage: a page with no <title> is worse, not broken, so
+    # it is recorded and weighed rather than holding the release by itself.
+    assert healed_with.get("category") != "seo_incomplete"
 
 
 async def test_a_complete_page_reaches_bug_council_normally(
@@ -248,7 +280,7 @@ async def test_seo_incomplete_is_a_surgical_category() -> None:
     assert "seo_incomplete" in dev_graph.SURGICAL_CATEGORIES
 
 
-async def test_a_missing_contract_requirement_heals_before_bug_council_runs(
+async def test_a_missing_contract_requirement_still_holds_the_release(
     ctx: FactoryContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A workspace that satisfies SEO but not the codegen contract (a backend file
@@ -306,10 +338,16 @@ async def test_a_missing_contract_requirement_heals_before_bug_council_runs(
         idea_id="idea-1",
     )
 
+    # The rail that does not move: an environment fact nothing else in the company
+    # knows -- which exact key name the deploy pipeline sets -- is silent, total
+    # breakage if wrong. Billing fails closed. It still holds the release.
     assert result == "healed"
-    assert healed_with["category"] == "contract_incomplete"
     assert "PRODUCT_PRICE_CENTS" in str(healed_with["healing"])
-    assert convened is False, "Bug Council must not run for a build that already needs a heal"
+    # But it no longer pre-empts everything else. It used to short-circuit, so a
+    # build meeting this one gate's complaint was rebuilt only to meet the next --
+    # serial discovery, one rebuild per finding. The brief now carries everything
+    # found in a single pass.
+    assert convened is True, "the rest of verification must still run"
 
 
 async def test_a_validation_page_is_not_flagged_for_missing_stripe_wiring(
