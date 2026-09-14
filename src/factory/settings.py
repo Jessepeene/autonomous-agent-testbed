@@ -29,6 +29,13 @@ class TaskType(StrEnum):
     ANALYSIS = "analysis"
     COMPLIANCE = "compliance"
     MARKETING_COPY = "marketing_copy"
+    #: A judgement about how something *looks*, made by looking at it. Its own type
+    #: rather than ANALYSIS because the routing has to guarantee a model with eyes:
+    #: a visual review served by a text-only provider answers confidently from the
+    #: markup, which is precisely the failure it exists to prevent -- a page built
+    #: from a framework's stock palette with no typeface of its own passed every
+    #: source-reading check and only a human noticed.
+    VISUAL_REVIEW = "visual_review"
     #: Building a landing/validation page from nothing, or regenerating one. A page
     #: with a form and a pricing section, not an application -- split out from
     #: CODE_GENERATION because conflating them meant a landing page was priced,

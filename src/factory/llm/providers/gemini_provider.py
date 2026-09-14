@@ -20,6 +20,7 @@ from pydantic import BaseModel, ValidationError
 from factory.llm.providers.base import (
     AgentTurn,
     Completion,
+    Image,
     Provider,
     ProviderRefusal,
     ProviderRequestRejected,
@@ -220,6 +221,11 @@ class GeminiProvider:
         max_tokens: int = 8192,
         tools: list[dict[str, Any]] | None = None,
         cache_prefix: str | None = None,
+        # Accepted and ignored. A provider without vision answering from the text
+        # alone is the right degradation -- failing the call would turn "this model
+        # cannot see" into an outage. Callers that genuinely need eyes check
+        # `vision_capable` rather than assuming.
+        images: list[Image] | None = None,
     ) -> Completion[SchemaT]:
         client = self._get_client()
         # No explicit prompt-caching API is used here (a separate, larger surface);

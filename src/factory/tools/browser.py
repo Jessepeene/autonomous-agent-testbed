@@ -34,6 +34,7 @@ environment that never reviews a product.
 
 from __future__ import annotations
 
+import base64
 from types import TracebackType
 from typing import Any
 from urllib.parse import urlparse
@@ -42,6 +43,11 @@ from factory.logging import get_logger
 from factory.tools.registry import ToolDescriptor, ToolRegistry
 
 log = get_logger(__name__)
+
+#: Imported lazily inside the handler would be tidier, but this is a
+#: module-level constant with no import cycle -- `runtime` does not import
+#: tools, tools import runtime.
+from factory.agents.runtime import IMAGE_KEY  # noqa: E402
 
 #: Visible-text budget per read. The runtime truncates any tool result at 20k, but
 #: a review typically reads the same page several times across its steps, so a
@@ -60,6 +66,11 @@ _ACTION_TIMEOUT_MS = 10_000
 #: Network/console lines reported per action. A page load fires dozens of asset
 #: requests; the ones that matter for "did my click do anything" are the last few.
 _MAX_INSTRUMENT_ROWS = 12
+
+#: Roughly 4MB of base64, comfortably inside provider image limits while leaving
+#: room for the rest of a transcript. A capture over this is refused with an
+#: instruction rather than truncated into a corrupt image.
+_MAX_SCREENSHOT_CHARS = 4_000_000
 
 #: How long to let the network settle after a click before snapshotting. Short --
 #: this is "did the submit fire", not "wait for the whole page to finish".
@@ -147,6 +158,9 @@ class BrowserSession:
         # deterministic check decides whether it worked.
         self.observed_requests: list[dict[str, Any]] = []
         self.observed_console: list[str] = []
+        #: How many screenshots this session took, for the caller to
+        #: report on -- a visual review that never looked is not a review.
+        self.observed_screenshots = 0
 
     async def __aenter__(self) -> ToolRegistry:
         # Deferred: `playwright` is an optional extra, present only in the Docker
@@ -306,6 +320,47 @@ class BrowserSession:
             snapshot["status_code"] = response.status if response is not None else None
             return snapshot
 
+        async def browser_screenshot(full_page: bool = False, width: int = 1280) -> dict[str, Any]:
+            """Look at the page, rather than read it.
+
+            The gap this closes: every judge in this factory read source. Even this
+            browser session used the page without ever seeing it -- `browser_read`
+            returns text and network activity. A page built from a framework's stock
+            palette with no typeface of its own is plainly visible and completely
+            invisible in markup, which is why a human caught one and no check did.
+
+            A tool rather than something reserved for a design review, because the
+            need is not design's alone: an agent repairing "the form is misaligned"
+            or "the heading overlaps the nav" is working blind without it, and a
+            repair agent that can look is a better repair agent.
+            """
+            page = self._page
+            if page is None:  # pragma: no cover - guarded by __aenter__
+                return {"error": "no page open"}
+            try:
+                await page.set_viewport_size({"width": width, "height": 900})
+                raw = await page.screenshot(full_page=full_page, type="png")
+            except Exception as exc:
+                return {"error": f"screenshot failed: {exc}"}
+
+            encoded = base64.b64encode(raw).decode("ascii")
+            if len(encoded) > _MAX_SCREENSHOT_CHARS:
+                # A full-page screenshot of a long page can exceed what is
+                # reasonable to send. Refuse with a usable instruction rather than
+                # silently truncating into a corrupt image.
+                return {
+                    "error": (
+                        f"screenshot is {len(encoded) // 1024}KB encoded, over the "
+                        f"{_MAX_SCREENSHOT_CHARS // 1024}KB limit. Retry with "
+                        "full_page=false to capture the viewport only."
+                    )
+                }
+            self.observed_screenshots += 1
+            return {
+                "captured": {"width": width, "full_page": full_page, "bytes": len(raw)},
+                IMAGE_KEY: [{"data": encoded, "media_type": "image/png"}],
+            }
+
         async def browser_read() -> dict[str, Any]:
             if self._page is None or not self._page.url or self._page.url == "about:blank":
                 return {"error": "no page is open yet -- call browser_open first"}
@@ -377,6 +432,43 @@ class BrowserSession:
                 },
                 category="browser",
                 handler=browser_open,
+            )
+        )
+        registry.register(
+            ToolDescriptor(
+                name="browser_screenshot",
+                description=(
+                    "Look at the current page and see it, rather than reading its "
+                    "markup. Returns an actual image. Use this whenever the question "
+                    "is about how something appears -- layout, spacing, whether text "
+                    "is readable, whether an element overlaps another, whether the "
+                    "page looks like a real company built it. Reading the HTML cannot "
+                    "answer any of those. Defaults to the visible viewport at desktop "
+                    "width; pass width=390 to check a phone, or full_page=true for the "
+                    "whole page."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "full_page": {
+                            "type": "boolean",
+                            "description": (
+                                "Capture the entire scrollable page rather than the "
+                                "viewport. Large pages may exceed the size limit."
+                            ),
+                        },
+                        "width": {
+                            "type": "integer",
+                            "description": (
+                                "Viewport width in pixels. 1280 is a desktop; 390 is a "
+                                "phone, which is where layout defects actually show."
+                            ),
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+                category="browser",
+                handler=browser_screenshot,
             )
         )
         registry.register(

@@ -116,19 +116,34 @@ def test_general_tasks_route_to_gemini() -> None:
 
 
 def test_code_tasks_never_fail_over() -> None:
+    """Also covers VISUAL_REVIEW, which is not a code task.
+
+    It is here for a related reason: a visual judgement failed over to a provider
+    that cannot see does not error, it answers from the markup -- sounding exactly
+    like a real answer. Silently changing *who saw the thing* is the same class of
+    harm as silently changing who wrote the code.
+    """
     assert NO_FAILOVER == {
         TaskType.LANDING_PAGE,
         TaskType.CODE_GENERATION,
         TaskType.CODE_ITERATION,
         TaskType.CODE_REVIEW,
         TaskType.CODE_REPAIR,
+        # Not a code task, and here for a related reason: a visual judgement served
+        # by a provider that cannot see does not error, it answers from the markup
+        # -- sounding exactly like a real answer. Silently changing *who saw the
+        # thing* is the same class of harm as silently changing who wrote the code.
+        TaskType.VISUAL_REVIEW,
     }
-    # The property behind the list: anything that writes or judges code that
-    # ships is here, so a new code task type cannot be added without deciding
-    # this deliberately.
+    # The property behind the list, restated when VISUAL_REVIEW joined it: a task
+    # may not fail over when switching vendor would silently change something the
+    # caller is relying on. For code that is *who wrote it*; for a visual judgement
+    # it is *whether the judge could see*. Both produce a confident, plausible
+    # answer from the wrong place rather than an error, which is what makes silent
+    # substitution the harm rather than the outage it avoids.
     for task_type in TaskType:
-        writes_code = task_type.value.startswith(("code_", "landing_"))
-        assert may_failover(task_type) is not writes_code
+        substitution_matters = task_type.value.startswith(("code_", "landing_", "visual_"))
+        assert may_failover(task_type) is not substitution_matters
     assert not may_failover(TaskType.CODE_GENERATION)
     assert not may_failover(TaskType.CODE_REPAIR)
     assert may_failover(TaskType.DISCOVERY)

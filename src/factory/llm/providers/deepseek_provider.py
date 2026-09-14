@@ -36,6 +36,7 @@ from factory.llm.providers.anthropic_provider import (
 )
 from factory.llm.providers.base import (
     Completion,
+    Image,
     Provider,
     ProviderRefusal,
     ProviderUnavailable,
@@ -126,6 +127,11 @@ class DeepSeekProvider(AnthropicProvider):
         max_tokens: int = 8192,
         tools: list[dict[str, Any]] | None = None,
         cache_prefix: str | None = None,
+        # Accepted and ignored. A provider without vision answering from the text
+        # alone is the right degradation -- failing the call would turn "this model
+        # cannot see" into an outage. Callers that genuinely need eyes check
+        # `vision_capable` rather than assuming.
+        images: list[Image] | None = None,
     ) -> Completion[SchemaT]:
         """Structured output through a forced tool call, not `output_config`.
 

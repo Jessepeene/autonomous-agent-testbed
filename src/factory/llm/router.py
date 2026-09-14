@@ -19,6 +19,10 @@ ROUTING: dict[TaskType, Provider] = {
     TaskType.ANALYSIS: Provider.GEMINI,
     TaskType.COMPLIANCE: Provider.GEMINI,
     TaskType.MARKETING_COPY: Provider.GEMINI,
+    # Anthropic because its provider is the one that actually sends image
+    # blocks. The others accept `images` and ignore them, which is the right
+    # degradation for a text call and the wrong answer entirely for this one.
+    TaskType.VISUAL_REVIEW: Provider.ANTHROPIC,
     TaskType.LANDING_PAGE: Provider.DEEPSEEK,
     TaskType.CODE_GENERATION: Provider.ANTHROPIC,
     TaskType.CODE_ITERATION: Provider.DEEPSEEK,
@@ -35,6 +39,10 @@ NO_FAILOVER: frozenset[TaskType] = frozenset(
         TaskType.CODE_ITERATION,
         TaskType.CODE_REVIEW,
         TaskType.CODE_REPAIR,
+        # Never fail a visual judgement over to a provider that cannot see. It would
+        # not error -- it would answer, from the markup, sounding exactly like a real
+        # answer. That is worse than the outage it avoids.
+        TaskType.VISUAL_REVIEW,
     }
 )
 
@@ -75,7 +83,15 @@ GENERAL_FALLBACK_PROVIDERS: frozenset[Provider] = frozenset({Provider.GEMINI, Pr
 #: a judgement over evidence already gathered, which is exactly what the POC is
 #: meant to stress.
 POC_EXEMPT: frozenset[TaskType] = frozenset(
-    {TaskType.LANDING_PAGE, TaskType.CODE_GENERATION, TaskType.CODE_ITERATION}
+    {
+        TaskType.LANDING_PAGE,
+        TaskType.CODE_GENERATION,
+        TaskType.CODE_ITERATION,
+        # The POC override points everything at deepseek-flash, which this provider
+        # layer cannot send images to. Exempting it keeps a visual review on a model
+        # with eyes even while the cheap-model mode is on.
+        TaskType.VISUAL_REVIEW,
+    }
 )
 
 

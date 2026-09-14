@@ -11,7 +11,15 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
-from factory.llm.providers.base import AgentTurn, Completion, LLMError, Provider, Turn, Usage
+from factory.llm.providers.base import (
+    AgentTurn,
+    Completion,
+    Image,
+    LLMError,
+    Provider,
+    Turn,
+    Usage,
+)
 from factory.settings import TaskType
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
@@ -47,6 +55,11 @@ class FakeProvider:
         max_tokens: int = 8192,
         tools: list[dict[str, Any]] | None = None,
         cache_prefix: str | None = None,
+        # Accepted and ignored. A provider without vision answering from the text
+        # alone is the right degradation -- failing the call would turn "this model
+        # cannot see" into an outage. Callers that genuinely need eyes check
+        # `vision_capable` rather than assuming.
+        images: list[Image] | None = None,
     ) -> Completion[SchemaT]:
         self.calls.append(
             {

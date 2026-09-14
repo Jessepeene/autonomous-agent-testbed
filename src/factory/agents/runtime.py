@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from factory.llm.client import LLMClient, NoProviderAvailable
-from factory.llm.providers.base import LLMError, ProviderRefusal, ToolResult, Turn, Usage
+from factory.llm.providers.base import Image, LLMError, ProviderRefusal, ToolResult, Turn, Usage
 from factory.logging import get_logger
 from factory.settings import EngineName, Settings, TaskType, get_settings
 from factory.tools.registry import REGISTRY, ToolDescriptor, ToolRegistry
@@ -172,6 +172,31 @@ def _compact_to_budget(turns: list[Turn], max_context_chars: int) -> None:
             ],
         )
 
+
+
+#: The key a tool uses to return a picture rather than a description of one. A
+#: reserved name rather than a new handler signature, so every existing tool keeps
+#: working unchanged and only the ones with something to show opt in.
+IMAGE_KEY = "_images"
+
+
+def _lift_images(raw: Any) -> list[Image]:
+    """Take any images out of a tool's return value, in place.
+
+    Mutating `raw` is deliberate: what remains is what gets serialised into the
+    text result, and a base64 payload left in there would be both unreadable and
+    large enough to consume the whole result budget on its own.
+    """
+    if not isinstance(raw, dict) or IMAGE_KEY not in raw:
+        return []
+    payload = raw.pop(IMAGE_KEY) or []
+    images: list[Image] = []
+    for item in payload:
+        if isinstance(item, dict) and item.get("data"):
+            images.append(
+                Image(data=str(item["data"]), media_type=str(item.get("media_type", "image/png")))
+            )
+    return images
 
 @dataclass(slots=True)
 class ToolInvocation:
@@ -470,11 +495,16 @@ class AgentRuntime:
             raw = await asyncio.wait_for(
                 descriptor.handler(**call.arguments), timeout=_TOOL_TIMEOUT_SECONDS
             )
+            # A tool that produced an image says so with a reserved key, and the
+            # payload is lifted out before serialisation -- base64 inside the text
+            # would be megabytes of noise the model cannot read as a picture, and
+            # would blow the result budget on its way past.
+            images = _lift_images(raw)
             content = raw if isinstance(raw, str) else json.dumps(raw, default=str)
             content = _truncate_middle(content, max_result_chars)
             return (
                 ToolInvocation(call.name, call.arguments, ok=True, detail="ok"),
-                ToolResult(call_id=call.id, name=call.name, content=content),
+                ToolResult(call_id=call.id, name=call.name, content=content, images=images),
             )
         except TimeoutError:
             detail = f"{call.name} exceeded {_TOOL_TIMEOUT_SECONDS}s and was cancelled"

@@ -30,7 +30,14 @@ from typing import Any, TypeVar, cast
 from pydantic import BaseModel
 
 from factory.engines.development.bug_council import REVIEWER_PROMPTS
-from factory.llm.providers.base import AgentTurn, Completion, Provider, Turn, Usage
+from factory.llm.providers.base import (
+    AgentTurn,
+    Completion,
+    Image,
+    Provider,
+    Turn,
+    Usage,
+)
 from factory.settings import TaskType
 from factory.state.schemas import GeneratedFile, ReviewCategory, ReviewVerdict, ScaffoldPlan
 
@@ -504,6 +511,11 @@ class StagingCodeProvider:
         max_tokens: int = 8192,
         tools: list[dict[str, Any]] | None = None,
         cache_prefix: str | None = None,
+        # Accepted and ignored. A provider without vision answering from the text
+        # alone is the right degradation -- failing the call would turn "this model
+        # cannot see" into an outage. Callers that genuinely need eyes check
+        # `vision_capable` rather than assuming.
+        images: list[Image] | None = None,
     ) -> Completion[SchemaT]:
         if schema is ScaffoldPlan:
             # generate_landing_page always includes this exact phrase (see

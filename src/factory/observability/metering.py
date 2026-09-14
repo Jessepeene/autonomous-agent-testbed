@@ -22,7 +22,7 @@ from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
-from factory.llm.providers.base import Completion, LLMProvider, Turn
+from factory.llm.providers.base import Completion, Image, LLMProvider, Turn
 from factory.llm.router import ProviderRegistry
 from factory.settings import TaskType
 
@@ -101,6 +101,7 @@ class MeteringProvider:
         max_tokens: int = 8192,
         tools: list[dict[str, Any]] | None = None,
         cache_prefix: str | None = None,
+        images: list[Image] | None = None,
     ) -> Completion[SchemaT]:
         self._seq += 1
         seq = self._seq
@@ -117,6 +118,7 @@ class MeteringProvider:
                 max_tokens=max_tokens,
                 tools=tools,
                 cache_prefix=cache_prefix,
+                images=images,
             )
         except Exception as exc:
             self._record(

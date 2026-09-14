@@ -152,6 +152,35 @@ class ToolResult:
     name: str
     content: str
     is_error: bool = False
+    #: Images the tool produced -- a screenshot, typically. Carried separately from
+    #: `content` because base64 serialised into the text would be both enormous and
+    #: unreadable: the model would receive the encoding of a picture rather than the
+    #: picture.
+    #:
+    #: Dropped when an old turn is elided from the transcript, which is what stops a
+    #: long run accumulating screenshots it no longer needs -- the text summary of
+    #: what was seen survives, the pixels do not.
+    images: list[Image] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class Image:
+    """One image attached to a prompt, in provider-neutral form.
+
+    Added so a judgement about how something *looks* can be made by looking at it.
+    Every reviewer in this factory read source until now -- including the browser
+    review, which uses the page but reads its text and network traffic, never its
+    appearance. A page built from a framework's stock palette with no typeface of
+    its own is plainly visible and undetectable by reading CSS, which is why a
+    human caught it and no check did.
+
+    Base64 rather than a path or URL: the provider call is the only consumer, the
+    payload is already in memory when a screenshot is taken, and a URL would need
+    the model's own network access to somewhere this factory controls.
+    """
+
+    data: str
+    media_type: str = "image/png"
 
 
 @dataclass(slots=True)
@@ -199,8 +228,17 @@ class LLMProvider(Protocol):
         max_tokens: int = 8192,
         tools: list[dict[str, Any]] | None = None,
         cache_prefix: str | None = None,
+        images: list[Image] | None = None,
     ) -> Completion[SchemaT]:
         """Return an instance of ``schema``, or raise one of the LLMError subclasses.
+
+        ``images`` are attached to the user turn for providers that accept them, and
+        **ignored by those that do not** -- deliberately, so a provider without
+        vision degrades to answering from the text rather than failing the call. The
+        caller is responsible for routing a judgement that genuinely needs eyes to a
+        model that has them; a silently text-only answer to "does this look right"
+        is the failure this must not cause, and `vision_capable` is how a caller
+        checks rather than assumes.
 
         ``cache_prefix`` is text that is byte-identical across a fan-out of related
         calls (e.g. the same codebase reviewed by several prompts). Providers with

@@ -19,6 +19,7 @@ from pydantic import BaseModel, ValidationError
 from factory.llm.providers.base import (
     AgentTurn,
     Completion,
+    Image,
     LLMError,
     Provider,
     ProviderRefusal,
@@ -26,6 +27,7 @@ from factory.llm.providers.base import (
     ProviderUnavailable,
     SchemaViolation,
     ToolCall,
+    ToolResult,
     Turn,
     Usage,
 )
@@ -59,6 +61,62 @@ def _classify_status_error(name: Provider, exc: anthropic.APIStatusError) -> Pro
     return ProviderUnavailable(name, detail, status=exc.status_code)
 
 
+
+
+def _tool_result_block(result: ToolResult) -> dict[str, Any]:
+    """One tool result, with its images inline when it produced any.
+
+    A screenshot has to arrive as a picture, not as the base64 of one. Anthropic
+    accepts a list of blocks as `tool_result` content, so an image the tool took is
+    placed before its text -- the reader sees the thing, then reads what the tool
+    said about it.
+    """
+    if not result.images:
+        return {
+            "type": "tool_result",
+            "tool_use_id": result.call_id,
+            "content": result.content,
+            "is_error": result.is_error,
+        }
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "image",
+            "source": {"type": "base64", "media_type": image.media_type, "data": image.data},
+        }
+        for image in result.images
+    ]
+    if result.content:
+        blocks.append({"type": "text", "text": result.content})
+    return {
+        "type": "tool_result",
+        "tool_use_id": result.call_id,
+        "content": blocks,
+        "is_error": result.is_error,
+    }
+
+def _user_content(prompt: str, images: list[Image] | None) -> str | list[dict[str, Any]]:
+    """The user turn, as a plain string or as blocks when images are attached.
+
+    A bare string when there is nothing to attach, because that is what every
+    existing call sends and changing the shape of every request to support a
+    feature almost none of them use would be a needless diff against a working
+    cache key -- the cache prefix is byte-sensitive.
+
+    Images come *before* the text. Anthropic's own guidance, and it matches how the
+    question reads: here is the thing, now here is what I am asking about it.
+    """
+    if not images:
+        return prompt
+    blocks: list[dict[str, Any]] = [
+        {
+            "type": "image",
+            "source": {"type": "base64", "media_type": image.media_type, "data": image.data},
+        }
+        for image in images
+    ]
+    blocks.append({"type": "text", "text": prompt})
+    return blocks
+
 def _system_blocks(system: str, cache_prefix: str | None) -> list[dict[str, Any]]:
     """Without a shared prefix: one block, the whole system prompt cached. With one:
     the prefix comes first and is the only block marked cacheable, and the per-call
@@ -86,15 +144,7 @@ def _to_anthropic_message(turn: Turn) -> dict[str, Any]:
     if turn.tool_results:
         return {
             "role": "user",
-            "content": [
-                {
-                    "type": "tool_result",
-                    "tool_use_id": result.call_id,
-                    "content": result.content,
-                    "is_error": result.is_error,
-                }
-                for result in turn.tool_results
-            ],
+            "content": [_tool_result_block(result) for result in turn.tool_results],
         }
 
     blocks: list[dict[str, Any]] = []
@@ -236,6 +286,7 @@ class AnthropicProvider:
         max_tokens: int = 8192,
         tools: list[dict[str, Any]] | None = None,
         cache_prefix: str | None = None,
+        images: list[Image] | None = None,
     ) -> Completion[SchemaT]:
         output_config: dict[str, Any] = {
             "format": {"type": "json_schema", "schema": json_schema_for(schema)},
@@ -247,7 +298,7 @@ class AnthropicProvider:
             "model": model,
             "max_tokens": max_tokens,
             "system": _system_blocks(system, cache_prefix),
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [{"role": "user", "content": _user_content(prompt, images)}],
             "output_config": output_config,
         }
         if tools:
