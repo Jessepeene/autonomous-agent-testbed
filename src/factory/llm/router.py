@@ -153,11 +153,21 @@ def max_tokens_for(task_type: TaskType) -> int:
         # JSON answer enough combined room.
         return 64_000
     if task_type is TaskType.LANDING_PAGE:
-        # A page, not an application -- but still every file's full contents in
-        # one ScaffoldPlan, and the same thinking-plus-answer squeeze applies.
-        # Well clear of what a landing page needs, without reserving an MVP's
-        # ceiling for it.
-        return 32_000
+        # Was 32_000, on the reasoning that a page is not an application. That was an
+        # assumption and it measured wrong: a real run truncated mid-plan, emitting
+        # the eighth file's path with no contents and no test_command at all. The
+        # generator does not produce "a page" -- LANDING_PAGE_SYSTEM asks for a
+        # backend, a test suite, a privacy page, a sitemap and robots.txt, and
+        # index.html alone came to 22KB.
+        #
+        # Matched to CODE_GENERATION rather than guessed again. A landing page is
+        # genuinely smaller than an MVP, so this has real headroom rather than being
+        # a number tuned to the one case that failed.
+        #
+        # The deeper fix is upstream and is a prompt change, not a budget: a
+        # validation page whose own requirements list "a working product" as out of
+        # scope should not be generating a FastAPI backend at all.
+        return 64_000
     if task_type is TaskType.CODE_REVIEW:
         return 16_000
     if task_type is TaskType.CODE_REPAIR:
