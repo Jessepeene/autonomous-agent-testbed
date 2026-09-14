@@ -75,6 +75,7 @@ ENGINE_NODES: tuple[EngineName, ...] = (
     EngineName.DEVELOPMENT,
     EngineName.MARKETING,
     EngineName.FINANCE,
+    EngineName.DESIGN,
     # SUPERVISOR must be a real engine node, not just a backlog-enqueue target:
     # `backlog.enqueue_maintenance()` only creates maintenance tasks, it never claims
     # or runs them. Without this, every maintenance item tagged `engine=SUPERVISOR`

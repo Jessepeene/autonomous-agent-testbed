@@ -25,6 +25,7 @@ _MODULES: dict[EngineName, str] = {
     EngineName.MARKETING: "factory.engines.marketing.graph",
     EngineName.FINANCE: "factory.engines.finance.graph",
     EngineName.COMPLIANCE: "factory.engines.compliance.graph",
+    EngineName.DESIGN: "factory.engines.design.graph",
     EngineName.SUPERVISOR: "factory.engines.maintenance",
 }
 

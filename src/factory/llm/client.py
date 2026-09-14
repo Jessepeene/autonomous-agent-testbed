@@ -17,6 +17,7 @@ from pydantic import BaseModel
 
 from factory.llm.providers.base import (
     AgentTurn,
+    Image,
     LLMProvider,
     Provider,
     ProviderCircuitOpen,
@@ -149,6 +150,7 @@ class LLMClient:
         tools: list[dict[str, Any]] | None = None,
         cache_prefix: str | None = None,
         tunable_parameter_id: str | None = None,
+        images: list[Image] | None = None,
     ) -> SchemaT:
         primary = provider_for(task_type)
         candidates: list[LLMProvider] = []
@@ -191,6 +193,7 @@ class LLMClient:
                     tools=tools,
                     cache_prefix=cache_prefix,
                     tunable_parameter_id=tunable_parameter_id,
+                    images=images,
                 )
             except ProviderRefusal:
                 # A policy decline is a decision, not an outage. Trying the other
@@ -217,6 +220,7 @@ class LLMClient:
         tools: list[dict[str, Any]] | None,
         cache_prefix: str | None = None,
         tunable_parameter_id: str | None = None,
+        images: list[Image] | None = None,
     ) -> SchemaT:
         model = self._model_for_provider(provider.name, task_type)
         budget = max_tokens or max_tokens_for(task_type)
@@ -235,6 +239,7 @@ class LLMClient:
                     max_tokens=budget,
                     tools=tools,
                     cache_prefix=cache_prefix,
+                    images=images,
                 )
             except ProviderRequestRejected:
                 # Permanent: the identical request will never succeed against this

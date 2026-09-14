@@ -70,6 +70,11 @@ class EngineName(StrEnum):
     MARKETING = "marketing"
     FINANCE = "finance"
     COMPLIANCE = "compliance"
+    #: Decides how a product should look and whether a built one meets that. The
+    #: first department here run by a manager rather than a fixed dispatch: its work
+    #: is genuinely not a pipeline -- "what design work needs doing right now" has a
+    #: different answer every day, and often the answer is none.
+    DESIGN = "design"
 
 
 class Settings(BaseSettings):

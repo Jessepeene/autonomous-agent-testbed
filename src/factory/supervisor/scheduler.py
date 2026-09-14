@@ -184,6 +184,21 @@ class Scheduler:
                 priority=10,  # money first
             )
 
+        if ctx.is_enabled(EngineName.DESIGN):
+            # Once a day, and unconditional. The manager's tick is not work -- it is
+            # the decision about whether any work is worth doing, and gating it on
+            # "is there something to do" would be the pipeline this department
+            # exists not to be. Its most common correct answer is "nothing", which
+            # costs one cheap call and commissions no spend.
+            await repository.enqueue_task(
+                session,
+                kind=TaskKind.DESIGN_MANAGE,
+                engine=EngineName.DESIGN,
+                idempotency_key=f"design:manage:{_bucket(now, 24 * 3600)}",
+                payload={},
+                priority=90,
+            )
+
         if ctx.is_enabled(EngineName.MARKETING):
             for product in await repository.live_products(session, limit=5):
                 await repository.enqueue_task(

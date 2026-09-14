@@ -48,7 +48,8 @@ How work moves through this company:
 
   Discovery ──(an idea worth assessing)──▶ Compliance
   Compliance ──(an approved idea, a product row)──▶ Development
-  Development ──(a page or product that is live)──▶ Marketing
+  Design ──(how this product should look)──▶ Development
+  Development ──(a page or product that is live)──▶ Design, Marketing
   Marketing ──(enough real outreach to judge interest)──▶ Development
 
 Departments and what they own:
@@ -59,6 +60,11 @@ Departments and what they own:
   individual lead's lawful basis before anyone is contacted. Its "no" is final.
 - **Development** builds, reviews, ships and repairs products. Nothing reaches a
   customer without passing its verification gate.
+- **Design** decides how a product should look for the people who will see it, and
+  judges a deployed page by *looking* at it -- the only department that can, and the
+  reason it exists: everything else reviews source, and a page can be correct in
+  every line and still read as machine-generated. Its findings are weighed by the
+  release decision; it deliberately cannot veto on taste.
 - **Marketing** sources leads, gets human approval for a campaign, sends outreach,
   and measures what came back.
 - **Finance** reconciles real money and enforces the spending limit. It is

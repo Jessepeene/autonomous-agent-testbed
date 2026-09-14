@@ -83,6 +83,13 @@ class TaskKind(StrEnum):
     #: it cannot be skipped by an agent that forgot to look, and the answer is on
     #: the record without anyone choosing to log it.
     ANSWER_QUESTION = "answer_question"
+    #: The Design manager's own tick: look at the department's domain and decide
+    #: what, if anything, needs doing. Not work itself -- the decision that
+    #: commissions work, which is the difference between a manager and a pipeline.
+    DESIGN_MANAGE = "design_manage"
+    #: Delegated by that decision.
+    WRITE_DESIGN_GUIDELINES = "write_design_guidelines"
+    REVIEW_PRODUCT_DESIGN = "review_product_design"
     #: Tallies a running AB test's per-variant outcomes and concludes it once
     #: either a winner is statistically significant or its time budget expires.
     #: A pure DB decision, no code generation -- see EVALUATE_VALIDATION, same shape.
@@ -907,3 +914,63 @@ class DesignGuidelines(Contract):
     #: The specific defaults that make a page read as generated. Named rather than
     #: described, because "avoid generic design" is not something anyone can check.
     must_avoid: list[str] = Field(default_factory=list, max_length=10)
+
+
+class DesignAction(Contract):
+    """One thing the Design manager decided to commission."""
+
+    kind: Literal[
+        "write_guidelines",
+        "review_product",
+        "raise_house_style_concern",
+    ]
+    #: Which product, for the two that need one. Empty for a concern about the
+    #: house style itself, which is about every product rather than any.
+    product_id: str = Field(default="")
+    #: Why this, now. Read by a human reviewing what the department chose to spend
+    #: on, and by the next tick as the record of what was already decided.
+    why: str = Field(min_length=10)
+
+
+class DesignDecision(Contract):
+    """What the Design manager decided to do this tick, and why.
+
+    The manager's whole output. It does not perform work -- it decides what work
+    is worth doing, and deterministic code creates the tasks. That split is what
+    makes it a manager rather than a longer pipeline: the judgement is which of
+    its domain's many possible jobs actually matter today, and the rail is that it
+    can only commission things the system knows how to execute.
+    """
+
+    #: What it made of the department's state. Written before the actions, because
+    #: a decision whose reasoning is reconstructed after the fact is not one.
+    assessment: str = Field(min_length=20)
+    #: Deliberately allowed to be empty, and that is not a failure. A department
+    #: with nothing worth doing that says so is working correctly; one that always
+    #: finds work is manufacturing it, and every item here costs real money.
+    actions: list[DesignAction] = Field(default_factory=list, max_length=6)
+
+
+class VisualFinding(Contract):
+    """One thing a designer saw on the deployed page."""
+
+    #: `broken` is something a viewer cannot use or read and holds a release.
+    #: `guideline` is a stated guideline not met -- checkable, real, recorded.
+    #: `judged` is a designer's opinion: valuable, weighed, and never blocking,
+    #: because a department that can veto on taste stops products shipping forever.
+    kind: Literal["broken", "guideline", "judged"]
+    summary: str = Field(min_length=5)
+    #: Where on the page, in a viewer's terms -- "the hero", "the pricing card",
+    #: "the form's submit button". Not a CSS selector: this was seen, not grepped.
+    where: str = Field(default="")
+    #: What was actually visible that supports it. "Looks wrong" is not evidence;
+    #: "the body text is mid-grey on a light grey panel and hard to read" is.
+    evidence: str = Field(default="")
+
+
+class VisualReview(Contract):
+    """What a designer concluded from looking at the live page."""
+
+    verdict: Literal["good", "acceptable", "poor"]
+    summary: str = Field(min_length=20)
+    findings: list[VisualFinding] = Field(default_factory=list, max_length=15)

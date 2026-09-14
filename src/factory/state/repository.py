@@ -3606,3 +3606,199 @@ async def answered_questions_for_task(session: AsyncSession, task_id: str) -> li
         .order_by(Question.answered_at)
     )
     return list((await session.execute(stmt)).scalars().all())
+
+
+@dataclass(slots=True)
+class DesignDomain:
+    """What the Design manager can see of its own department, as rows not memory.
+
+    Assembled fresh on every tick rather than carried between them. A manager that
+    remembers is blinder than the checks it replaces the moment its memory drifts,
+    and is trusted more -- every field here is a count or a list over real rows, so
+    nothing in it can be hallucinated and every claim it supports is checkable.
+    """
+
+    #: Shipped, and nobody has written down how it should look. The most common
+    #: reason there is work to do.
+    without_guidelines: list[tuple[str, str]]
+    #: Live, with guidelines, and no design review recorded against the current
+    #: deployment. The manager decides whether that is worth its cost.
+    unreviewed: list[tuple[str, str]]
+    #: Design findings still open across every product, newest first. Several
+    #: products sharing one complaint is evidence about the house style rather than
+    #: about any of them.
+    open_findings: list[tuple[str, str]]
+    #: Questions addressed to Design and not yet answered.
+    open_questions: int
+
+
+async def design_domain(session: AsyncSession) -> DesignDomain:
+    """Everything the Design manager needs to decide what to do next."""
+    live = (
+        (
+            await session.execute(
+                select(Product).where(
+                    Product.status.in_(
+                        (ProductStatus.VALIDATING.value, ProductStatus.LIVE.value)
+                    )
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    ids = [p.id for p in live]
+
+    with_guidelines: set[str] = set()
+    reviewed: set[str] = set()
+    if ids:
+        with_guidelines = set(
+            (
+                await session.execute(
+                    select(Requirement.subject_id).where(
+                        Requirement.subject_kind == "design",
+                        Requirement.subject_id.in_(ids),
+                        Requirement.superseded_at.is_(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        reviewed = {
+            pid
+            for pid in (
+                await session.execute(
+                    select(TaskEvent.product_id).where(
+                        TaskEvent.product_id.in_(ids),
+                        TaskEvent.event == "design.reviewed",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+            if pid is not None
+        }
+
+    findings = (
+        (
+            await session.execute(
+                select(Issue)
+                .where(
+                    Issue.found_by.like("design%"),
+                    Issue.status.in_(issues.OPEN_STATUSES),
+                )
+                .order_by(Issue.last_seen_at.desc())
+                .limit(20)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    pending = await open_questions_for(session, EngineName.DESIGN.value)
+
+    return DesignDomain(
+        without_guidelines=[(p.id, p.name) for p in live if p.id not in with_guidelines],
+        unreviewed=[
+            (p.id, p.name) for p in live if p.id in with_guidelines and p.id not in reviewed
+        ],
+        open_findings=[(i.product_id or "", i.title) for i in findings],
+        open_questions=len(pending),
+    )
+
+
+async def record_design_guidelines(
+    session: AsyncSession,
+    *,
+    product_id: str,
+    guidelines: Any,
+    source_task_id: str | None = None,
+) -> str:
+    """Store how one product should look, superseding whatever came before.
+
+    Kept in `requirements` under `subject_kind='design'` rather than a table of its
+    own. They are the same kind of thing -- a standard written before the work,
+    that the builder works to and a reviewer judges against -- and they need the
+    same property that matters most: superseded rather than rewritten, so a
+    regeneration is held to the same bar as the build it replaces and the previous
+    version survives as a record of what was decided before.
+    """
+    await session.execute(
+        update(Requirement)
+        .where(
+            Requirement.subject_kind == "design",
+            Requirement.subject_id == product_id,
+            Requirement.superseded_at.is_(None),
+        )
+        .values(superseded_at=_now())
+    )
+    row = Requirement(
+        id=new_id(),
+        subject_kind="design",
+        subject_id=product_id,
+        goal=guidelines.direction,
+        # The schema's own shape, carried through the generic columns: `must_hold`
+        # is what a reviewer may fail the page on, `must_avoid` is what must not
+        # appear, and the palette and typography ride along as context for both.
+        must=[{"criterion": item, "why": "design guideline"} for item in guidelines.must_hold],
+        should=[
+            {"criterion": f"Palette: {item}", "why": "stated before building"}
+            for item in guidelines.palette
+        ]
+        + [{"criterion": f"Typography: {guidelines.typography}", "why": "stated before building"}],
+        out_of_scope=list(guidelines.must_avoid),
+        created_by="design:guidelines",
+        source_task_id=source_task_id,
+    )
+    session.add(row)
+    await session.flush()
+    log.info("design.guidelines_recorded", product_id=product_id, id=row.id)
+    return row.id
+
+
+async def live_design_guidelines(session: AsyncSession, product_id: str) -> Any:
+    """The current design guidelines for a product, or ``None``.
+
+    Returns a `DesignGuidelines`, rebuilt from the generic columns it was stored in.
+    """
+    from factory.state.schemas import DesignGuidelines
+
+    row = (
+        await session.execute(
+            select(Requirement).where(
+                Requirement.subject_kind == "design",
+                Requirement.subject_id == product_id,
+                Requirement.superseded_at.is_(None),
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+
+    palette = [
+        c["criterion"].removeprefix("Palette: ")
+        for c in (row.should or [])
+        if str(c.get("criterion", "")).startswith("Palette: ")
+    ]
+    typography = next(
+        (
+            str(c["criterion"]).removeprefix("Typography: ")
+            for c in (row.should or [])
+            if str(c.get("criterion", "")).startswith("Typography: ")
+        ),
+        "",
+    )
+    try:
+        return DesignGuidelines(
+            direction=row.goal,
+            palette=palette or ["(none recorded)", "(none recorded)"],
+            typography=typography or "(none recorded)",
+            must_hold=[str(c.get("criterion", "")) for c in (row.must or [])] or ["(none)"],
+            must_avoid=list(row.out_of_scope or []),
+        )
+    except ValueError:
+        # A stored row that no longer satisfies the schema is a fact worth seeing
+        # rather than a crash: the caller falls back to the house style.
+        log.warning("design.guidelines_corrupt", product_id=product_id, id=row.id)
+        return None
