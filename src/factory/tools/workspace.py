@@ -165,11 +165,74 @@ def build_workspace_tools(
         log.info("workspace.file_written", workspace=workspace, path=path, chars=len(content))
         return {"path": path, "written_chars": len(content)}
 
+    async def edit_workspace_file(path: str, old_string: str, new_string: str) -> dict[str, Any]:
+        """Replace an exact snippet in place, without rewriting the whole file.
+
+        The tool whose absence made small repairs expensive. A repair agent could
+        read a file and write a file, and nothing in between -- so changing two
+        sentences in a 15KB page meant either regenerating all 15KB or driving
+        `sed` through the shell. Observed live: a repair for two copy defects spent
+        its entire 16-step budget on shell commands, never called
+        `write_workspace_file` once, and was recorded as "used its entire budget
+        without finishing". The agent was not being careless; it had no better move.
+
+        Exact-match and unique-match by design, matching the contract a human
+        editor works under. A snippet that appears twice is ambiguous, and guessing
+        which one was meant is how a repair silently changes the wrong line.
+        """
+        target = _safe_relative(root, path)
+        if target is None:
+            return {"error": f"path {path!r} is outside the workspace"}
+        if _is_hidden_infra(target, root):
+            return {"error": f"{path!r} is in an internal directory and must not be edited"}
+        if not target.is_file():
+            return {"error": f"{path!r} does not exist"}
+        if not old_string:
+            return {"error": "old_string must not be empty -- use write_workspace_file to create"}
+
+        content = target.read_text(encoding="utf-8", errors="replace")
+        occurrences = content.count(old_string)
+        if occurrences == 0:
+            return {
+                "error": (
+                    f"old_string was not found in {path!r}. It must match the file exactly, "
+                    "including whitespace and indentation -- read the file again and copy "
+                    "the snippet from what you read."
+                )
+            }
+        if occurrences > 1:
+            return {
+                "error": (
+                    f"old_string appears {occurrences} times in {path!r}; it must identify "
+                    "one place. Include a surrounding line or two to make it unique."
+                )
+            }
+
+        updated = content.replace(old_string, new_string, 1)
+        if len(updated) > MAX_FILE_CHARS:
+            return {"error": f"the result would exceed {MAX_FILE_CHARS} characters"}
+        target.write_text(updated, encoding="utf-8")
+        log.info(
+            "workspace.file_edited",
+            workspace=workspace,
+            path=path,
+            removed=len(old_string),
+            added=len(new_string),
+        )
+        return {"path": path, "replaced": 1, "chars_now": len(updated)}
+
     async def run_workspace_command(command: str) -> dict[str, Any]:
         # Byte-identical to how _verify_and_ship runs the suite: same PATH export,
         # same PYTHONPATH. If the agent's reproduce differed from the gate's, it
         # would optimise against a command nobody verifies -- the worst outcome
         # available, because it looks like success right up until the gate runs.
+        # Logged before the PATH prefix is added. `sandbox.execute` logs
+        # `shlex.split(cmd)[:1]`, which on the wrapped string is always `['export']`
+        # -- so every command any agent has ever run appears in the record as
+        # `export`, and what it actually did is unrecoverable. Same failure as a
+        # deploy reporting `readyState=ERROR`: the system did something and cannot
+        # say what.
+        log.info("workspace.command", workspace=workspace, command=command[:300])
         result = await sandbox.execute(
             f'export PATH="/workspace/.deps/bin:$PATH"; {command}',
             workspace=workspace,
@@ -247,6 +310,43 @@ def build_workspace_tools(
             },
             category="workspace",
             handler=write_workspace_file,
+        )
+    )
+    registry.register(
+        ToolDescriptor(
+            name="edit_workspace_file",
+            description=(
+                "Change part of a file in place by replacing an exact snippet. Prefer "
+                "this over write_workspace_file for anything short of a rewrite -- it "
+                "does not require reproducing the whole file, so a small change to a "
+                "large file costs one step instead of several. Read the file first and "
+                "copy old_string from what you read; it must match exactly, including "
+                "whitespace, and must appear exactly once."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative path, e.g. 'index.html'.",
+                    },
+                    "old_string": {
+                        "type": "string",
+                        "description": (
+                            "The exact text to replace, copied from the file. Include "
+                            "surrounding lines if needed to make it unique."
+                        ),
+                    },
+                    "new_string": {
+                        "type": "string",
+                        "description": "What to put in its place. Empty string deletes it.",
+                    },
+                },
+                "required": ["path", "old_string", "new_string"],
+                "additionalProperties": False,
+            },
+            category="workspace",
+            handler=edit_workspace_file,
         )
     )
     registry.register(

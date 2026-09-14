@@ -121,3 +121,78 @@ class TestResultBudget:
 
     def test_a_role_with_no_transcript_ceiling_still_gets_a_floor(self) -> None:
         assert _result_budget(None) == MAX_RESULT_CHARS
+
+
+async def test_a_small_change_to_a_large_file_costs_one_call(workspace: Settings) -> None:
+    """The tool whose absence made every small repair expensive.
+
+    A repair agent could read a file and write a file, with nothing in between, so
+    changing two sentences in a 15KB page meant reproducing all 15KB or driving
+    `sed` through the shell. Observed live: a repair commissioned for two copy
+    defects spent its entire 16-step budget on shell commands, never called
+    `write_workspace_file` once, and was recorded as "used its entire budget
+    without finishing". It was not being careless -- it had no better move.
+    """
+    page = (
+        "<html>\n<body>\n"
+        + "<p>filler</p>\n" * 400
+        + "<p>ShardRunner is not available yet.</p>\n</body>\n</html>"
+    )
+    (workspace.workspace_root / "product-1" / "index.html").write_text(page, encoding="utf-8")
+    tools = _tools(workspace)
+
+    result = await tools.get("edit_workspace_file").handler(
+        path="index.html",
+        old_string="<p>ShardRunner is not available yet.</p>",
+        new_string="<p>ShardRunner shards your iOS test suite across CI runners.</p>",
+    )
+
+    assert result == {"path": "index.html", "replaced": 1, "chars_now": len(page) + 24}
+    updated = (workspace.workspace_root / "product-1" / "index.html").read_text(encoding="utf-8")
+    assert "not available yet" not in updated
+    assert "shards your iOS test suite" in updated
+    assert updated.count("<p>filler</p>") == 400, "nothing else may change"
+
+
+async def test_an_ambiguous_snippet_is_refused_rather_than_guessed(
+    workspace: Settings,
+) -> None:
+    """Guessing which of two matches was meant is how a repair edits the wrong line."""
+    (workspace.workspace_root / "product-1" / "index.html").write_text(
+        "<p>© 2026</p>\n<p>© 2026</p>\n", encoding="utf-8"
+    )
+    tools = _tools(workspace)
+
+    result = await tools.get("edit_workspace_file").handler(
+        path="index.html", old_string="<p>© 2026</p>", new_string="<p>© 2027</p>"
+    )
+
+    assert "appears 2 times" in result["error"]
+    # And nothing was written.
+    body = (workspace.workspace_root / "product-1" / "index.html").read_text(encoding="utf-8")
+    assert body.count("2026") == 2
+
+
+async def test_a_snippet_that_does_not_match_says_so_usefully(workspace: Settings) -> None:
+    """The error has to tell the agent what to do next, or it burns steps guessing."""
+    (workspace.workspace_root / "product-1" / "index.html").write_text(
+        "<p>a</p>\n", encoding="utf-8"
+    )
+    tools = _tools(workspace)
+
+    result = await tools.get("edit_workspace_file").handler(
+        path="index.html", old_string="<p>b</p>", new_string="<p>c</p>"
+    )
+
+    assert "was not found" in result["error"]
+    assert "read the file again" in result["error"]
+
+
+async def test_the_edit_tool_cannot_escape_the_workspace(workspace: Settings) -> None:
+    tools = _tools(workspace)
+
+    result = await tools.get("edit_workspace_file").handler(
+        path="../../etc/passwd", old_string="root", new_string="pwned"
+    )
+
+    assert "outside the workspace" in result["error"]
