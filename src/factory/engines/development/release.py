@@ -137,7 +137,7 @@ async def decide_release(
             engine=EngineName.DEVELOPMENT,
             task_id=task_id,
         )
-    except Exception as exc:  # noqa: BLE001 - degradation, never a deploy blocker
+    except Exception as exc:
         log.warning("release.undecided", product_id=product_id, detail=str(exc)[:200])
         return None
 

@@ -115,7 +115,7 @@ async def write_landing_page_requirements(
             engine=EngineName.DEVELOPMENT,
             task_id=task_id,
         )
-    except Exception as exc:  # noqa: BLE001 - degradation, never a build blocker
+    except Exception as exc:
         log.warning("requirements.not_written", product_id=product_id, detail=str(exc)[:200])
         return None
 

@@ -179,7 +179,7 @@ class BrowserSession:
                 if response.status >= 400:
                     try:
                         entry["body"] = (await response.text())[:1200]
-                    except Exception:  # noqa: BLE001 - consumed, redirected, or gone
+                    except Exception:
                         entry["body"] = "(response body could not be read)"
                 self._requests.append(entry)
             except Exception:  # noqa: S110 - an instrument must never break the run
