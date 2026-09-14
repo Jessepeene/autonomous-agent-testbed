@@ -44,23 +44,23 @@ You write the acceptance criteria for a landing page before anyone builds it.
 This page exists for one purpose: to find out whether real people want a product \
 that has not been built yet. It is not the product.
 
-How it must read, because this decides what the criteria have to say. The page \
-describes the product in the present tense, the way any company describes what it \
-sells -- what it does, who it is for, what it costs. It must NOT tell the visitor \
-the product does not exist, describe itself as a test, or hedge what the product \
-does: a page that announces it is not real measures nothing, because nobody signs \
-up for something that is not there. Do not write a criterion requiring any of \
-those things.
+**Write criteria about THIS product only.** A standing policy already covers what \
+every page must and must not do -- present-tense product framing, no invented \
+evidence, nothing implying the visitor can buy today, and nothing internal to this \
+factory appearing on the page. That policy is attached to every build and every \
+review automatically, so you neither need to restate it nor may contradict it.
 
-Two limits that are firm, and worth stating as criteria when they apply:
+In particular, never write a criterion asking the page to cite, link or mention \
+where the idea came from, to describe itself as a test, or to say the product does \
+not exist yet. Those are policy questions, already answered -- and a criterion is \
+what a build is judged against, so one that disagrees with the policy does real \
+damage. One did: "the page links to the real public issue thread used as the need \
+signal" put an internal scraped-from URL in front of customers, because the builder \
+obeyed the criteria over its own instructions.
 
-- No invented evidence. No testimonials, customer names or logos, user counts, \
-case studies, review scores or press mentions -- every one is a fabricated claim \
-about real people. The problem and the solution are real; persuade with those.
-- Nothing that implies the visitor can buy today. State the price plainly as what \
-it will cost. The page only ever collects an email address, so a button promising \
-a purchase or a trial that cannot be started is a lie at the most important moment \
-on the page.
+What belongs here is everything specific to this idea: the problem this page has to \
+name, who it must speak to, the actual price, and what a visitor has to be able to \
+do.
 
 Write criteria that someone can *check by using the page*. "A visitor can submit an \
 email address and sees a confirmation telling them to check their inbox" is \
@@ -165,12 +165,56 @@ async def write_landing_page_requirements(
     return requirements
 
 
+#: Standing rules for every validation page, applied live rather than baked into a
+#: product's criteria. This is the permanent fix for a whole class of problem, so it
+#: is worth being explicit about why it exists.
+#:
+#: These are not facts about any one product. "Never publish where the idea came
+#: from" is true of every page this factory will ever build, and it changes when the
+#: business changes its mind, not when a product does. Generated criteria are the
+#: opposite: written once from one idea, frozen for that build, and correct to store.
+#:
+#: Mixing them cost a day. The requirements written for one product included
+#: "SHOULD: the page links to the real public issue thread used as the need signal"
+#: -- a standing-policy question, answered by a generator that had not been told the
+#: policy, and then treated as authoritative because criteria are what a build is
+#: judged against. Three consequences, all structural: the policy was re-decided per
+#: product (so it varied), frozen at generation time (so fixing the prompt did
+#: nothing to pages already specified), and could be got *wrong* by the generator
+#: -- which is what happened, producing a criterion that contradicted an explicit
+#: instruction in the builder's own prompt.
+#:
+#: Rendered alongside the criteria on every read, and marked as overriding them, so
+#: a stale criterion cannot win against current policy and a policy change takes
+#: effect on the next build with nothing to regenerate.
+PAGE_POLICY = """\
+STANDING POLICY. These apply to every page this factory builds and override any \
+criterion below that disagrees with them -- a criterion asking for something \
+forbidden here is a mistake in the criterion, and the policy wins.
+
+- Nothing internal to this factory appears on the page. Not where the idea came \
+from, not the research or discussion it was drawn from, not links to issue \
+trackers or forums, not the validation process itself. A visitor sees a company \
+describing its product, with no trace of how the page came to exist.
+- No invented evidence. No testimonials, customer names or logos, user or customer \
+counts, case studies, review scores, awards or press mentions -- each is a \
+fabricated claim about real people.
+- Nothing implies the visitor can buy today. State the price plainly as what it \
+will cost; the page only ever collects an email address.
+- The product is described in the present tense, the way any company describes what \
+it sells. The page never tells the visitor the product does not exist yet, and \
+never describes itself as a test.\
+"""
+
+
 def render_for_prompt(requirements: WorkRequirements) -> str:
     """The requirements as an instruction block, for whoever is doing the work.
 
-    One rendering, shared by the builder, the reviewer and the release decision, so
-    three employees cannot end up working to three different readings of the same
-    standard.
+    One rendering, shared by the builder, the gap check, the live review and the
+    pre-ship review, so four employees cannot end up working to four different
+    readings of the same standard -- and, since `PAGE_POLICY` is rendered here, so
+    that changing a standing rule reaches all four at once without regenerating
+    anything.
     """
     lines = [f"What this must achieve: {requirements.goal}", "", "MUST (not done without these):"]
     lines += [f"- {c.criterion}  ({c.why})" for c in requirements.must]
@@ -180,4 +224,4 @@ def render_for_prompt(requirements: WorkRequirements) -> str:
     if requirements.out_of_scope:
         lines += ["", "OUT OF SCOPE (deliberately not built -- do not add or flag these):"]
         lines += [f"- {item}" for item in requirements.out_of_scope]
-    return "\n".join(lines)
+    return "\n".join(lines) + "\n\n" + PAGE_POLICY
