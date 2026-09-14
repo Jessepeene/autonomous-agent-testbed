@@ -128,7 +128,9 @@ async def check_scoring_contract_drift(session: AsyncSession) -> bool:
     return True
 
 
-async def check_business_health(session: AsyncSession) -> list[str]:
+async def check_business_health(
+    session: AsyncSession, *, extra_concerns: list[str] | None = None
+) -> list[str]:
     """Tier 0 finding #0g, system-wide verification plan: the other two checks
     in this module each re-verify one specific load-bearing invariant. This is
     the more general instinct neither one covers -- a founder periodically
@@ -140,7 +142,12 @@ async def check_business_health(session: AsyncSession) -> list[str]:
     several unrelated-looking oddities on the same day are worth reading as
     one report, not three separate pings.
     """
-    concerns: list[str] = []
+    # Findings from other deterministic checks that should reach the same report.
+    # `check_pipeline_completeness` passes its gaps here rather than raising a
+    # second interrupt: a day with three unrelated-looking oddities is one report,
+    # not three pings, which is the same reasoning this function already applies
+    # to its own three signals.
+    concerns: list[str] = list(extra_concerns or [])
     now = datetime.now(UTC)
 
     last_activity = await repository.most_recent_product_activity(session)
@@ -190,4 +197,79 @@ async def check_business_health(session: AsyncSession) -> list[str]:
         needs_reply=False,
     )
     log.info("audit.business_health_concerns", count=len(concerns))
+    return concerns
+
+
+#: How far back to look for products that shipped. Long enough that a stage which
+#: quietly stopped running shows up within a day or two, short enough that a gap
+#: already reported and accepted does not keep resurfacing forever.
+_PIPELINE_AUDIT_DAYS = 7
+
+
+async def check_pipeline_completeness(session: AsyncSession) -> list[str]:
+    """Did the factory actually do all of its own steps?
+
+    Every other check in this codebase verifies a *product*. This one verifies the
+    *process*, and nothing did before -- which is exactly how a whole stage went
+    missing without anyone noticing.
+
+    The case that prompted it: `build_design_brief` sat below an early `return` in
+    the validation branch, so the only product type this factory ships was the one
+    that never reached it. Every landing page deployed with an empty design panel,
+    for months, and no check anywhere could have said so. It took a human opening
+    the dashboard and asking "why is there no design brief?".
+
+    The general failure is that a stage which stops running leaves no trace, so
+    absence of a finding is indistinguishable from absence of a check: the gap check
+    files nothing when it finds nothing, and a gap check that never ran files
+    nothing either. "Is the artifact there" is the only form of the question a
+    broken stage cannot answer on its own behalf.
+
+    Deterministic, no LLM judgement -- the same posture as every other check here.
+    """
+    since = datetime.now(UTC) - timedelta(days=_PIPELINE_AUDIT_DAYS)
+    shipped = await repository.recently_shipped_products(session, since=since)
+    if not shipped:
+        return []
+
+    # (what is missing, why it matters) -- phrased as a fault in the factory rather
+    # than in the product, because that is what it is.
+    stages = (
+        (
+            "acceptance criteria",
+            "has_requirements",
+            "nothing recorded what it was supposed to do",
+        ),
+        (
+            "release decision",
+            "has_release_decision",
+            "no judgement was recorded before it went out",
+        ),
+        (
+            "pre-ship review",
+            "has_preship_review",
+            "the deployed page was never opened and used by a reviewer",
+        ),
+        (
+            "design brief",
+            "has_design_brief",
+            "no design brief was built from the live page",
+        ),
+    )
+
+    concerns: list[str] = []
+    for stage, attribute, why in stages:
+        missing = [p.name[:40] for p in shipped if not getattr(p, attribute)]
+        if not missing:
+            continue
+        # The count is what distinguishes a glitch from a wiring bug: one product
+        # skipped is noise, all of them skipped means the stage is not running.
+        concerns.append(
+            f"{len(missing)} of {len(shipped)} product(s) shipped in the last "
+            f"{_PIPELINE_AUDIT_DAYS} days with no {stage} -- {why}. "
+            f"Affected: {', '.join(missing[:5])}."
+        )
+
+    if concerns:
+        log.info("audit.pipeline_gaps", stages=len(concerns), shipped=len(shipped))
     return concerns

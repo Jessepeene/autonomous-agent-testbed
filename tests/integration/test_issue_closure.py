@@ -37,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from factory import issues
 from factory.state import repository
-from factory.state.orm import Base
+from factory.state.orm import Base, Idea, Product
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -78,6 +78,37 @@ async def _file(session: AsyncSession, title: str, severity: str = "high") -> No
         found_by="contract_check",
     )
 
+
+async def _shipped_product(session: AsyncSession, product_id: str, name: str, **fields: object):
+    """A product in VALIDATING with its FK parent, for the pipeline audit."""
+    from datetime import UTC, datetime
+
+    from factory.state.schemas import ProductStatus
+
+    idea_id = f"idea-{product_id}"
+    session.add(
+        Idea(
+            id=idea_id,
+            problem_statement="a real problem",
+            target_niche="a real niche",
+            source_url="https://example.com/thread",
+            monetization_hypothesis="subscription",
+            fingerprint=product_id,
+        )
+    )
+    session.add(
+        Product(
+            id=product_id,
+            idea_id=idea_id,
+            name=name,
+            status=ProductStatus.VALIDATING.value,
+            deploy_url="https://example.vercel.app",
+            updated_at=datetime.now(UTC),
+            **fields,
+        )
+    )
+    await session.flush()
+    return idea_id
 
 async def test_a_check_that_stops_finding_a_defect_closes_it(session: AsyncSession) -> None:
     """The whole bug in one test: a clean run must clear the previous run's issue."""
@@ -244,3 +275,73 @@ async def test_holding_steady_at_a_real_blocker_is_still_a_wall(
         last_decision="fix_first",
     )
     assert shrinking.converging is True
+
+
+async def test_a_stage_that_silently_stops_running_is_detected(session: AsyncSession) -> None:
+    """The check that would have caught "no design brief" without a human.
+
+    `build_design_brief` sat below an early `return` in the validation branch, so
+    the only product type this factory ships never reached it. Every landing page
+    deployed with an empty design panel, for months. No check could say so, because
+    every check verified the product and none verified the process.
+
+    A stage that stops running leaves no trace -- the gap check files nothing when
+    it finds nothing, and a gap check that never ran also files nothing. Asking "is
+    the artifact there" is the only form of the question a broken stage cannot
+    answer on its own behalf.
+    """
+    from factory.supervisor.audit import check_pipeline_completeness
+
+    await _shipped_product(session, "prod-audit-1", "A page that shipped with nothing behind it")
+
+    concerns = await check_pipeline_completeness(session)
+
+    joined = " ".join(concerns)
+    for stage in ("acceptance criteria", "release decision", "pre-ship review", "design brief"):
+        assert stage in joined, f"a missing {stage} must be reported; got {concerns}"
+
+
+async def test_a_fully_processed_product_raises_nothing(session: AsyncSession) -> None:
+    """The check must be quiet when the pipeline did its job.
+
+    A process audit that always complains is one nobody reads, which would make it
+    worse than nothing.
+    """
+    from factory.settings import EngineName
+    from factory.supervisor.audit import check_pipeline_completeness
+
+    await _shipped_product(
+        session,
+        "prod-audit-2",
+        "A page that went through every stage",
+        design_brief="a real brief",
+    )
+    from factory.state.schemas import AcceptanceCriterion, WorkRequirements
+
+    await repository.record_requirements(
+        session,
+        subject_kind="product",
+        subject_id="prod-audit-2",
+        requirements=WorkRequirements(
+            goal="Find out whether mobile engineering leads want this enough to ask for it",
+            must=[
+                AcceptanceCriterion(
+                    criterion="A visitor can submit their email address",
+                    why="The whole page exists to collect that signal",
+                )
+            ],
+        ),
+    )
+    for event in ("release.decided", "preship.reviewed"):
+        await repository.record_task_event(
+            session,
+            event=event,
+            task_id=None,
+            product_id="prod-audit-2",
+            engine=EngineName.DEVELOPMENT,
+            detail={},
+        )
+
+    concerns = await check_pipeline_completeness(session)
+
+    assert concerns == [], f"a complete pipeline must be silent; got {concerns}"

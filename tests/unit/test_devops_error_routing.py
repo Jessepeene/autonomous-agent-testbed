@@ -205,6 +205,13 @@ def _no_real_db(monkeypatch: pytest.MonkeyPatch) -> None:
         # write path stubbed like every other repository call in this fixture.
         return 0
 
+    async def fake_open_interrupt(session: object, **kwargs: object) -> str:
+        # The pre-ship review cannot start a browser in a unit run, and a review
+        # that could not run now says so out loud instead of shipping in silence --
+        # which means this fixture needs the interrupt write path stubbed too.
+        return "interrupt-1"
+
+    monkeypatch.setattr(repository, "open_interrupt", fake_open_interrupt)
     monkeypatch.setattr(repository, "close_resolved_issues", fake_close_resolved_issues)
     monkeypatch.setattr(repository, "set_product_status", fake_set_product_status)
     monkeypatch.setattr(repository, "product_progress", fake_product_progress)

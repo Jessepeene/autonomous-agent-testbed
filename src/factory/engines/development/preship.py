@@ -273,6 +273,23 @@ async def review_before_ship(
             found_by="preship_review",
         )
 
+    # A durable marker that this stage ran, for `audit.check_pipeline_completeness`.
+    # A stage that silently stops running is invisible otherwise: the gap check files
+    # nothing when it finds nothing, so "found no problems" and "never executed" leave
+    # identical traces. That is how a design brief went unbuilt for months.
+    await repository.record_task_event(
+        session,
+        event="preship.reviewed",
+        task_id=task_id,
+        product_id=product_id,
+        engine=EngineName.DEVELOPMENT,
+        detail={
+            "blocking": len(outcome.blocking),
+            "notes": len(outcome.notes),
+            "network_failures": len(failures),
+            "action_succeeded": review.primary_action_succeeded,
+        },
+    )
     log.info(
         "preship.reviewed",
         product_id=product_id,

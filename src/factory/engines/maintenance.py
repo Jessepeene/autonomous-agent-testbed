@@ -84,15 +84,21 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
         from factory.supervisor.audit import (
             check_approved_idea_orphans,
             check_business_health,
+            check_pipeline_completeness,
             check_scoring_contract_drift,
         )
 
         count = await check_approved_idea_orphans(session)
         drift = await check_scoring_contract_drift(session)
-        concerns = await check_business_health(session)
+        # Runs before `check_business_health` so its findings ride out on that
+        # function's single interrupt rather than raising a competing one. Several
+        # unrelated-looking oddities on the same day read better as one report.
+        pipeline_gaps = await check_pipeline_completeness(session)
+        concerns = await check_business_health(session, extra_concerns=pipeline_gaps)
         return (
             f"supervisor/audit: {count} orphaned approved idea(s) found, "
-            f"scoring contract drift: {drift}, {len(concerns)} business-health concern(s)"
+            f"scoring contract drift: {drift}, {len(concerns)} business-health concern(s) "
+            f"({len(pipeline_gaps)} pipeline gap(s))"
         )
     if slug == "review-churn":
         from factory.engines.finance.churn import review_churn

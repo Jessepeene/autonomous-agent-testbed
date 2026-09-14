@@ -1751,7 +1751,39 @@ async def _verify_and_ship(
         requirements=requirements,
         task_id=task_id,
     )
-    if preship_outcome.ran and not preship_outcome.may_ship:
+    if not preship_outcome.ran:
+        # A reviewer that could not run must never be silent. The first version of
+        # this shipped on `ran=False` with nothing but a log warning, which recreates
+        # the exact failure this whole gate exists to fix: a check that quietly does
+        # not happen looks identical to a check that passed. A broken browser in the
+        # image would have sent every product out unreviewed and said nothing.
+        #
+        # It still ships -- refusing to release a product that deployed correctly
+        # because the reviewer's browser would not start punishes the product for an
+        # infrastructure fault. But "this went out unreviewed" is a fact somebody has
+        # to be told, so it is said out loud, once, per product.
+        log.warning(
+            "development.shipped_unreviewed", product_id=product_id, reason=preship_outcome.summary
+        )
+        await interrupts.request(
+            session,
+            reason=InterruptReason.DATA_INTEGRITY,
+            subject=f"{product_name[:80]} shipped without a pre-ship review",
+            detail=(
+                f"{product_name} deployed to {result.url} and went out **without the "
+                "pre-ship browser review running**.\n\n"
+                f"Why it could not run: {preship_outcome.summary}\n\n"
+                "The product is live and may be fine -- nothing found a defect, "
+                "because nothing looked. Worth checking the page by hand, and worth "
+                "finding out why the reviewer could not start: if it is the browser "
+                "itself, every product after this one ships unreviewed too."
+            ),
+            headline="👁️ Shipped without review",
+            reply_hint="No reply needed -- informational, but do not ignore twice.",
+            needs_reply=False,
+            product_id=product_id,
+        )
+    elif not preship_outcome.may_ship:
         # Findings are already filed as issues. Route to repair rather than
         # escalating: these are ordinary defects with a concrete brief, and the
         # convergence logic decides when that stops being worth another attempt.

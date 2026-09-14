@@ -3340,3 +3340,74 @@ async def close_resolved_issues(
         await session.flush()
         log.info("issue.closed_resolved", product_id=product_id, source=found_by, closed=closed)
     return closed
+
+
+@dataclass(slots=True)
+class ShippedProductAudit:
+    """One shipped product and which of the pipeline's own artifacts it carries.
+
+    Every field is the presence of a row, never a quality judgement. "Did this stage
+    run" and "did this stage find anything" are different questions, and only the
+    first can be answered without trusting the stage to report on itself.
+    """
+
+    id: str
+    name: str
+    has_requirements: bool
+    has_release_decision: bool
+    has_preship_review: bool
+    has_design_brief: bool
+
+
+async def recently_shipped_products(
+    session: AsyncSession, *, since: datetime
+) -> list[ShippedProductAudit]:
+    """Products that reached a customer recently, with their pipeline artifacts.
+
+    Feeds `supervisor/audit.py::check_pipeline_completeness`. `VALIDATING` counts as
+    shipped: a landing page in front of real visitors is as shipped as anything this
+    factory makes, and treating only `LIVE` as shipped is the exact mistake that left
+    validation pages unreviewed in the first place.
+    """
+    stmt = select(Product).where(
+        Product.status.in_((ProductStatus.VALIDATING.value, ProductStatus.LIVE.value)),
+        Product.updated_at >= since,
+    )
+    products = list((await session.execute(stmt)).scalars().all())
+    if not products:
+        return []
+
+    ids = [p.id for p in products]
+    with_requirements = set(
+        (
+            await session.execute(
+                select(Requirement.subject_id).where(
+                    Requirement.subject_kind == "product", Requirement.subject_id.in_(ids)
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    events = (
+        await session.execute(
+            select(TaskEvent.product_id, TaskEvent.event).where(
+                TaskEvent.product_id.in_(ids),
+                TaskEvent.event.in_(("release.decided", "preship.reviewed")),
+            )
+        )
+    ).all()
+    decided = {pid for pid, event in events if event == "release.decided"}
+    reviewed = {pid for pid, event in events if event == "preship.reviewed"}
+
+    return [
+        ShippedProductAudit(
+            id=p.id,
+            name=p.name,
+            has_requirements=p.id in with_requirements,
+            has_release_decision=p.id in decided,
+            has_preship_review=p.id in reviewed,
+            has_design_brief=bool(p.design_brief),
+        )
+        for p in products
+    ]
