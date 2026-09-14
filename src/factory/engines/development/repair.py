@@ -216,6 +216,14 @@ class RepairOutcome:
     #: A brief that turns out to be wrong is a *finding*, and the loop should end
     #: there rather than spend its remaining budget trying to make it true.
     no_change_needed: bool = False
+    #: What the agent said it was blocked on, when it reported `RESULT: BLOCKED`.
+    #:
+    #: The field the docstring above predicted was needed. `is_blocked` was parsed
+    #: from the agent's own mandatory result line and branched on by nothing, so an
+    #: agent that said "I cannot proceed until I know X" was handed another retry
+    #: and X was discarded. Carried here so `factory/comms.py` can turn it into a
+    #: routed question and park the work instead of burning the cycle.
+    blocked_detail: str = ""
 
     @property
     def usable(self) -> bool:
@@ -621,6 +629,7 @@ async def attempt_repair(
                 changed_files=set(),
                 answer=result.answer,
                 summary=result.summary(),
+                blocked_detail=result.reported_detail if result.reported_blocked else "",
                 rejected_because=(
                     f"the repair agent used its entire budget without changing "
                     f"anything ({result.stopped_because} after {result.steps} step(s))"
@@ -633,12 +642,14 @@ async def attempt_repair(
                 changed_files=set(),
                 answer=result.answer,
                 summary=result.summary(),
+                blocked_detail=result.reported_detail if result.reported_blocked else "",
                 rejected_because=violation,
             )
         return RepairOutcome(
             changed_files=changed_when_capped,
             answer=result.answer,
             summary=result.summary(),
+            blocked_detail=result.reported_detail if result.reported_blocked else "",
         )
 
     after = _read_tree(resolve_workspace(workspace, ctx.settings))
@@ -662,12 +673,14 @@ async def attempt_repair(
                 changed_files=set(),
                 answer=result.answer,
                 summary=result.summary(),
+                blocked_detail=result.reported_detail if result.reported_blocked else "",
                 no_change_needed=True,
             )
         return RepairOutcome(
             changed_files=set(),
             answer=result.answer,
             summary=result.summary(),
+                blocked_detail=result.reported_detail if result.reported_blocked else "",
             rejected_because="the agent changed nothing",
         )
 

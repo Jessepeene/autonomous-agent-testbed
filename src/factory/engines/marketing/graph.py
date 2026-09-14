@@ -27,6 +27,12 @@ _OUTREACH_BATCH = 15
 
 
 async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
+    if TaskKind(task.kind) is TaskKind.ANSWER_QUESTION:
+        # A question from another department, arriving as ordinary work.
+        from factory.answering import answer_question_task
+
+        return await answer_question_task(ctx, session, task)
+
     kind = TaskKind(task.kind)
     if kind is TaskKind.HARVEST_LEADS:
         return await _harvest(ctx, session, task)

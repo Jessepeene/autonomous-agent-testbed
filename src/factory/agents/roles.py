@@ -208,6 +208,18 @@ Operating rules:
 - End your final message with one line, exactly: RESULT: FIXED, RESULT: NOT_FIXED,
   RESULT: NOT_NEEDED, or RESULT: BLOCKED -- followed by the test command you last ran
   and its exit code.
+- RESULT: BLOCKED is for when you cannot proceed without knowing something only
+  somebody else can tell you. It is a normal outcome, not a failure, and it does not
+  count against this product's repair budget -- guessing does far more damage than
+  asking. When you use it, state the question plainly on its own line:
+
+      QUESTION: <the single thing you need to know>
+
+  Ask for the fact, not for permission, and ask the smallest question that unblocks
+  you. If you know which department holds the answer, name it -- QUESTION FOR
+  MARKETING: ... -- and if you do not, ask anyway: it gets routed, and a person sees
+  it when nobody else can answer. Your work is parked, not discarded, and it resumes
+  with the answer attached.
 """ + _HANDBOOK_RULES
 
 ROLES: dict[RoleName, AgentRole] = {

@@ -33,7 +33,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from factory import issues
 from factory.engines.development.bug_council import render_sources, review_corpus
-from factory.engines.development.requirements import render_for_prompt
+from factory.engines.development.requirements import (
+    HOUSE_STYLE,
+    render_design_for_prompt,
+    render_for_prompt,
+)
 from factory.logging import get_logger
 from factory.settings import EngineName, TaskType
 from factory.state import repository
@@ -100,8 +104,17 @@ async def find_requirement_gaps(
         f"{corpus}\n\n"
         "The acceptance criteria this product was built to meet:\n\n"
         f"{render_for_prompt(requirements)}\n\n"
+        # Design is judged here for the first time. Until now "it looks
+        # machine-generated" was true, obvious to anyone who opened the page, and
+        # invisible to every automated judge -- so a build could meet every
+        # criterion and still read as generated, which is exactly what shipped and
+        # what only a human caught. Guidelines written to be falsifiable make that
+        # a gap like any other.
+        f"{render_design_for_prompt(HOUSE_STYLE)}\n\n"
         "Report which criteria are met, which are gaps, and which you could not "
-        "determine from the code above."
+        "determine from the code above. Judge the design guidelines the same way: "
+        "a page using a framework's stock palette or no webfont at all is a gap "
+        "against a stated guideline, not a matter of taste."
     )
     try:
         return await ctx.llm.parse(

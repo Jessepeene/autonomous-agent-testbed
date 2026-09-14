@@ -12,10 +12,11 @@ spend for that product until it is healthy again.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from factory import comms
 from factory import issues as issues_mod
 from factory.agents.roles import RoleName
 from factory.agents.spawner import SpawnRequest, spawn
@@ -160,6 +161,14 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
         return await _generate_design_brief(ctx, session, task)
     if kind is TaskKind.REVIEW_LIVE_PRODUCT:
         return await _review_live_product(ctx, session, task)
+    if kind is TaskKind.ANSWER_QUESTION:
+        # Another department is parked waiting on this. Above the sandbox check
+        # because answering reads the record and touches no workspace -- refusing
+        # to answer because Docker is down would leave the asker blocked on an
+        # outage that has nothing to do with the question.
+        from factory.answering import answer_question_task
+
+        return await answer_question_task(ctx, session, task)
 
     if not ctx.sandbox.available:
         # Fail loudly rather than running model-written code on the host.
@@ -1086,6 +1095,15 @@ async def _patch(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
 
     workspace = product.workspace_path or f"product-{product_id[:12]}"
     healing = str(task.payload.get("healing", "Address the outstanding review findings."))
+
+    # If this task was parked on a question, it is resuming because somebody
+    # answered. Without this the channel is decorative: the work would be released
+    # and then re-run with exactly the information that blocked it the first time,
+    # and it would block again on the same thing.
+    answers = await repository.answered_questions_for_task(session, task.id)
+    if answers:
+        healing = comms.render_answers(answers) + "\n\n" + healing
+        log.info("development.resumed_with_answers", product_id=product_id, answers=len(answers))
     category = str(task.payload.get("category", ""))
 
     try:
@@ -1323,6 +1341,47 @@ async def _patch_surgically(
             detail=outcome.summary[:200],
         )
         return f"development: no change needed for {product_id} -- {outcome.answer[:300]}"
+
+    if outcome.blocked_detail:
+        # The agent said it could not proceed, and said why. Until now that was
+        # parsed, logged, and branched on by nothing -- so it was handed another
+        # retry with exactly the information that stopped it, and whatever it needed
+        # to know was discarded.
+        #
+        # Asking is a state the work is in, not an action the agent had to remember
+        # to take: it reports BLOCKED because its result contract requires one of
+        # four words, and the routing happens here. The work parks rather than
+        # failing, so this costs no heal budget -- being blocked on someone else is
+        # not the same as failing.
+        repair.restore_snapshot(workspace, ctx.settings)
+        question = await comms.raise_blocked_question(
+            session,
+            asked_by=EngineName.DEVELOPMENT,
+            detail=outcome.blocked_detail,
+            blocking_task_id=task.id,
+            asked_by_task_id=task.id,
+            product_id=product_id,
+            context=healing[:1500],
+        )
+        if question is not None:
+            await repository.defer_task(
+                session,
+                task.id,
+                not_before=datetime.now(UTC) + timedelta(hours=comms.BLOCKED_RETRY_HOURS),
+                reason=f"blocked on question {question.id} to {question.asked_of}",
+            )
+            await repository.release_product_lock(session, product_id)
+            log.info(
+                "development.blocked_on_question",
+                product_id=product_id,
+                question_id=question.id,
+                asked_of=question.asked_of,
+            )
+            return (
+                f"development: blocked on a question to {question.asked_of} "
+                f"-- {question.question[:200]}"
+            )
+        # BLOCKED with nothing to ask about is just a failed attempt; fall through.
 
     if not outcome.usable:
         repair.restore_snapshot(workspace, ctx.settings)

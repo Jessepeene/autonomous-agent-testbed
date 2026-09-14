@@ -46,6 +46,7 @@ from factory.state.orm import (
     Product,
     ProductLock,
     PypiPackageCheck,
+    Question,
     RateLimitBucket,
     Requirement,
     ScoutSignal,
@@ -3501,3 +3502,107 @@ async def record_demand_assessment(
         return
     idea.demand_assessment = assessment.model_dump_json()
     await session.flush()
+
+
+#: Recipient meaning "nobody in this organisation can answer this" -- the question
+#: goes to a person through the existing interrupt path. Not a failure mode: it is
+#: what makes the channel useful before any department can answer, because a
+#: surfaced question beats a silent retry that burns a repair cycle.
+HUMAN = "human"
+
+
+async def ask_question(
+    session: AsyncSession,
+    *,
+    asked_by_engine: str,
+    asked_of: str,
+    question: str,
+    context: str = "",
+    asked_by_task_id: str | None = None,
+    blocking_task_id: str | None = None,
+    product_id: str | None = None,
+) -> Question:
+    """Record a question one department cannot answer for itself.
+
+    Does not deliver it -- the caller routes, because routing differs by recipient
+    (a department gets a task, a person gets an interrupt) and this layer should not
+    know about either.
+    """
+    row = Question(
+        id=new_id(),
+        asked_by_engine=asked_by_engine,
+        asked_by_task_id=asked_by_task_id,
+        blocking_task_id=blocking_task_id,
+        product_id=product_id,
+        asked_of=asked_of,
+        question=question.strip(),
+        context=context.strip(),
+    )
+    session.add(row)
+    await session.flush()
+    log.info(
+        "question.asked",
+        question_id=row.id,
+        asked_by=asked_by_engine,
+        asked_of=asked_of,
+        blocking=blocking_task_id,
+    )
+    return row
+
+
+async def get_question(session: AsyncSession, question_id: str) -> Question | None:
+    return await session.get(Question, question_id)
+
+
+async def answer_question(
+    session: AsyncSession, *, question_id: str, answer: str, answered_by_task_id: str | None = None
+) -> str | None:
+    """Record an answer and release whatever was waiting on it.
+
+    Returns the task id that was released, or ``None``. Releasing is the half that
+    makes this a channel rather than a mailbox: the blocked work was deferred, not
+    failed, so answering means clearing `not_before` and letting it run again --
+    this time with something it did not have before.
+    """
+    row = await session.get(Question, question_id)
+    if row is None or row.status != "open":
+        return None
+    row.status = "answered"
+    row.answer = answer.strip()
+    row.answered_by_task_id = answered_by_task_id
+    row.answered_at = _now()
+
+    released: str | None = None
+    if row.blocking_task_id:
+        task = await session.get(Task, row.blocking_task_id)
+        if task is not None and task.status in ("pending", "deferred"):
+            task.not_before = _now()
+            task.status = "pending"
+            released = task.id
+    await session.flush()
+    log.info("question.answered", question_id=question_id, released_task=released)
+    return released
+
+
+async def open_questions_for(session: AsyncSession, asked_of: str) -> list[Question]:
+    """Everything this department has been asked and has not answered."""
+    stmt = (
+        select(Question)
+        .where(Question.asked_of == asked_of, Question.status == "open")
+        .order_by(Question.created_at)
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def answered_questions_for_task(session: AsyncSession, task_id: str) -> list[Question]:
+    """Answers this task was waiting on, for the brief when it resumes.
+
+    Without this the loop is pointless: work would be released and then re-run with
+    exactly the information that blocked it the first time.
+    """
+    stmt = (
+        select(Question)
+        .where(Question.blocking_task_id == task_id, Question.status == "answered")
+        .order_by(Question.answered_at)
+    )
+    return list((await session.execute(stmt)).scalars().all())

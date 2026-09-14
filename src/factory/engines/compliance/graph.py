@@ -49,6 +49,12 @@ class ValidationCapacityExceeded(RuntimeError):
 
 async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
     idea_id = task.idea_id or str(task.payload.get("idea_id", ""))
+    if TaskKind(task.kind) is TaskKind.ANSWER_QUESTION:
+        # A question from another department, arriving as ordinary work.
+        from factory.answering import answer_question_task
+
+        return await answer_question_task(ctx, session, task)
+
     if not idea_id:
         return "compliance: task carried no idea_id"
 

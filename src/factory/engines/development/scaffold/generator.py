@@ -11,6 +11,10 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from factory.engines.development.requirements import (
+    HOUSE_STYLE,
+    render_design_for_prompt,
+)
 from factory.logging import get_logger
 from factory.sandbox.runner import DevOpsError, resolve_workspace
 from factory.settings import EngineName, Settings, TaskType
@@ -348,7 +352,12 @@ async def generate_scaffold(
         # don't hand it over. The page describes a product; where the idea came from
         # cannot inform that, so passing it only creates a way to get this wrong.
         "\n"
-        f'Analytics beacon URL (POST JSON {{"path": ..., "referrer": ...}} here, '
+        # The same guidelines the gap check will judge the result against. One
+        # rendering shared by builder and reviewer, so they cannot work to two
+        # different readings of the same standard.
+        + render_design_for_prompt(HOUSE_STYLE)
+        + "\n\n"
+        + f'Analytics beacon URL (POST JSON {{"path": ..., "referrer": ...}} here, '
         f"exactly, verbatim): {analytics_url}\n\n"
     )
     if existing_files:

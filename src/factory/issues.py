@@ -40,7 +40,20 @@ SAME_ISSUE_THRESHOLD = 0.6
 #: must never auto-commission a repair; they are recorded so a manager can see the
 #: whole backlog rather than only what is broken.
 KINDS = ("bug", "ui", "content", "regression", "improvement", "feature_request")
-ACTIONABLE_KINDS = ("bug", "ui", "content", "regression")
+#: `feature_request` is here now, and was deliberately absent before. The reason it
+#: was excluded was sound: a request has no "expected behaviour" to restore, so an
+#: agent handed one would invent a specification and then build against its own
+#: invention.
+#:
+#: What changed is that it no longer has to. An agent that cannot tell what was
+#: meant reports RESULT: BLOCKED with a question, the work parks, and somebody who
+#: knows answers it (`factory/comms.py`). The exclusion was a workaround for having
+#: no way to ask; keeping it now would mean refusing work the organisation can
+#: actually do.
+#:
+#: `improvement` stays out. It is not a request from anyone -- it is a reviewer
+#: noticing something could be better, with no one to ask what "better" means.
+ACTIONABLE_KINDS = ("bug", "ui", "content", "regression", "feature_request")
 
 SEVERITIES = ("critical", "high", "medium", "low")
 

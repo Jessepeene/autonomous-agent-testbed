@@ -142,6 +142,12 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
     fixed_signals = await gather_signals(sources) if sources else []
     scouted = await scout_signals(ctx, session, task)
     signals = fixed_signals + scouted
+    if TaskKind(task.kind) is TaskKind.ANSWER_QUESTION:
+        # A question from another department, arriving as ordinary work.
+        from factory.answering import answer_question_task
+
+        return await answer_question_task(ctx, session, task)
+
     if not signals:
         return "discovery: no signals returned this cycle"
 

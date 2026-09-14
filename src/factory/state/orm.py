@@ -1396,3 +1396,42 @@ class IdeaEvidence(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class Question(Base):
+    """One department asking another something it cannot answer for itself.
+
+    The counterpart to `Interrupt`, which is the same shape addressed to a human.
+    Keeping them separate rather than adding a recipient column to interrupts is
+    deliberate: an interrupt carries human-delivery machinery (Telegram, reminders,
+    a reason vocabulary the person recognises) that a department-to-department
+    question has no use for, and an unanswered question must not read as an
+    unanswered escalation on someone's list.
+
+    `blocking_task_id` is what makes this work rather than correspondence. A
+    question nobody is blocked on is a note; a question that resumes nothing when
+    answered is a conversation the factory cannot act on.
+    """
+
+    __tablename__ = "questions"
+
+    id: Mapped[str] = _pk()
+    asked_by_engine: Mapped[str] = mapped_column(String(32), nullable=False)
+    asked_by_task_id: Mapped[str | None] = mapped_column(String(32))
+    #: The work waiting on this. Deferred rather than failed while the question is
+    #: open, and released the moment it is answered.
+    blocking_task_id: Mapped[str | None] = mapped_column(String(32))
+    product_id: Mapped[str | None] = mapped_column(String(32))
+    #: An engine name routes into that department's queue; `human` falls back to the
+    #: interrupt path. The fallback is what makes this useful before any department
+    #: can answer -- a surfaced question beats a silent retry.
+    asked_of: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    context: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="open")
+    answer: Mapped[str | None] = mapped_column(Text)
+    answered_by_task_id: Mapped[str | None] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

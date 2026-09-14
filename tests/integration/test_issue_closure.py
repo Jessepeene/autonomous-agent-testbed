@@ -394,3 +394,75 @@ async def test_a_fix_that_never_shipped_is_not_a_reason_to_close_the_issue(
     product = await repository.get_product(session, "prod-diverged")
     assert product is not None
     assert product.workspace_undeployed is False
+
+
+async def test_a_question_parks_work_and_an_answer_releases_it(session: AsyncSession) -> None:
+    """The channel end to end: ask, park, answer, resume.
+
+    The property that makes this a channel rather than a mailbox. A question
+    nobody is blocked on is a note; a question that resumes nothing when answered
+    is a conversation the factory cannot act on.
+    """
+    from datetime import UTC, datetime
+
+    from factory.settings import EngineName
+    from factory.state.orm import Task
+    from factory.state.schemas import TaskKind, TaskStatus
+
+    await _shipped_product(session, "prod-comms", "A product with a question")
+    session.add(
+        Task(
+            id="task-blocked",
+            kind=TaskKind.PATCH_PRODUCT.value,
+            engine=EngineName.DEVELOPMENT.value,
+            status=TaskStatus.PENDING.value,
+            idempotency_key="comms-test-task",
+            payload={},
+            product_id="prod-comms",
+            attempt_count=0,
+            not_before=datetime.now(UTC),
+        )
+    )
+    await session.flush()
+
+    question = await repository.ask_question(
+        session,
+        asked_by_engine=EngineName.DEVELOPMENT.value,
+        asked_of=EngineName.MARKETING.value,
+        question="Which segment is this page for?",
+        blocking_task_id="task-blocked",
+        product_id="prod-comms",
+    )
+    assert question.status == "open"
+
+    # Nobody else's queue is polluted: a question is addressed, not broadcast.
+    assert await repository.open_questions_for(session, EngineName.MARKETING.value)
+    assert not await repository.open_questions_for(session, EngineName.FINANCE.value)
+
+    released = await repository.answer_question(
+        session, question_id=question.id, answer="[established] Mobile engineering leads."
+    )
+
+    assert released == "task-blocked", "answering must release the work that was waiting"
+    assert not await repository.open_questions_for(session, EngineName.MARKETING.value)
+
+    # And the answer reaches the resumed work, or it blocks again on the same thing.
+    waiting = await repository.answered_questions_for_task(session, "task-blocked")
+    assert len(waiting) == 1
+    assert "Mobile engineering leads" in (waiting[0].answer or "")
+
+
+async def test_an_unanswered_question_releases_nothing(session: AsyncSession) -> None:
+    """A question that was never answered must not look like one that was."""
+    await _shipped_product(session, "prod-comms-2", "A product with an open question")
+    question = await repository.ask_question(
+        session,
+        asked_by_engine="development",
+        asked_of="human",
+        question="Is the price final?",
+        blocking_task_id=None,
+        product_id="prod-comms-2",
+    )
+
+    assert await repository.answered_questions_for_task(session, "task-nonexistent") == []
+    assert question.status == "open"

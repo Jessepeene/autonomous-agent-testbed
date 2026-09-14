@@ -129,12 +129,25 @@ class TestActionability:
     def test_defects_may_commission_a_repair(self, kind: str) -> None:
         assert issues.is_actionable(kind)
 
-    @pytest.mark.parametrize("kind", ["improvement", "feature_request"])
-    def test_wishes_may_not(self, kind: str) -> None:
-        """A feature request has no "expected behaviour" to restore, so a repair
-        agent handed one would invent a specification and then build against it.
-        Recorded so a manager sees the whole backlog; never auto-assigned."""
-        assert not issues.is_actionable(kind)
+    def test_a_feature_request_may_now_commission_work(self) -> None:
+        """It could not before, and the reason was sound: a request has no "expected
+        behaviour" to restore, so an agent handed one would invent a specification
+        and build against its own invention.
+
+        That exclusion was a workaround for having no way to ask. An agent that
+        cannot tell what was meant now reports RESULT: BLOCKED with a question, the
+        work parks without costing repair budget, and whoever knows answers it. With
+        the ask available, refusing the work would mean declining something the
+        organisation can actually do."""
+        assert issues.is_actionable("feature_request")
+
+    def test_an_improvement_still_may_not(self) -> None:
+        """The one that stays out, and for a different reason than feature_request.
+
+        An improvement is not a request from anyone -- it is a reviewer noticing
+        something could be better. There is no asker to ask what "better" means, so
+        the question that unblocks a feature request has no recipient here."""
+        assert not issues.is_actionable("improvement")
 
     def test_every_actionable_kind_is_a_real_kind(self) -> None:
         assert set(issues.ACTIONABLE_KINDS) <= set(issues.KINDS)

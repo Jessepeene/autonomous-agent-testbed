@@ -33,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from factory.logging import get_logger
 from factory.settings import EngineName, TaskType
 from factory.state import repository
-from factory.state.schemas import ValidatedIdea, WorkRequirements
+from factory.state.schemas import DesignGuidelines, ValidatedIdea, WorkRequirements
 from factory.supervisor.context import FactoryContext
 
 log = get_logger(__name__)
@@ -213,3 +213,82 @@ def render_for_prompt(requirements: WorkRequirements) -> str:
         lines += ["", "OUT OF SCOPE (deliberately not built -- do not add or flag these):"]
         lines += [f"- {item}" for item in requirements.out_of_scope]
     return "\n".join(lines) + "\n\n" + PAGE_POLICY
+
+
+#: The house style every page is built and judged against until a Design department
+#: exists to author one per product. In code rather than the database on purpose:
+#: nobody writes it yet, and a stored artifact with no author is a table with one
+#: row that drifts from the prompt beside it. When Design exists it produces these,
+#: Development asks for them (`factory/comms.py`), and this becomes the fallback.
+#:
+#: What makes it different from the guidance that was already in the builder's
+#: prompt is that it is *rendered into the gap check*, so a page can be failed
+#: against it. Before this, "it looks machine-generated" was true, checkable by
+#: eye, and invisible to every automated judge -- which is why a human had to catch
+#: a page built from the Tailwind slate ramp with a navy gradient hero and no
+#: webfont.
+HOUSE_STYLE = DesignGuidelines(
+    direction=(
+        "Design for the buyer's own world rather than for 'a landing page'. A tool "
+        "for CI engineers can borrow from terminal output, build logs, monospace "
+        "timings and pipeline diagrams; one for accountants from ledgers and "
+        "reconciliation. Specific and slightly unexpected beats tasteful and "
+        "anonymous -- anonymous is what generated pages look like."
+    ),
+    palette=[
+        "Choose 4-6 named hex values for this product and state them before building",
+        "Pick the neutrals rather than inheriting them: a grey nudged toward the "
+        "accent hue reads as chosen, a stock mid-grey reads as untouched",
+        "Spend boldness in one place and keep everything around it quiet",
+    ],
+    typography=(
+        "A characterful display face paired with a comfortable body face, both from "
+        "Google Fonts with real fallback stacks. Set a type scale and hold to it; "
+        "keep running text near 65 characters wide."
+    ),
+    must_hold=[
+        "The page loads at least one webfont; a system-font-only stack is not a "
+        "typographic choice",
+        "The palette is specific to this product rather than a framework's default "
+        "ramp",
+        "Real, specific copy throughout -- never lorem-ipsum or placeholder text",
+        "Legible on a phone: no horizontal scrolling, tap targets a thumb can hit",
+    ],
+    must_avoid=[
+        "The Tailwind slate/gray ramp (#f8fafc, #64748b, #e2e8f0, #cbd5e1, #0f172a, "
+        "#1e293b) or any other framework's stock palette",
+        "A dark navy or purple-to-blue gradient hero",
+        "-apple-system, Inter or Space Grotesk as the only typeface",
+        "Emoji used as section markers",
+        "Every section centered",
+        "The same rounded-corner card treatment repeated down the page",
+        "Three feature cards in a row with an icon above each",
+    ],
+)
+
+
+def render_design_for_prompt(guidelines: DesignGuidelines) -> str:
+    """Design guidelines as an instruction block, for the builder and the reviewer.
+
+    The same chokepoint shape `render_for_prompt` has, and for the same reason: a
+    standard only works if everyone who acts on it reads the identical text.
+    """
+    lines = [
+        "DESIGN GUIDELINES. The page is judged against these as well as its "
+        "acceptance criteria.",
+        "",
+        f"Direction: {guidelines.direction}",
+        "",
+        "Palette:",
+    ]
+    lines += [f"- {item}" for item in guidelines.palette]
+    lines += ["", f"Typography: {guidelines.typography}", "", "These must hold:"]
+    lines += [f"- {item}" for item in guidelines.must_hold]
+    if guidelines.must_avoid:
+        lines += [
+            "",
+            "These must not appear -- each is a default rather than a decision, and "
+            "together they are what a generated page looks like:",
+        ]
+        lines += [f"- {item}" for item in guidelines.must_avoid]
+    return "\n".join(lines)

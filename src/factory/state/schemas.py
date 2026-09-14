@@ -78,6 +78,11 @@ class TaskKind(StrEnum):
     #: Tallies a validation run's interest signals against a threshold and either
     #: enqueues BUILD_MVP or retires the product.
     EVALUATE_VALIDATION = "evaluate_validation"
+    #: One department answering another. Answering is *work*, not a tool call --
+    #: it arrives in the recipient's queue and is picked up like anything else, so
+    #: it cannot be skipped by an agent that forgot to look, and the answer is on
+    #: the record without anyone choosing to log it.
+    ANSWER_QUESTION = "answer_question"
     #: Tallies a running AB test's per-variant outcomes and concludes it once
     #: either a winner is statistically significant or its time budget expires.
     #: A pure DB decision, no code generation -- see EVALUATE_VALIDATION, same shape.
@@ -849,3 +854,56 @@ class DemandAssessment(Contract):
     #: Their own words for the problem. Copy that uses a different vocabulary than
     #: the buyer reads as written by someone who has not done the job.
     their_vocabulary: list[str] = Field(default_factory=list, max_length=12)
+
+
+class DepartmentAnswer(Contract):
+    """One department's answer to another's question.
+
+    Structured rather than free text so that "I do not know" is a *value* the asker
+    can branch on, instead of a sentence somebody has to notice inside a paragraph.
+    An answer that sounds confident and is invented is worse than no answer, because
+    the asker cannot tell the difference and will build on it.
+    """
+
+    answer: str = Field(min_length=1)
+    #: How much weight the asker should give this. `established` means the record
+    #: settles it; `inferred` means a judgement from partial evidence, which is
+    #: often useful and must never be mistaken for the first; `unknown` means the
+    #: question cannot be answered from here.
+    confidence: Literal["established", "inferred", "unknown"]
+    #: What it relied on -- the acceptance criteria, the deployed page, an issue,
+    #: the outreach log. Lets the asker judge the answer rather than take it.
+    basis: str = Field(default="")
+    #: For `unknown`: who or what would settle it. The useful half of not knowing,
+    #: and what stops a dead end being the end of the exchange.
+    who_would_know: str = Field(default="")
+
+
+class DesignGuidelines(Contract):
+    """How a page should look, in a form a reviewer can fail it against.
+
+    The gap requirements already closed, for design. Acceptance criteria made
+    "does it do what it was for" checkable; nothing made "does it look like a real
+    company built it" checkable, so a page could be judged on every criterion and
+    still ship reading as machine-generated -- which is exactly what happened, and
+    only a human caught it.
+
+    Written to be *falsifiable*, which is what separates this from the prose that
+    was already in the builder's prompt. "Professional and credible styling" cannot
+    be failed honestly; "the page uses a webfont, not only a system stack" can.
+    """
+
+    #: The visual idea in one or two sentences, specific to this product's world.
+    #: Generic direction is how every page ends up looking the same.
+    direction: str = Field(min_length=20)
+    #: Named hex values with the role each plays. Stated up front because a palette
+    #: assembled while writing CSS is a framework default with extra steps.
+    palette: list[str] = Field(min_length=2, max_length=8)
+    #: The pairing and what each face is for. A system-font-only page reads as
+    #: unstyled regardless of how good its layout is.
+    typography: str = Field(min_length=10)
+    #: Checkable statements a reviewer can hold the built page to.
+    must_hold: list[str] = Field(min_length=1, max_length=8)
+    #: The specific defaults that make a page read as generated. Named rather than
+    #: described, because "avoid generic design" is not something anyone can check.
+    must_avoid: list[str] = Field(default_factory=list, max_length=10)

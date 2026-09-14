@@ -66,6 +66,12 @@ async def _check_for_ledger_anomalies(session: AsyncSession) -> None:
 
 
 async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
+    if TaskKind(task.kind) is TaskKind.ANSWER_QUESTION:
+        # A question from another department, arriving as ordinary work.
+        from factory.answering import answer_question_task
+
+        return await answer_question_task(ctx, session, task)
+
     kind = TaskKind(task.kind)
     if kind is not TaskKind.RECONCILE_REVENUE:
         return f"finance: unsupported task kind {task.kind}"
