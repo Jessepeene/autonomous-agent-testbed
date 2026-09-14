@@ -47,16 +47,8 @@ that has not been built yet. It is not the product.
 **Write criteria about THIS product only.** A standing policy already covers what \
 every page must and must not do -- present-tense product framing, no invented \
 evidence, nothing implying the visitor can buy today, and nothing internal to this \
-factory appearing on the page. That policy is attached to every build and every \
-review automatically, so you neither need to restate it nor may contradict it.
-
-In particular, never write a criterion asking the page to cite, link or mention \
-where the idea came from, to describe itself as a test, or to say the product does \
-not exist yet. Those are policy questions, already answered -- and a criterion is \
-what a build is judged against, so one that disagrees with the policy does real \
-damage. One did: "the page links to the real public issue thread used as the need \
-signal" put an internal scraped-from URL in front of customers, because the builder \
-obeyed the criteria over its own instructions.
+factory appearing on the page. It is attached to every build and every review \
+automatically, so you neither need to restate it nor may contradict it.
 
 What belongs here is everything specific to this idea: the problem this page has to \
 name, who it must speak to, the actual price, and what a visitor has to be able to \
@@ -111,20 +103,16 @@ async def write_landing_page_requirements(
         f"Problem it claims to solve: {idea.problem_statement}\n"
         f"Who it is for: {idea.target_niche}\n"
         f"How it would make money: {idea.monetization_hypothesis}\n"
-        # Labelled, for the same reason the codegen prompt labels it -- and fixing
-        # it there and not here is why the defect came straight back. An unlabelled
-        # "evidence" URL handed to a writer becomes material: the codegen prompt was
-        # told plainly not to put factory-internal provenance on the page, and the
-        # criteria written from *this* prompt then required it
-        # ("SHOULD: the page links to the real public issue thread used as the need
-        # signal"), so the builder obeyed the criteria, which is what it is judged
-        # against. One field, two prompts, and only one of them was fixed.
-        f"Internal provenance, for your judgement only and never to become a "
-        f"criterion: this idea came from {idea.evidence_count} corroborating "
-        f"signal(s) at {idea.source_url}. Never write a criterion asking the page "
-        f"to link, cite or mention where the idea came from -- that is a record of "
-        f"how this factory works, and a visitor seeing it learns the page was "
-        f"generated from a scraped thread.\n"
+        # `source_url` and `evidence_count` are deliberately NOT passed. They were,
+        # labelled as internal and with an explicit instruction not to cite them,
+        # and the model wrote "SHOULD: the page links to the real public issue
+        # thread used as the need signal" anyway -- which put the scraped-from URL
+        # in front of customers, because a build is judged against its criteria.
+        #
+        # Jesse's call, and it is the right shape of fix: not a better warning, just
+        # don't hand it over. Nothing here needs it. Criteria describe what the page
+        # must say and do; where the idea came from cannot inform any of that, so
+        # passing it only creates a way to get this wrong.
         + (
             f"Intended price: ${idea.self_serve_price_usd} per month\n"
             if idea.self_serve_price_usd

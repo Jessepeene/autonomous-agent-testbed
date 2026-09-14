@@ -103,3 +103,38 @@ def test_a_criterion_contradicting_policy_is_still_visible_to_the_reader() -> No
     assert PAGE_POLICY in rendered
     # The policy block comes last, so it is the final instruction the reader sees.
     assert rendered.index(PAGE_POLICY) > rendered.index("links to the real public issue thread")
+
+
+def test_no_page_building_prompt_receives_the_scraped_source_url() -> None:
+    """The simplest guarantee available: you cannot leak what you never had.
+
+    It was passed to all three prompts -- the requirements writer and both codegen
+    paths -- each time labelled as internal and with an explicit instruction not to
+    cite it. A page cited it anyway ("read the corroborating discussion in this App
+    Center issue"), and criteria written from the same field demanded it.
+
+    Two rounds of better warnings did not fix it; not handing it over does. Nothing
+    in a page-building prompt needs to know where the idea came from: criteria and
+    copy describe the product, and provenance cannot inform either.
+    """
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[2] / "src" / "factory"
+    prompt_files = [
+        root / "engines" / "development" / "requirements.py",
+        root / "engines" / "development" / "scaffold" / "generator.py",
+    ]
+
+    for path in prompt_files:
+        body = path.read_text(encoding="utf-8")
+        # Comments explaining the removal are fine; an interpolation is not.
+        interpolations = [
+            line
+            for line in body.splitlines()
+            if "{idea.source_url}" in line and not line.strip().startswith("#")
+        ]
+        assert not interpolations, (
+            f"{path.name} interpolates idea.source_url into a prompt: {interpolations}. "
+            "A page-building prompt must not receive it -- labelling it as internal "
+            "was tried twice and a generated page published it both times."
+        )

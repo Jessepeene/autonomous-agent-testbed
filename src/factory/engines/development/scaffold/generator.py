@@ -340,14 +340,14 @@ async def generate_scaffold(
         f"- target self-serve price: ${idea.self_serve_price_usd:.2f}/month (context "
         f"for what to build -- the actual Checkout amount comes from "
         f"PRODUCT_PRICE_CENTS at request time, see the system prompt)\n"
-        # Labelled, because an unlabelled field called "evidence" is material to a
-        # copywriter. A generated page cited it on the live site -- "This pain is
-        # real and public: read the corroborating discussion in this App Center
-        # issue" with a link to the GitHub thread Discovery had scraped the idea
-        # from. That is internal provenance, published to customers, and the model
-        # was not wrong to use it: nothing said what the field was for.
-        f"- where we found this problem discussed (internal provenance, NOT for the "
-        f"page and never to be linked or referenced on it): {idea.source_url}\n\n"
+        # `source_url` is deliberately not passed. It was, labelled as internal and
+        # explicitly not for the page, and a generated page cited it anyway: "This
+        # pain is real and public -- read the corroborating discussion in this App
+        # Center issue", linking the GitHub thread Discovery had scraped the idea
+        # from. Jesse's call, and the right shape of fix: not a better warning, just
+        # don't hand it over. The page describes a product; where the idea came from
+        # cannot inform that, so passing it only creates a way to get this wrong.
+        "\n"
         f'Analytics beacon URL (POST JSON {{"path": ..., "referrer": ...}} here, '
         f"exactly, verbatim): {analytics_url}\n\n"
     )
@@ -422,14 +422,14 @@ async def generate_landing_page(
         f"- monetization: {idea.monetization_hypothesis}\n"
         f"- target self-serve price: ${idea.self_serve_price_usd:.2f}/month -- the "
         f"pitch should state this price\n"
-        # Labelled, because an unlabelled field called "evidence" is material to a
-        # copywriter. A generated page cited it on the live site -- "This pain is
-        # real and public: read the corroborating discussion in this App Center
-        # issue" with a link to the GitHub thread Discovery had scraped the idea
-        # from. That is internal provenance, published to customers, and the model
-        # was not wrong to use it: nothing said what the field was for.
-        f"- where we found this problem discussed (internal provenance, NOT for the "
-        f"page and never to be linked or referenced on it): {idea.source_url}\n\n"
+        # `source_url` is deliberately not passed. It was, labelled as internal and
+        # explicitly not for the page, and a generated page cited it anyway: "This
+        # pain is real and public -- read the corroborating discussion in this App
+        # Center issue", linking the GitHub thread Discovery had scraped the idea
+        # from. Jesse's call, and the right shape of fix: not a better warning, just
+        # don't hand it over. The page describes a product; where the idea came from
+        # cannot inform that, so passing it only creates a way to get this wrong.
+        "\n"
         f'Interest capture URL (POST JSON {{"email": ..., "message": ...}} here, '
         f"exactly, verbatim): {interest_url}\n\n"
         f'Analytics beacon URL (POST JSON {{"path": ..., "referrer": ...}} here, '
