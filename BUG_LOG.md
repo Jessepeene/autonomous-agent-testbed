@@ -37,6 +37,9 @@ time it's fixed, not batched up afterward.**
 23. [`max_length` on model-written prose silently discarded whole responses, for the 4th and 5th time](#23-max_length-on-model-written-prose-silently-discarded-whole-responses-for-the-4th-and-5th-time)
 24. [The release decision inherited an 8,192-token budget that thinking ate before it could answer](#24-the-release-decision-inherited-an-8192-token-budget-that-thinking-ate-before-it-could-answer)
 25. [A cosmetic finding the release judge had accepted twice counted as a wall and escalated the product](#25-a-cosmetic-finding-the-release-judge-had-accepted-twice-counted-as-a-wall-and-escalated-the-product)
+26. [A static landing page shipped `requirements.txt`, so Vercel built it as a Python app and failed](#26-a-static-landing-page-shipped-requirementstxt-so-vercel-built-it-as-a-python-app-and-failed)
+27. [The repair agent was told `readyState=ERROR` and nothing else](#27-the-repair-agent-was-told-readystateerror-and-nothing-else)
+28. [`converging` read zero blockers as a wall, escalating a build that had just been approved to ship](#28-converging-read-zero-blockers-as-a-wall-escalating-a-build-that-had-just-been-approved-to-ship)
 
 ---
 
@@ -213,6 +216,98 @@ accepted trade is evidence the judgement is being honoured.
 **Verified**: `tests/integration/test_issue_closure.py` — a medium finding seen
 four times yields `stuck == []`, and a `high` one seen three times still yields
 a wall, so the signal the filter must not destroy is pinned.
+
+---
+
+## 26. A static landing page shipped `requirements.txt`, so Vercel built it as a Python app and failed
+
+**Found**: 2026-09-14, by pulling the Vercel build log by hand after the first
+run that ever reached a deploy.
+
+**Severity**: Terminal for every validation landing page. No landing page could
+deploy, and nothing in the system could say why.
+
+**Root cause**: Vercel's zero-config detection classifies a deployment as Python
+when it sees `requirements.txt`, then demands an entrypoint:
+
+```
+Error: No python entrypoint found. Set "tool.vercel.entrypoint" in pyproject.toml
+or define an entrypoint in one of: app.py, index.py, server.py, main.py, ...
+```
+
+The page is pure static HTML by design — `LANDING_PAGE_SYSTEM` forbids backend
+logic — so that entrypoint will never exist. It carried a 15-byte
+`requirements.txt` holding `pytest`, for the `test_validation_page.py` beside
+it. Both exist so the build can be tested locally; neither has anything to do
+with what gets served. All 7 workspace files were uploaded.
+
+**Fix**: `_has_fastapi_entrypoint` already draws exactly the right line, and
+nothing acted on it. A deployment with no recognised entrypoint is static, so it
+now drops `requirements.txt`, `pyproject.toml`, `Pipfile`, `setup.py` and
+`test_*`. A real MVP keeps all of them — that is how Vercel learns what to
+install, and stripping it there would be a far worse failure than this one.
+
+**Verified**: two unit tests, one per direction — a static page ships only its
+HTML, an MVP with `app/main.py` still ships its `requirements.txt`.
+
+---
+
+## 27. The repair agent was told `readyState=ERROR` and nothing else
+
+**Found**: 2026-09-14, same deploy failure as #26 — I had to query the Vercel
+API by hand to learn what the system could not tell me.
+
+**Severity**: Unfixable-by-construction. This detail becomes the *entire* brief
+a repair agent receives (`"Deployment failed: {detail}"`), so no amount of
+repair budget could ever have closed the gap.
+
+**Root cause**: `deploy()` returned only the terminal state name. `ERROR` does
+not distinguish a syntax error from a missing entrypoint from an out-of-memory
+build. This is the instrumentation principle from `ARCHITECTURE_ROADMAP.md`
+failing in the most direct way available: *before giving an agent judgement over
+a domain, check the system can show it what an expert looks at*. A human
+deploying to Vercel reads the build log. The agent got a status word.
+
+**Fix**: fetch `/v3/deployments/{id}/events` on failure and carry the tail of the
+build output back in `detail`. Best-effort throughout — a deploy that already
+failed must not also fail to report, so every error degrades to the state name
+the caller already had.
+
+**Verified**: the endpoint and payload shape were confirmed live against the
+failed deployment before the code was written; it is what produced the quoted
+error in #26.
+
+---
+
+## 28. `converging` read zero blockers as a wall, escalating a build that had just been approved to ship
+
+**Found**: 2026-09-14, in the first run where every earlier fix held.
+
+**Severity**: Blocked the one outcome the whole loop exists to produce, and
+guaranteed that no deploy failure was ever retried even once.
+
+**Root cause**: `converging` is `blocking_now < blocking_at_last_attempt`. With
+both at zero, `0 < 0` is False, which `_heal` reads as "not converging" and
+treats as a wall. The live sequence:
+
+```
+12:51:43  gaps.recorded      gaps=0 blocking=0 met=9
+12:51:50  release.decided    decision=ship unmet_must=0 accepted=4
+12:52:02  heal_stopped       reason=not_converging blocking_now=0 blocking_before=0 stuck=0
+12:52:05  hitl.raised        heal_exhausted
+```
+
+Holding at zero is *done*, not stuck. Worse, `_heal` also handles deploy
+failures, which are not issues and never appear in these counts — so
+`blocking_now` is structurally zero on that path, and every deploy failure
+walled on its first attempt without a single retry.
+
+**Fix**: `converging` returns `None` (no signal) when `blocking_now == 0`,
+alongside the existing `None` for a first attempt.
+
+**Verified**: `tests/integration/test_issue_closure.py` — zero blockers never
+reads as a wall, while one-before-and-one-now still does and 3→1 still reads as
+converging.
 
 ---
 
