@@ -29,6 +29,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -228,6 +229,15 @@ class Product(Base):
     #: moment a build first ships (`development/graph.py::_verify_and_ship`), or
     #: on demand for a product that was already live before this existed.
     design_brief: Mapped[str | None] = mapped_column(Text)
+    #: True while the workspace holds repaired files that have not reached the
+    #: customer. The repair agent judges the workspace and its brief describes the
+    #: deployed page; those agree only while everything has shipped, and they
+    #: diverge exactly when a fix was applied and the deploy never happened. Without
+    #: this, the next repair sees the work already done, says so honestly, and the
+    #: handler closes the issues while the defects are still live.
+    workspace_undeployed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
 
     __table_args__ = (Index("ix_products_status", "status"),)
 

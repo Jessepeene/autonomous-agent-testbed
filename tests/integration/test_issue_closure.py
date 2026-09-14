@@ -345,3 +345,52 @@ async def test_a_fully_processed_product_raises_nothing(session: AsyncSession) -
     concerns = await check_pipeline_completeness(session)
 
     assert concerns == [], f"a complete pipeline must be silent; got {concerns}"
+
+
+async def test_a_fix_that_never_shipped_is_not_a_reason_to_close_the_issue(
+    session: AsyncSession,
+) -> None:
+    """The workspace and the customer are different places.
+
+    Live sequence on 2026-09-14: a repair fixed two defects a human had found on
+    the deployed page; verification escalated before deploying; the next repair
+    opened the same workspace, correctly saw the work already done, and reported
+    NOT_NEEDED. The handler then closed both issues as invalid and promoted a
+    validation landing page to LIVE -- while both defects were still on the page in
+    front of visitors.
+
+    The agent was right about the workspace and wrong about the product. Nothing
+    recorded the difference, so `workspace_undeployed` now does: set when a repair
+    changes files, cleared only by a successful ship.
+    """
+    from factory.state.schemas import ProductStatus
+
+    await _shipped_product(session, "prod-diverged", "A page whose fix never shipped")
+    product = await repository.get_product(session, "prod-diverged")
+    assert product is not None
+    assert product.workspace_undeployed is False, "a fresh product has nothing pending"
+
+    # A repair changes files; verification escalates before reaching a deploy.
+    await repository.set_product_status(
+        session, "prod-diverged", ProductStatus.PATCHING, workspace_undeployed=True
+    )
+
+    product = await repository.get_product(session, "prod-diverged")
+    assert product is not None
+    assert product.workspace_undeployed is True, (
+        "the workspace now holds a fix the customer cannot see, and that has to be "
+        "visible to the next repair -- otherwise 'already fixed here' closes an "
+        "issue that is still live"
+    )
+
+    # A successful ship is the only thing that reconciles them.
+    await repository.set_product_status(
+        session,
+        "prod-diverged",
+        ProductStatus.VALIDATING,
+        deploy_url="https://example.vercel.app",
+        workspace_undeployed=False,
+    )
+    product = await repository.get_product(session, "prod-diverged")
+    assert product is not None
+    assert product.workspace_undeployed is False

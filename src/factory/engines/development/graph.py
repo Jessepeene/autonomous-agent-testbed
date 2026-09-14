@@ -1243,7 +1243,36 @@ async def _patch_surgically(
         # true is exactly what this used to do, because usability was
         # `bool(changed_files)` and a reasoned refusal looked like a failed attempt.
         repair.restore_snapshot(workspace, ctx.settings)
-        await repository.set_product_status(session, product_id, ProductStatus.LIVE)
+
+        # The agent judged the *workspace*, and the brief described the *deployed
+        # page*. Those are the same thing only while every workspace change has
+        # shipped, and they diverge exactly when a repair applied a fix that then
+        # failed to deploy -- which is when this path is most likely to be reached,
+        # because the fix really is sitting there in the files.
+        #
+        # Observed live: a repair fixed two defects in the workspace, the verify
+        # step escalated before deploying, and the next repair looked at the same
+        # workspace, correctly saw the work already done, and closed both issues as
+        # invalid while the defects were still on the page in front of visitors.
+        # "Already fixed here" is not "fixed for the customer".
+        if product.workspace_undeployed:
+            log.info("development.repair_already_applied", product_id=product_id)
+            return await _verify_and_ship(
+                ctx,
+                session,
+                product_id=product_id,
+                product_name=product.name,
+                workspace=workspace,
+                test_command=test_command,
+                idea_id=product.idea_id,
+                task_id=task.id,
+            )
+
+        # Status is restored, never forced. Promoting a VALIDATING landing page to
+        # LIVE here treated a pitch page as a shipped product -- starting outreach
+        # against it and taking it out of the validation gate that decides whether
+        # it is worth building at all.
+        await repository.set_product_status(session, product_id, ProductStatus(product.status))
         await repository.release_product_lock(session, product_id)
         # Close what commissioned this. An agent that refuses a false brief without
         # the issue behind it closing is a loop with extra steps: the next review
@@ -1287,6 +1316,14 @@ async def _patch_surgically(
             product.idea_id,
             category="repair_rejected",
         )
+
+    # Marked before verification, not after, because the interesting case is the one
+    # where verification does *not* reach a deploy: the files are changed either way,
+    # and it is exactly then that the workspace and the live page diverge. Cleared on
+    # any successful ship.
+    await repository.set_product_status(
+        session, product_id, ProductStatus.PATCHING, workspace_undeployed=True
+    )
 
     result = await _verify_and_ship(
         ctx,
@@ -1824,7 +1861,13 @@ async def _verify_and_ship(
         # the same product_id, that harvest must still be able to fire -- reusing
         # the same key would make it silently no-op via ON CONFLICT DO NOTHING.
         await repository.set_product_status(
-            session, product_id, ProductStatus.VALIDATING, deploy_url=result.url, heal_attempts=0
+            session,
+            product_id,
+            ProductStatus.VALIDATING,
+            deploy_url=result.url,
+            heal_attempts=0,
+            # The workspace and the customer now agree again.
+            workspace_undeployed=False,
         )
         await repository.enqueue_task(
             session,
@@ -1838,7 +1881,13 @@ async def _verify_and_ship(
         return f"development: validation page for {product_id} deployed to {result.url}"
 
     await repository.set_product_status(
-        session, product_id, ProductStatus.LIVE, deploy_url=result.url, heal_attempts=0
+        session,
+        product_id,
+        ProductStatus.LIVE,
+        deploy_url=result.url,
+        heal_attempts=0,
+        # The workspace and the customer now agree again.
+        workspace_undeployed=False,
     )
     # The work this issue was assigned shipped. That is `fixed` -- a claim, not a
     # conclusion. The next review either fails to find the defect (and closes it) or
