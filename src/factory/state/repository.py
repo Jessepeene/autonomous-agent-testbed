@@ -11,6 +11,7 @@ import hashlib
 import re
 import secrets
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -3168,3 +3169,104 @@ async def get_build_kind(session: AsyncSession, product_id: str) -> str:
     """
     stmt = select(Product.build_kind).where(Product.id == product_id)
     return (await session.execute(stmt)).scalar_one_or_none() or "validation"
+
+
+@dataclass(slots=True)
+class ProductProgress:
+    """Whether work on this product is getting anywhere, assembled from rows.
+
+    The continuity a task does not have, and deliberately *not* held in an agent's
+    memory. A manager that must carry days of context across a shrinking window is
+    blinder than the judges it replaces the moment compression drops something, and
+    is trusted more. Compression fails invisibly; a query fails visibly -- you know
+    exactly what you asked for.
+
+    Every field here is a count over real rows, so nothing in it can be hallucinated
+    and every claim it supports is checkable.
+    """
+
+    attempts: int
+    blocking_now: int
+    blocking_at_last_attempt: int | None
+    #: Issues seen on three or more separate passes without ever being resolved.
+    #: The sharpest signal there is: not "we have tried a lot" but "we keep failing
+    #: at the same thing", which a heal counter could never distinguish.
+    stuck: list[str]
+    #: What was decided last time, so a second look starts from the first rather
+    #: than re-deriving it.
+    last_decision: str | None
+
+    @property
+    def converging(self) -> bool | None:
+        """True if the blocking set shrank, False if it grew or held, None on a first
+        attempt with nothing to compare against."""
+        if self.blocking_at_last_attempt is None:
+            return None
+        return self.blocking_now < self.blocking_at_last_attempt
+
+
+async def product_progress(session: AsyncSession, product_id: str) -> ProductProgress:
+    """The thread across attempts: is the gap list shrinking, and on what are we stuck?
+
+    This replaces `max_heal_cycles` as the thing that decides when to stop. A counter
+    cannot tell a run that closed two blockers and opened none at attempt five from
+    one that has re-found the same unmet criterion three times running -- the first is
+    progress and the second is a wall, and only one of them is worth another attempt.
+    """
+    open_issues = await open_issues_for(session, product_id)
+    blocking_now = sum(1 for i in open_issues if i.severity in ("critical", "high"))
+    stuck = [i.title for i in open_issues if i.times_seen >= 3]
+
+    product = await get_product(session, product_id)
+    attempts = product.heal_attempts if product else 0
+
+    previous = (
+        await session.execute(
+            select(TaskEvent)
+            .where(TaskEvent.product_id == product_id, TaskEvent.event == "release.decided")
+            .order_by(TaskEvent.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    blocking_before: int | None = None
+    last_decision: str | None = None
+    if previous is not None and previous.detail:
+        raw = previous.detail.get("open_blocking")
+        blocking_before = int(raw) if isinstance(raw, int | str) and str(raw).isdigit() else None
+        last_decision = previous.detail.get("decision")
+
+    return ProductProgress(
+        attempts=attempts,
+        blocking_now=blocking_now,
+        blocking_at_last_attempt=blocking_before,
+        stuck=stuck[:8],
+        last_decision=last_decision,
+    )
+
+
+async def close_issues_as_invalid(
+    session: AsyncSession, *, task_id: str, reason: str
+) -> int:
+    """Close the issues a task was commissioned for, because the brief was wrong.
+
+    The other half of `RESULT: NOT_NEEDED`. An agent that investigates and finds its
+    brief false now ends its own work cleanly -- but the issue that produced the
+    brief stayed open, so the next review would commission the same wrong work
+    again. Refusing without closing is a loop with extra steps.
+
+    `wont_fix` rather than `closed`: nothing was verified gone, a human decided (via
+    an employee's reasoning) that it should not be done. The distinction matters
+    because `closed` is reserved for defects a later review confirmed absent.
+    """
+    stmt = select(Issue).where(Issue.fix_task_id == task_id, Issue.status.in_(("fixing", "open")))
+    closed = 0
+    for issue in (await session.execute(stmt)).scalars().all():
+        issue.status = "wont_fix"
+        issue.closed_at = _now()
+        issue.resolution = reason[:1000]
+        closed += 1
+        log.info("issue.closed_as_invalid", issue_id=issue.id, task_id=task_id)
+    if closed:
+        await session.flush()
+    return closed

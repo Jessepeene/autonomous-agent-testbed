@@ -1243,9 +1243,16 @@ async def _patch_surgically(
         repair.restore_snapshot(workspace, ctx.settings)
         await repository.set_product_status(session, product_id, ProductStatus.LIVE)
         await repository.release_product_lock(session, product_id)
+        # Close what commissioned this. An agent that refuses a false brief without
+        # the issue behind it closing is a loop with extra steps: the next review
+        # sees the same open issue and commissions the same wrong work again.
+        closed = await repository.close_issues_as_invalid(
+            session, task_id=task.id, reason=outcome.answer[:1000]
+        )
         log.info(
             "development.repair_not_needed",
             product_id=product_id,
+            issues_closed=closed,
             detail=outcome.summary[:200],
         )
         return f"development: no change needed for {product_id} -- {outcome.answer[:300]}"

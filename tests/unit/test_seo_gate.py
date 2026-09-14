@@ -107,7 +107,23 @@ def _no_real_db(monkeypatch: pytest.MonkeyPatch) -> None:
         recorded_issues.append(kwargs)
         return object(), True
 
+
+    async def fake_product_progress(session: object, product_id: str) -> object:
+        # The convergence thread, assembled from rows in production. Nothing here
+        # exercises it, so a first-attempt shape (nothing to compare against) keeps
+        # the release judgement on its normal path.
+        from factory.state.repository import ProductProgress
+
+        return ProductProgress(
+            attempts=0,
+            blocking_now=0,
+            blocking_at_last_attempt=None,
+            stuck=[],
+            last_decision=None,
+        )
+
     monkeypatch.setattr(repository, "set_product_status", fake_set_product_status)
+    monkeypatch.setattr(repository, "product_progress", fake_product_progress)
     monkeypatch.setattr(repository, "record_issue", fake_record_issue)
     monkeypatch.setattr(repository, "live_requirements", fake_live_requirements)
     monkeypatch.setattr(repository, "open_issues_for", fake_open_issues_for)

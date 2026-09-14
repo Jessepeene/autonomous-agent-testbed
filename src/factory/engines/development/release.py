@@ -67,6 +67,10 @@ Rules for the judgement itself:
 product.
 - A finding raised on many reviews without ever being fixed is evidence about the \
 repair loop, not fresh evidence about the product.
+- If you are told the blocking set is not shrinking, that is the signal to stop \
+patching. Two more attempts at something that has not moved in three is worse than \
+saying so: choose rethink and say what the approach is missing. Nothing counts \
+attempts on your behalf any more, so noticing a wall is your job.
 - rethink and abandon are real options and under-used ones. Say so when the honest \
 answer is that more patching will not help.
 
@@ -93,6 +97,7 @@ async def decide_release(
     `requirements` takes. Failing to reach a judgement must not become an outage.
     """
     open_issues = await repository.open_issues_for(session, product_id)
+    progress = await repository.product_progress(session, product_id)
     blocking = council.deploy_blocking
 
     facts = [f"Product: {product_name}", ""]
@@ -121,12 +126,35 @@ async def decide_release(
             for i in open_issues[:20]
         ]
 
-    facts += [
-        "",
-        f"Repair attempts on this product so far: {heal_attempts}.",
+    # The thread across attempts, assembled from rows rather than remembered. This
+    # is what replaces a heal counter: "we have tried three times" cannot tell
+    # progress from a wall, and "the blocking set went 6 -> 4 -> 4 and these two
+    # criteria have failed on every pass" can.
+    facts += ["", f"Repair attempts on this product so far: {heal_attempts}."]
+    if progress.blocking_at_last_attempt is not None:
+        direction = {
+            True: "fewer than last time -- this is converging",
+            False: "no better than last time -- this is not converging",
+        }[bool(progress.converging)]
+        facts.append(
+            f"Blocking issues: {progress.blocking_now} now, "
+            f"{progress.blocking_at_last_attempt} at the last attempt. {direction}."
+        )
+    if progress.stuck:
+        facts += [
+            "",
+            "Failed on three or more separate passes without ever being resolved. "
+            "This is evidence about the approach, not fresh evidence about the build:",
+        ]
+        facts += [f"  - {title}" for title in progress.stuck]
+    if progress.last_decision:
+        facts.append(
+            f"\nThe last release decision on this product was: {progress.last_decision}."
+        )
+    facts.append(
         "The test suite passes and the deterministic contract checks pass; those are "
-        "not in question.",
-    ]
+        "not in question."
+    )
 
     try:
         decision = await ctx.llm.parse(
@@ -177,6 +205,10 @@ async def decide_release(
             "accepted": decision.accepted_issues[:10],
             "fix_first": decision.fix_first[:10],
             "heal_attempts": heal_attempts,
+            # Recorded so the *next* decision can compare and see a direction.
+            # Convergence is not knowable from one snapshot, and this is how the
+            # thread survives without anything having to remember it.
+            "open_blocking": progress.blocking_now,
         },
     )
     log.info(
