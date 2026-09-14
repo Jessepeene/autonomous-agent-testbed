@@ -164,6 +164,15 @@ async def decide_release(
             prompt="\n".join(facts),
             engine=EngineName.DEVELOPMENT,
             task_id=task_id,
+            # Sized here rather than inherited from ANALYSIS's 8_192, which thinking
+            # consumed entirely before the tool call was emitted: observed live as
+            # "ran out of tokens before emitting the ReleaseDecision tool call
+            # (max_tokens=8192, content_block_types=['thinking'])". This is the
+            # deciding call in the whole build -- it weighs the requirements, every
+            # open issue and the convergence history, and then has to write a
+            # rationale a human can act on. `find_requirement_gaps` already sizes
+            # its own call for the same reason; this one was left on the default.
+            max_tokens=32_000,
         )
     except Exception as exc:
         log.warning("release.undecided", product_id=product_id, detail=str(exc)[:200])

@@ -34,6 +34,8 @@ time it's fixed, not batched up afterward.**
 20. [40 identical provider-outage escalations mislabeled as legal review, spamming past the dedup guard](#20-40-identical-provider-outage-escalations-mislabeled-as-legal-review-spamming-past-the-dedup-guard)
 21. [Live-product auditing only ran when the factory was idle](#21-live-product-auditing-only-ran-when-the-factory-was-idle)
 22. [An issue filed `open` never closed, so convergence could only ever read "not converging"](#22-an-issue-filed-open-never-closed-so-convergence-could-only-ever-read-not-converging)
+23. [`max_length` on model-written prose silently discarded whole responses, for the 4th and 5th time](#23-max_length-on-model-written-prose-silently-discarded-whole-responses-for-the-4th-and-5th-time)
+24. [The release decision inherited an 8,192-token budget that thinking ate before it could answer](#24-the-release-decision-inherited-an-8192-token-budget-that-thinking-ate-before-it-could-answer)
 
 ---
 
@@ -90,6 +92,83 @@ a clean run — plus the two failure modes that would be worse than the bug: a
 still-present defect must stay open, and one check must never close another's
 findings. `tests/unit/test_seo_gate.py` asserts a clean gate pass runs a close
 pass for both deterministic checks with an empty found-set.
+
+---
+
+## 23. `max_length` on model-written prose silently discarded whole responses, for the 4th and 5th time
+
+**Found**: 2026-09-14, reading `/srv/factory-logs/factory.jsonl` after noticing
+4 `release.undecided` out of 9 release judgements.
+
+**Severity**: Total loss of the affected call, silently, with a retry that fails
+the same way. Two fired in production the same morning; the audit found the same
+cap on **30 fields across 12 more schemas**, every one of them armed.
+
+**Root cause**: `RequirementGap.evidence` capped at 600 and
+`ReleaseDecision.rationale` capped at 1500. The model is never told the limit
+exists, so a verbose but entirely correct answer becomes a validation error and
+the whole response is thrown away:
+
+```
+deepseek output failed ReleaseDecision validation: 1 validation error
+rationale  String should have at most 1500 characters
+```
+
+That discarded a fully-reasoned release decision — the highest-judgement call in
+the company — for being 1,501 characters long.
+
+These caps bound nothing real. The columns behind them are `Text`, every consumer
+truncates at the point of use, and the actual ceiling is `max_tokens`, enforced
+by the API.
+
+**The real root cause is that the rule was a docstring.** `Contract` has said
+"do not put a `max_length` on a prose field a model writes" since the third
+occurrence (`ReviewVerdict.summary` at 200, `details` at 2000). Both schemas that
+failed here were written *after* that docstring. A rule you have to remember at
+the moment you add a field is not a control.
+
+**Fix**: `tests/unit/test_prose_fields_uncapped.py` — enumerates every `Contract`
+subclass and fails on any bare-`str` field carrying a `max_length`. 30 caps
+stripped from `schemas.py` to make it pass. Deliberately still allowed: list caps
+(they bound item count, which is a real cost control) and `min_length` (an empty
+rationale is a genuine defect worth failing on). One allowlisted structural
+field, `LeadAssessment.ref`, a footnote marker like "[3]".
+
+**Verified**: the rule test is parametrised per model, so the failure message
+names the offending model and fields; 1,257 unit tests pass.
+
+---
+
+## 24. The release decision inherited an 8,192-token budget that thinking ate before it could answer
+
+**Found**: 2026-09-14, same log sweep as #23 — the other half of the 4
+`release.undecided`.
+
+**Severity**: The deciding call in the build silently fails and the caller falls
+back to its previous deterministic behaviour, so a product does not ship and
+nothing says why.
+
+**Root cause**: `decide_release` called `ctx.llm.parse` without `max_tokens`,
+inheriting `TaskType.ANALYSIS`'s 8,192 default. DeepSeek's thinking budget is
+`max(1024, max_tokens // 2)`, so reasoning consumed the budget before the tool
+call was ever emitted:
+
+```
+deepseek ran out of tokens before emitting the ReleaseDecision tool call
+(max_tokens=8192, content_block_types=['thinking'])
+```
+
+This is the same per-category-constant problem that `find_requirement_gaps`
+already fixed for itself — and that fix is 30 lines above this call site, with a
+comment explaining exactly why. The release judgement weighs the requirements,
+every open issue and the convergence history, then writes a rationale a human
+has to act on; 8,192 was never sized for it.
+
+**Fix**: `max_tokens=32_000` at the call site, where the caller knows the shape
+of the call, matching `find_requirement_gaps`.
+
+**Verified**: shipped alongside #22 and #23; the release judgement is the thing
+being watched on the next live build.
 
 ---
 

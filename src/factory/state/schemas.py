@@ -240,15 +240,15 @@ class OrchestratorDecision(Contract):
         default=None,
         description="With SPAWN_AGENT, the single concrete objective for that agent.",
     )
-    rationale: str = Field(min_length=1, max_length=600)
+    rationale: str = Field(min_length=1)
 
 
 # ----------------------------------------------------------------------- discovery
 
 
 class GeneratedIdea(Contract):
-    problem_statement: str = Field(min_length=20, max_length=800)
-    target_niche: str = Field(min_length=3, max_length=200)
+    problem_statement: str = Field(min_length=20)
+    target_niche: str = Field(min_length=3)
     source_url: HttpUrl
 
 
@@ -310,10 +310,10 @@ class ScoredIdea(Contract):
         "defensibility",
     )
 
-    problem_statement: str = Field(min_length=20, max_length=800)
-    target_niche: str = Field(min_length=3, max_length=200)
+    problem_statement: str = Field(min_length=20)
+    target_niche: str = Field(min_length=3)
     source_url: HttpUrl
-    monetization_hypothesis: str = Field(min_length=20, max_length=800)
+    monetization_hypothesis: str = Field(min_length=20)
     pain_severity: Annotated[float, Field(ge=0.0, le=1.0)]
     willingness_to_pay: Annotated[float, Field(ge=0.0, le=1.0)]
     build_feasibility: Annotated[float, Field(ge=0.0, le=1.0)]
@@ -333,7 +333,7 @@ class ScoredIdea(Contract):
     #: more likely to collapse to a safe average under constrained decoding.
     #: Defaulted, like `defensibility` itself, for the same reason: a stale served
     #: prompt that doesn't ask for it must not turn into a hard schema failure.
-    defensibility_reasoning: str = Field(default="", max_length=800)
+    defensibility_reasoning: str = Field(default="")
     #: The 5th weighted dimension. Defaulted (unlike `adoption_ease` above) rather
     #: than required: `learning/prompts.py::get_prompt` serves whatever's in the DB
     #: with no re-sync path, so a stale served prompt that never asks for this field
@@ -365,7 +365,7 @@ class ScoredIdea(Contract):
     #: veto every idea -- it must do nothing until the served prompt actually
     #: asks for it.
     gut_check_passed: bool = True
-    gut_check_reasoning: str = Field(default="", max_length=500)
+    gut_check_reasoning: str = Field(default="")
 
     @classmethod
     def default_weights(cls) -> dict[str, float]:
@@ -415,9 +415,9 @@ class LIAVerdict(Contract):
     role-to-utility link has not established a lawful basis for contact.
     """
 
-    role_utility_link: str = Field(min_length=20, max_length=1000)
-    necessity: str = Field(min_length=20, max_length=1000)
-    balancing_test: str = Field(min_length=20, max_length=1000)
+    role_utility_link: str = Field(min_length=20)
+    necessity: str = Field(min_length=20)
+    balancing_test: str = Field(min_length=20)
     passed: bool
     #: Holistic sign-off, independent of the three limbs above and of `passed`
     #: itself: a justification can be well-grounded in the right facts (the
@@ -431,12 +431,12 @@ class LIAVerdict(Contract):
     #: `learning/allowlist.py::MUTABLE_KEYS`, which excludes every LIA prompt
     #: by omission), so there is no stale-served-prompt risk to default around.
     would_a_careful_reviewer_approve: bool
-    reviewer_concern: str = Field(default="", max_length=500)
+    reviewer_concern: str = Field(default="")
 
 
 class ComplianceAssessment(Contract):
     status: ComplianceStatus
-    justification: str = Field(min_length=20, max_length=2000)
+    justification: str = Field(min_length=20)
     confidence: Annotated[float, Field(ge=0.0, le=1.0)]
     lia_verdict: LIAVerdict | None = None
 
@@ -458,7 +458,7 @@ class LeadAssessment(Contract):
 
     ref: str = Field(min_length=1, max_length=8)
     status: ComplianceStatus
-    justification: str = Field(min_length=20, max_length=2000)
+    justification: str = Field(min_length=20)
     confidence: Annotated[float, Field(ge=0.0, le=1.0)]
     lia_verdict: LIAVerdict | None = None
 
@@ -502,7 +502,7 @@ class EntityVerdict(Contract):
 
     entity_type: EntityType
     confidence: Annotated[float, Field(ge=0.0, le=1.0)]
-    evidence: str = Field(min_length=10, max_length=1500)
+    evidence: str = Field(min_length=10)
 
 
 # --------------------------------------------------------------------------- leads
@@ -520,14 +520,14 @@ class LeadRecord(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    first_name: str = Field(min_length=1, max_length=100)
-    last_name: str = Field(min_length=1, max_length=100)
-    job_title: str = Field(min_length=1, max_length=200)
-    company: str = Field(min_length=1, max_length=200)
-    work_email: str = Field(min_length=5, max_length=320)
+    first_name: str = Field(min_length=1)
+    last_name: str = Field(min_length=1)
+    job_title: str = Field(min_length=1)
+    company: str = Field(min_length=1)
+    work_email: str = Field(min_length=5)
 
     # Proof-of-origin. Non-optional here and NOT NULL in the database.
-    source_url: str = Field(min_length=8, max_length=2000)
+    source_url: str = Field(min_length=8)
     scraped_at: datetime
 
     @field_validator("work_email")
@@ -573,11 +573,11 @@ class ReviewCategory(StrEnum):
 class ReviewFinding(Contract):
     category: ReviewCategory
     severity: Literal["low", "medium", "high", "critical"]
-    file: str = Field(max_length=500)
+    file: str = Field()
     line: int | None = Field(default=None, ge=1)
-    summary: str = Field(min_length=10, max_length=500)
-    failure_scenario: str = Field(min_length=10, max_length=1500)
-    remediation: str = Field(min_length=10, max_length=1500)
+    summary: str = Field(min_length=10)
+    failure_scenario: str = Field(min_length=10)
+    remediation: str = Field(min_length=10)
 
 
 class ReviewVerdict(Contract):
@@ -591,7 +591,7 @@ class ReviewVerdict(Contract):
 class HealingInstructions(Contract):
     """What the dev agent must change before the build is re-reviewed."""
 
-    summary: str = Field(min_length=10, max_length=1000)
+    summary: str = Field(min_length=10)
     ordered_steps: list[str] = Field(min_length=1, max_length=25)
     blocking_findings: list[ReviewFinding] = Field(default_factory=list, max_length=40)
 
@@ -661,15 +661,15 @@ class CouncilResult(BaseModel):
 
 
 class GeneratedFile(Contract):
-    path: str = Field(min_length=1, max_length=400)
+    path: str = Field(min_length=1)
     contents: str
 
 
 class ScaffoldPlan(Contract):
-    product_name: str = Field(min_length=2, max_length=120)
-    summary: str = Field(min_length=20, max_length=2000)
+    product_name: str = Field(min_length=2)
+    summary: str = Field(min_length=20)
     files: list[GeneratedFile] = Field(min_length=1, max_length=80)
-    test_command: str = Field(min_length=1, max_length=400)
+    test_command: str = Field(min_length=1)
 
 
 class AcceptanceCriterion(Contract):
