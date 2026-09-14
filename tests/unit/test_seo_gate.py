@@ -221,7 +221,10 @@ async def test_a_missing_seo_requirement_is_recorded_and_does_not_short_circuit(
     monkeypatch.setattr(bug_council, "convene", fake_convene)
     monkeypatch.setattr(dev_graph, "_heal", fake_heal)
 
-    result = await dev_graph._verify_and_ship(
+    # Deliberately unused: SEO no longer decides the outcome on its own, so what
+    # this returns depends on the release judgement rather than on the gate. What
+    # matters is that the rest of verification ran.
+    _ = await dev_graph._verify_and_ship(
         ctx,
         None,  # type: ignore[arg-type]
         product_id="prod-1",
