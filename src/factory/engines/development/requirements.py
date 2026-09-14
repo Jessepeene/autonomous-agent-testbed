@@ -111,8 +111,20 @@ async def write_landing_page_requirements(
         f"Problem it claims to solve: {idea.problem_statement}\n"
         f"Who it is for: {idea.target_niche}\n"
         f"How it would make money: {idea.monetization_hypothesis}\n"
-        f"Evidence the need is real: {idea.evidence_count} corroborating signal(s), "
-        f"found at {idea.source_url}\n"
+        # Labelled, for the same reason the codegen prompt labels it -- and fixing
+        # it there and not here is why the defect came straight back. An unlabelled
+        # "evidence" URL handed to a writer becomes material: the codegen prompt was
+        # told plainly not to put factory-internal provenance on the page, and the
+        # criteria written from *this* prompt then required it
+        # ("SHOULD: the page links to the real public issue thread used as the need
+        # signal"), so the builder obeyed the criteria, which is what it is judged
+        # against. One field, two prompts, and only one of them was fixed.
+        f"Internal provenance, for your judgement only and never to become a "
+        f"criterion: this idea came from {idea.evidence_count} corroborating "
+        f"signal(s) at {idea.source_url}. Never write a criterion asking the page "
+        f"to link, cite or mention where the idea came from -- that is a record of "
+        f"how this factory works, and a visitor seeing it learns the page was "
+        f"generated from a scraped thread.\n"
         + (
             f"Intended price: ${idea.self_serve_price_usd} per month\n"
             if idea.self_serve_price_usd
