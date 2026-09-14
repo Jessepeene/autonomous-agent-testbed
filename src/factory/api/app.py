@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from factory.api import abuse
@@ -41,6 +42,40 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Autonomous SaaS Factory", version="0.1.0", lifespan=lifespan)
+
+# Every landing page this factory ships is served from a `*.vercel.app` origin and
+# posts to `/interest/{product_id}` here, which makes every submission a
+# cross-origin request. There was no CORS configuration at all, so the browser's
+# preflight `OPTIONS` got a bare 405 and the fetch never happened -- the form failed
+# for every visitor of every page ever deployed, and the interest signal the whole
+# validation stage is built on could not arrive from a browser. Nothing caught it
+# because nothing in the pipeline has ever opened a deployed page: every reviewer
+# reads source, and `curl` against the endpoint succeeds exactly as it always did.
+#
+# This middleware is app-wide -- Starlette has no per-route form -- so the grants
+# below are deliberately the narrowest that make the two beacons work:
+#
+# - `allow_methods` is POST and OPTIONS only. No GET is ever approved for a
+#   cross-origin read, so `/dashboard/*`, `/metrics` and `/health` gain nothing
+#   from this. The two POST beacons are the only POSTs a browser can reach; every
+#   other write is bearer-authenticated or signature-verified.
+# - `allow_credentials=False`, so no cookie or auth header rides along. A hostile
+#   page still cannot make an authenticated request, because bearer tokens are not
+#   attached by the browser the way cookies are.
+# - `allow_origins=["*"]` because the origin genuinely cannot be known in advance:
+#   each product deploys to a fresh random `*.vercel.app` subdomain, and a custom
+#   domain later replaces it. Abuse is bounded where it should be -- `abuse
+#   .rate_limit` per IP and per product -- not by guessing origins.
+#
+# `/dashboard/*` and `/metrics` are additionally refused outright at Caddy.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
+    max_age=86_400,
+)
 app.include_router(dashboard_api.router)
 
 
