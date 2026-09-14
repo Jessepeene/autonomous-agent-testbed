@@ -1953,6 +1953,7 @@ async def _heal(
             attempt_number=attempts,
             healing_text=healing,
             failed_categories=[category],
+            blocking_at_attempt=progress.blocking_now,
         )
         await repository.resolve_pending_heal_attempts(session, product_id, "escalated")
         await repository.set_product_status(session, product_id, ProductStatus.PLANNED)
@@ -2061,6 +2062,11 @@ async def _heal(
         attempt_number=attempts,
         healing_text=healing,
         failed_categories=[category],
+        # The anchor the next pass measures against: how much was blocking when
+        # this repair was commissioned. Recorded here, at the attempt, because
+        # convergence is a claim about attempts -- reading it off the last release
+        # decision meant reading a number written moments earlier in the same pass.
+        blocking_at_attempt=progress.blocking_now,
     )
     log.info("development.heal_queued", product_id=product_id, attempt=attempts)
     return f"development: product {product_id} needs repair (cycle {attempts})"

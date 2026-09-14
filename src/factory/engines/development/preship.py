@@ -126,6 +126,32 @@ def _failed_requests(observed: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return failures
 
 
+def _describe(entry: dict[str, Any]) -> str:
+    return (
+        f"{entry.get('method', '?')} {entry.get('url', '?')} -> {entry.get('status')}"
+        + (f"\n{entry['body']}" if entry.get("body") else "")
+    )
+
+
+def _split_by_primary_action(
+    failures: list[dict[str, Any]], *, product_id: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Separate "the page cannot do its job" from "something else 404'd".
+
+    The interest endpoint carries the product id, so this is an exact match on the
+    one request that has to work rather than a guess about which URLs look
+    important. Everything else -- an analytics beacon, a missing icon, a font --
+    is recorded and weighed, because a page whose favicon is missing has still
+    collected the email address it exists to collect.
+    """
+    primary: list[dict[str, Any]] = []
+    incidental: list[dict[str, Any]] = []
+    for entry in failures:
+        url = str(entry.get("url", ""))
+        (primary if f"/interest/{product_id}" in url else incidental).append(entry)
+    return primary, incidental
+
+
 async def review_before_ship(
     ctx: FactoryContext,
     session: AsyncSession,
@@ -200,15 +226,27 @@ async def review_before_ship(
         return PreShipOutcome(ran=False, summary=f"review could not run: {str(exc)[:200]}")
 
     # The deterministic half, read from the session rather than the transcript.
+    #
+    # Only a failure of the thing the page exists for is decided here. Everything
+    # else is evidence, and the difference matters: the first version of this
+    # blocked on *any* failed request, so a 404 on a missing favicon or an og-image
+    # would have held a release with no judgement applied at all. That is the same
+    # unbounded-findings gate the release judgement was built to replace, smuggled
+    # back in one layer down.
+    #
+    # The submission endpoint is different in kind. A validation page that cannot
+    # record an email does not do the one thing it was built for, so this is a
+    # stated requirement failing, not a defect to be weighed -- the same line
+    # `must` already draws.
     failures = _failed_requests(browser.observed_requests)
-    blocking = [
-        f"The deployed page made a request that did not succeed: "
-        f"{entry.get('method', '?')} {entry.get('url', '?')} -> {entry.get('status')}"
-        + (f"\n{entry['body']}" if entry.get("body") else "")
-        for entry in failures
-    ]
+    primary, incidental = _split_by_primary_action(failures, product_id=product_id)
 
-    outcome = PreShipOutcome(ran=True, blocking=blocking, summary=result.answer[:2000])
+    blocking = [_describe(entry) for entry in primary]
+    notes = [_describe(entry) for entry in incidental]
+
+    outcome = PreShipOutcome(
+        ran=True, blocking=blocking, notes=notes, summary=result.answer[:2000]
+    )
 
     if not result.answer.strip():
         # Same failure `_review_live_product` hit twice live: a budget spent
@@ -245,12 +283,19 @@ async def review_before_ship(
         line = f"[{finding.kind}] {finding.summary}" + (
             f" — {finding.evidence}" if finding.evidence else ""
         )
-        # `broken` and `credibility` hold a release; `cosmetic` is recorded and
-        # weighed by the release judgement like any other accepted trade. A page
-        # that works but tells a buyer it is an experiment has not shipped either.
-        (outcome.blocking if finding.kind in ("broken", "credibility") else outcome.notes).append(
-            line
-        )
+        # Only `broken` holds a release here. "This does not work" is a fact and
+        # belongs with the deterministic half; "a buyer would not trust this" is a
+        # judgement, and there is already a judge for it -- the release decision,
+        # which weighs findings against what the product is for and can accept one
+        # deliberately. Blocking on `credibility` from here overruled that judge
+        # with a hardcoded rule, which is the shape of gate the whole release
+        # design replaced.
+        #
+        # Nothing is lost by recording instead of blocking: every finding becomes
+        # an issue below, `open_issues_for` feeds the next release decision, and a
+        # credibility problem serious enough to matter is one a judge weighing "is
+        # this good enough to put in front of a real person" will act on.
+        (outcome.blocking if finding.kind == "broken" else outcome.notes).append(line)
 
     for line in outcome.blocking:
         await repository.record_issue(

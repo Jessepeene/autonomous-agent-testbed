@@ -805,6 +805,7 @@ async def record_heal_attempt(
     attempt_number: int,
     healing_text: str,
     failed_categories: list[str],
+    blocking_at_attempt: int | None = None,
 ) -> str:
     """``attempt_number`` is the caller's *cycle* counter, which is not unique over
     a product's lifetime -- and this table's `uq_heal_attempts_product_attempt`
@@ -837,6 +838,7 @@ async def record_heal_attempt(
         attempt_number=max(attempt_number, (highest or 0) + 1),
         healing_text=healing_text[:6000],
         failed_categories=failed_categories,
+        blocking_at_attempt=blocking_at_attempt,
     )
     session.add(row)
     await session.flush()
@@ -3214,15 +3216,22 @@ class ProductProgress:
         """True if the blocking set shrank, False if it grew or held, None when there
         is no signal -- a first attempt, or nothing blocking to converge towards.
 
-        The zero case is not "held steady", it is *done*, and conflating the two cost
-        a release. A build reached `blocking_now = 0` with `blocking_at_last_attempt =
-        0`, the release judgement said **ship**, and `0 < 0` evaluated False -- so
-        `_heal` read a wall and escalated a product that had nothing wrong with it.
+        The zero guard is secondary, and was originally mistaken for the whole fix.
+        It was added after a build reached `blocking_now = 0` with
+        `blocking_at_last_attempt = 0`, the release judgement said **ship**, and
+        `0 < 0` evaluated False -- so `_heal` read a wall and escalated a product
+        with nothing wrong with it. That was real, but it was one visible face of a
+        deeper fault: `blocking_at_last_attempt` was read from the most recent
+        `release.decided` event, and `_verify_and_ship` *writes* that event and then
+        calls `_heal`, which re-read it. Both numbers came from the same moment, so
+        the comparison was against itself and false every time -- the zero case was
+        simply where that happened to be visible. Anchoring on the last repair
+        attempt (`HealAttempt.blocking_at_attempt`) is the actual fix.
 
-        It matters most on the path that has no issues at all. `_heal` also handles
-        deploy failures, which are not issues and never appear in these counts, so
-        `blocking_now` is structurally zero there: without this, every deploy failure
-        walls on its first attempt and is never once retried.
+        The guard still earns its place on the path with no issues at all: `_heal`
+        also handles deploy failures, which are not issues and never appear in these
+        counts, so `blocking_now` is structurally zero there and a count comparison
+        means nothing.
         """
         if self.blocking_at_last_attempt is None:
             return None
@@ -3247,6 +3256,27 @@ async def product_progress(session: AsyncSession, product_id: str) -> ProductPro
     product = await get_product(session, product_id)
     attempts = product.heal_attempts if product else 0
 
+    # The blocking figure from the last *repair attempt*, not the last release
+    # decision. `_verify_and_ship` writes `release.decided` and then calls `_heal`,
+    # which lands here -- so reading that event gave back the number written
+    # seconds earlier in the same pass, and `blocking_now < blocking_before`
+    # compared the state against itself. False every time, which `_heal` reads as a
+    # wall, on the first attempt of every fix_first decision.
+    last_attempt = (
+        await session.execute(
+            select(HealAttempt)
+            .where(
+                HealAttempt.product_id == product_id,
+                HealAttempt.blocking_at_attempt.is_not(None),
+            )
+            .order_by(HealAttempt.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    # Still read, but only for `last_decision` -- what was decided last time is
+    # useful context for the next judgement, and is a different question from how
+    # many blockers there were.
     previous = (
         await session.execute(
             select(TaskEvent)
@@ -3256,11 +3286,9 @@ async def product_progress(session: AsyncSession, product_id: str) -> ProductPro
         )
     ).scalar_one_or_none()
 
-    blocking_before: int | None = None
+    blocking_before = last_attempt.blocking_at_attempt if last_attempt is not None else None
     last_decision: str | None = None
     if previous is not None and previous.detail:
-        raw = previous.detail.get("open_blocking")
-        blocking_before = int(raw) if isinstance(raw, int | str) and str(raw).isdigit() else None
         last_decision = previous.detail.get("decision")
 
     return ProductProgress(

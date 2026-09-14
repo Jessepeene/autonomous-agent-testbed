@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 
 import httpx
 
@@ -127,17 +128,41 @@ def _collect_files(workspace: str, settings: Settings) -> list[dict[str, str]]:
             }
         )
     if not _has_fastapi_entrypoint(payload):
-        payload = _without_python_build_triggers(payload)
+        payload = _static_files_only(payload)
     return payload
 
 
-#: Files that make Vercel's zero-config detection classify a deployment as a Python
-#: project. Harmless when there is a real backend -- `requirements.txt` is exactly
-#: how Vercel learns what to install -- and fatal when there is not.
-_PYTHON_BUILD_TRIGGERS = frozenset({"requirements.txt", "pyproject.toml", "Pipfile", "setup.py"})
+#: What a static site actually serves. An allowlist, not a denylist of build files.
+#:
+#: The first version listed four filenames to exclude -- requirements.txt,
+#: pyproject.toml, Pipfile, setup.py -- which fixed the file that broke that day and
+#: nothing else. `poetry.lock`, `setup.cfg`, `Dockerfile`, `.python-version`,
+#: `tox.ini` and whatever Vercel's detection learns to recognise next would each
+#: have been a fresh outage with the same cause and the same one-line fix.
+#:
+#: Stated the other way round it is a property rather than a list: a deployment with
+#: no server-side entrypoint serves files a browser can request, and nothing else
+#: belongs in the bundle. Anything unrecognised is excluded rather than shipped,
+#: because the cost is asymmetric -- a missing asset is a visible defect, an
+#: unexpected build file is a deploy that fails for reasons nobody can see.
+#: `.txt` is the one extension an allowlist cannot settle, because `robots.txt` and
+#: `requirements.txt` share it -- one is served to crawlers, the other is what made
+#: Vercel build the page as a Python app. So the served `.txt` files are named
+#: instead. This is a short, closed list by nature (these are web conventions, not
+#: an open-ended set), which is what makes it different from enumerating build files.
+_SERVED_TEXT_FILES = frozenset({"robots.txt", "ads.txt", "security.txt", "humans.txt"})
+
+_STATIC_EXTENSIONS = frozenset(
+    {
+        ".html", ".htm", ".css", ".js", ".mjs", ".json", ".xml", ".webmanifest",
+        ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".avif", ".ico", ".bmp",
+        ".woff", ".woff2", ".ttf", ".otf", ".eot",
+        ".mp4", ".webm", ".mp3", ".ogg", ".wav", ".pdf",
+    }
+)
 
 
-def _without_python_build_triggers(files: list[dict[str, str]]) -> list[dict[str, str]]:
+def _static_files_only(files: list[dict[str, str]]) -> list[dict[str, str]]:
     """Drop dev-only Python files from a deployment that has no Python entrypoint.
 
     Live root cause of a validation landing page that passed every gate, was judged
@@ -154,17 +179,25 @@ def _without_python_build_triggers(files: list[dict[str, str]]) -> list[dict[str
     a landing page will never have.
 
     `_has_fastapi_entrypoint` already draws exactly the right line: a deployment
-    with no recognised entrypoint is static, and for a static deployment these files
-    can only mislead the builder. A real MVP keeps all of them -- that is how Vercel
-    learns what to install.
+    with no recognised entrypoint is static, and for a static deployment a file no
+    browser can request can only mislead the builder. A real MVP keeps everything --
+    that is how Vercel learns what to install.
+
+    Expressed as an allowlist of what a browser can actually fetch, rather than a
+    list of build files to exclude. A denylist only ever names the file that broke
+    most recently: `poetry.lock`, `setup.cfg`, `Dockerfile` and `.python-version`
+    would each have been a separate outage with an identical cause.
     """
     kept = []
     for entry in files:
-        name = entry["file"].split("/")[-1]
-        if entry["file"] in _PYTHON_BUILD_TRIGGERS or name.startswith("test_"):
-            log.info("deploy.static_file_excluded", path=entry["file"])
+        path = PurePosixPath(entry["file"])
+        served = path.suffix.lower() in _STATIC_EXTENSIONS or (
+            path.suffix.lower() == ".txt" and path.name.lower() in _SERVED_TEXT_FILES
+        )
+        if served:
+            kept.append(entry)
             continue
-        kept.append(entry)
+        log.info("deploy.static_file_excluded", path=entry["file"])
     return kept
 
 

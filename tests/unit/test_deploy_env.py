@@ -429,8 +429,8 @@ def test_a_static_page_does_not_ship_python_build_triggers(settings: Settings) -
     paths = {entry["file"] for entry in _collect_files("product-static", settings)}
 
     assert paths == {"index.html", "privacy.html"}, (
-        "a deployment with no Python entrypoint is static, and these files can only "
-        f"mislead Vercel's builder -- got {sorted(paths)}"
+        "a deployment with no Python entrypoint is static, and a file no browser can "
+        f"request can only mislead Vercel's builder -- got {sorted(paths)}"
     )
 
 
@@ -451,3 +451,31 @@ def test_a_real_backend_still_ships_its_requirements(settings: Settings) -> None
 
     assert "requirements.txt" in paths
     assert "app/main.py" in paths
+
+
+def test_the_static_filter_is_an_allowlist_not_a_list_of_known_offenders(
+    settings: Settings,
+) -> None:
+    """The first version named four files to exclude and fixed exactly those four.
+
+    `requirements.txt`, `pyproject.toml`, `Pipfile`, `setup.py` -- so `poetry.lock`,
+    `setup.cfg`, `Dockerfile` and `.python-version` would each have been a separate
+    outage with an identical cause and an identical one-line fix. Stated as "a
+    static deployment serves what a browser can request", they are all handled at
+    once, including whatever Vercel's detection learns to recognise next.
+    """
+    root = settings.workspace_root / "product-allowlist"
+    root.mkdir(parents=True)
+    (root / "index.html").write_bytes(b"<html></html>")
+    (root / "styles.css").write_bytes(b"body{}")
+    (root / "logo.svg").write_bytes(b"<svg/>")
+    (root / "robots.txt").write_bytes(b"User-agent: *\n")
+    # None of these were in the original denylist.
+    for offender in ("poetry.lock", "setup.cfg", "Dockerfile", ".python-version", "tox.ini"):
+        (root / offender).write_bytes(b"x")
+
+    paths = {entry["file"] for entry in _collect_files("product-allowlist", settings)}
+
+    assert paths == {"index.html", "styles.css", "logo.svg", "robots.txt"}, (
+        f"only browser-requestable files may ship; got {sorted(paths)}"
+    )

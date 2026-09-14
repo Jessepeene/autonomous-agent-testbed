@@ -39,6 +39,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -66,7 +67,7 @@ from factory.logging import get_logger
 from factory.settings import EngineName, TaskType
 from factory.state import repository
 from factory.state.orm import Lead
-from factory.state.schemas import LeadRecord
+from factory.state.schemas import DemandAssessment, LeadRecord
 from factory.supervisor.context import FactoryContext
 
 log = get_logger(__name__)
@@ -152,6 +153,42 @@ purpose: a missed qualified lead costs far less than contacting the wrong compan
 """
 
 
+
+async def _development_handoff(session: AsyncSession, product: Any) -> str:
+    """What Development found out about this audience, in Marketing's hands.
+
+    The organisational point, not a data-plumbing one: Development read the real
+    discussions this idea came from and worked out who has the problem, what they
+    already do about it, and the language they use. Marketing then wrote its own ICP
+    from a paraphrase of the idea, because nobody told it. Two departments answering
+    the same question separately, and the one with the evidence never spoke.
+
+    Returns "" whenever there is nothing to hand over, so a product from before this
+    existed degrades to exactly the previous behaviour.
+    """
+    if product is None:
+        return ""
+    idea = await repository.get_idea(session, product.idea_id)
+    raw = getattr(idea, "demand_assessment", None) if idea is not None else None
+    if not raw:
+        return ""
+    try:
+        assessment = DemandAssessment.model_validate_json(raw)
+    except ValueError:
+        log.warning("leads.demand_assessment_corrupt", product_id=product.id)
+        return ""
+
+    workarounds = "; ".join(assessment.current_workarounds) or "not established"
+    vocabulary = ", ".join(assessment.their_vocabulary) or "not established"
+    return (
+        "\n\nWhat Development established about this audience, from the real "
+        "discussions the idea was drawn from. Prefer this over inferring from the "
+        "description above:\n"
+        f"- who they are: {assessment.audience or 'not established'}\n"
+        f"- what they already do about it: {workarounds}\n"
+        f"- their own words for the problem: {vocabulary}"
+    )
+
 async def build_qualification_brief(
     ctx: FactoryContext,
     session: AsyncSession,
@@ -176,12 +213,24 @@ async def build_qualification_brief(
         except ValueError:
             log.warning("leads.qualification_brief_corrupt", product_id=product_id)
 
+    # What Development established about this audience, if anything. Without it,
+    # Marketing re-derives the customer from the idea's own generated prose -- two
+    # departments separately guessing at the same question, and the one that
+    # actually read what real people wrote has no way to tell the other.
+    #
+    # `demand_assessment` is grounded in the raw posts the idea came from: who has
+    # the problem, what they already built to work around it, and the words they use
+    # for it. Inferring an ICP from a paraphrase when that exists is strictly worse,
+    # and the vocabulary matters twice here -- a search query written in different
+    # words than the buyer uses finds different people.
+    handoff = await _development_handoff(session, product)
+
     try:
         brief = await ctx.llm.parse(
             QualificationBrief,
             task_type=TaskType.ANALYSIS,
             system=_QUALIFICATION_BRIEF_SYSTEM,
-            prompt=f"Product:\n{product_summary}",
+            prompt=f"Product:\n{product_summary}{handoff}",
             engine=EngineName.MARKETING,
             task_id=task_id,
         )

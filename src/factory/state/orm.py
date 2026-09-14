@@ -1205,6 +1205,15 @@ class HealAttempt(Base):
     healing_text: Mapped[str] = mapped_column(Text, nullable=False)
     failed_categories: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
     outcome: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    #: How many blocking issues were open when this attempt was made. The anchor
+    #: convergence is measured against: "did the last attempt reduce the blocking
+    #: set" is a question about attempts, and reading it off the last *release
+    #: decision* instead meant comparing the current state against itself, because
+    #: `_verify_and_ship` writes that decision and then calls `_heal`, which
+    #: re-read it. Nullable -- attempts predating this column have no figure, and
+    #: treating "unknown" as 0 would manufacture the false signal it exists to
+    #: remove.
+    blocking_at_attempt: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
