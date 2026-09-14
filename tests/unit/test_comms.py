@@ -268,3 +268,20 @@ async def test_a_manager_that_asks_nothing_is_never_parked(monkeypatch) -> None:
         object(), asked_by=EngineName.DESIGN, decision=decision, task_id="tick-2"
     )
     assert asked == 0
+
+
+def test_the_guidance_names_the_field_and_not_just_the_behaviour() -> None:
+    """Observed live: the manager explained its uncertainty and asked nobody.
+
+    The guidance used to say "say so" -- which the model satisfied, in prose, in its
+    assessment: *"I need to know if this product is receiving real traffic... that
+    distinction determines the decision entirely"*, with `needs_to_know` empty. It
+    had identified exactly the right question by exactly the right test and the
+    question reached no one, because explaining a thing where nothing is listening
+    feels like communicating and is not.
+
+    So the guidance has to name the field, and name the trap. An instruction that can
+    be satisfied by writing prose will be.
+    """
+    assert "needs_to_know" in comms.ASKING_GUIDANCE
+    assert "Explaining your uncertainty is not asking" in comms.ASKING_GUIDANCE

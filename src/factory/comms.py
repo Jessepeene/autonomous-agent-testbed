@@ -190,12 +190,20 @@ def route(question: str, asked_by: EngineName) -> str:
 #: already has the `RESULT: BLOCKED` contract instead.
 ASKING_GUIDANCE = """\
 Not knowing is not a reason to do nothing -- it is a reason to find out. If what \
-stops you deciding is a fact somebody else in this company holds, say so rather than \
-guessing, and rather than declining because you are unsure. Ask for a fact, not for \
-permission, and ask the smallest question that would actually change your decision -- \
-a broad question gets a broad answer that settles nothing. Your work parks and \
-resumes with the answer, so asking costs you a delay and nothing else. The one thing \
-you must never do is invent the answer and act on it.\
+stops you deciding is a fact somebody else in this company holds, put that question \
+in `needs_to_know` rather than guessing, and rather than declining because you are \
+unsure. Ask for a fact, not for permission, and ask the smallest question that would \
+actually change your decision -- a broad question gets a broad answer that settles \
+nothing. Your work parks and resumes with the answer, so asking costs you a delay \
+and nothing else.
+
+**Explaining your uncertainty is not asking.** Nobody reads your assessment. If the \
+question is written there and `needs_to_know` is empty, it reaches no one, nobody \
+answers it, and the work stops for a fact that was never requested -- which looks \
+from outside exactly like a department that decided there was nothing to do. A \
+question only travels if it is in `needs_to_know`.
+
+The one thing you must never do is invent the answer and act on it.\
 """
 
 
