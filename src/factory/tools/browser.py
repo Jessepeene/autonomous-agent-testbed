@@ -156,16 +156,32 @@ class BrowserSession:
         # submitting fired POST /api/subscribe -> 404, so it re-filled and
         # re-clicked hoping the *visible* page would change. A network line
         # settles in one action what visual diffing never settles at all.
-        def _on_response(response: Any) -> None:
+        async def _on_response(response: Any) -> None:
             try:
-                if response.request.resource_type in ("xhr", "fetch", "document"):
-                    self._requests.append(
-                        {
-                            "method": response.request.method,
-                            "url": response.url[:200],
-                            "status": response.status,
-                        }
-                    )
+                if response.request.resource_type not in ("xhr", "fetch", "document"):
+                    return
+                entry: dict[str, Any] = {
+                    "method": response.request.method,
+                    "url": response.url[:200],
+                    "status": response.status,
+                }
+                # The body, but only when something failed -- and this is the half
+                # that was missing. A reviewer reported "POST /api/billing/checkout
+                # -> 422" and then wrote, unprompted: "the browser tool exposed the
+                # 422 status but not the response body, so root cause is unknown".
+                # It was right, and that gap is why a broken checkout survived 25
+                # days and several repair attempts: a FastAPI 422 body names the
+                # exact field that failed validation, so with it the fix is obvious
+                # and without it every repair is a guess.
+                #
+                # Errors only: a successful response body is the page itself, which
+                # `browser_read` already returns and which would swamp the transcript.
+                if response.status >= 400:
+                    try:
+                        entry["body"] = (await response.text())[:1200]
+                    except Exception:  # noqa: BLE001 - consumed, redirected, or gone
+                        entry["body"] = "(response body could not be read)"
+                self._requests.append(entry)
             except Exception:  # noqa: S110 - an instrument must never break the run
                 pass
 
@@ -368,10 +384,13 @@ class BrowserSession:
                     "Click something on the current page, by its visible text (e.g. "
                     "'Get early access') or by a CSS selector. Returns the page "
                     "afterwards PLUS `network` (every request the click fired, with "
-                    "its status code) and `console_errors`. Read `network` to decide "
-                    "whether a submit actually worked -- a form that posts and gets "
-                    "404/500, or that fires no request at all, is broken even when "
-                    "the page looks unchanged."
+                    "its status code, and for any 4xx/5xx the response `body`) and "
+                    "`console_errors`. Read `network` to decide whether a submit "
+                    "actually worked -- a form that posts and gets 404/500, or that "
+                    "fires no request at all, is broken even when the page looks "
+                    "unchanged. When a request failed, quote its `body` in your "
+                    "report: it usually names the exact field or reason, and without "
+                    "it whoever fixes this is guessing."
                 ),
                 input_schema={
                     "type": "object",
