@@ -33,6 +33,63 @@ time it's fixed, not batched up afterward.**
 19. [A tunable prompt's live DB row silently never gets a code-side rewrite once bootstrapped](#19-a-tunable-prompts-live-db-row-silently-never-gets-a-code-side-rewrite-once-bootstrapped)
 20. [40 identical provider-outage escalations mislabeled as legal review, spamming past the dedup guard](#20-40-identical-provider-outage-escalations-mislabeled-as-legal-review-spamming-past-the-dedup-guard)
 21. [Live-product auditing only ran when the factory was idle](#21-live-product-auditing-only-ran-when-the-factory-was-idle)
+22. [An issue filed `open` never closed, so convergence could only ever read "not converging"](#22-an-issue-filed-open-never-closed-so-convergence-could-only-ever-read-not-converging)
+
+---
+
+## 22. An issue filed `open` never closed, so convergence could only ever read "not converging"
+
+**Found**: 2026-09-14, from a `heal_exhausted` escalation on product
+`06829d03` — its second that morning — on a landing page that was passing
+every deterministic gate.
+
+**Severity**: Silent and total. Every product that ever had one blocking
+issue filed against it would escalate on every heal attempt from then on,
+forever, regardless of whether the defect was fixed. Two escalations on this
+product; the mechanism was general.
+
+**Root cause**: Issues are filed with status `open`. The only thing that ever
+closed one was `verify_unseen_issues`, which by design only acts on issues
+already marked `fixed` — and nothing marks a gap issue fixed. A repair agent
+rewrites a file, the defect genuinely goes away, and the row stays `open` for
+good.
+
+`product_progress.blocking_now` counts open blocking issues, so it could rise
+and never fall. `converging` is `blocking_now < blocking_at_last_attempt`, so
+after the first attempt it was permanently `False`. `_heal` had just been
+changed to stop on a wall rather than a counter — `walled = progress.converging
+is False or bool(progress.stuck)` — which made the broken signal load-bearing:
+it escalated on attempt two, every time.
+
+Concretely: this product carried exactly one `high` issue, from
+`contract_check`, with `times_seen = 1`. The contract check reported **zero**
+violations on every run after the one that filed it. The workspace was correct
+— `index.html` defined `INTEREST_URL` and posted the form to it — and the
+release judgement was told, by the stale row, that it was not.
+
+The previous stopping mechanism (a heal counter) hid this: it escalated for its
+own blind reason before the progress signal was ever consulted.
+
+**Fix** (`3faed10`): `repository.close_resolved_issues` — a check that examines
+everything every run closes what it no longer finds. Wired into the three
+checks for which that is sound: the codegen contract and SEO checks in
+`development/graph.py`, and the requirements comparison in
+`development/gaps.py`. All three look at the whole product and report all of
+it, so absence from their output is real evidence.
+
+Deliberately **not** wired into Bug Council. It judges six categories by model,
+and its not mentioning something is not the same as its having looked and found
+nothing — the same reasoning that keeps `verify_unseen_issues` narrow.
+
+Self-healing for the stale row that caused this: the next contract check run
+closes it with no manual intervention.
+
+**Verified**: `tests/integration/test_issue_closure.py` (3 tests, real
+Postgres) pins the behaviour that matters — `blocking_now` reaching zero after
+a clean run — plus the two failure modes that would be worse than the bug: a
+still-present defect must stay open, and one check must never close another's
+findings. `tests/unit/test_seo_gate.py` asserts a clean gate pass runs a close
+pass for both deterministic checks with an empty found-set.
 
 ---
 
