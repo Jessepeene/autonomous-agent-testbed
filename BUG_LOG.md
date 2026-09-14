@@ -45,6 +45,10 @@ time it's fixed, not batched up afterward.**
 31. [Validation pages never got a design brief — the call sat below the early return](#31-validation-pages-never-got-a-design-brief--the-call-sat-below-the-early-return)
 32. [The landing page published its own internal provenance to customers](#32-the-landing-page-published-its-own-internal-provenance-to-customers)
 33. [Convergence compared the current state against itself, so every `fix_first` walled on attempt one](#33-convergence-compared-the-current-state-against-itself-so-every-fix_first-walled-on-attempt-one)
+34. [Six repair failures, one cause: nothing knew whether the workspace matched what was deployed](#34-six-repair-failures-one-cause-nothing-knew-whether-the-workspace-matched-what-was-deployed)
+35. [The repair agent had no way to make a small edit, and the logs could not say what it ran](#35-the-repair-agent-had-no-way-to-make-a-small-edit-and-the-logs-could-not-say-what-it-ran)
+36. [The live reviewer filed fake signups into the demand signal it was measuring](#36-the-live-reviewer-filed-fake-signups-into-the-demand-signal-it-was-measuring)
+37. [The analytics beacon never worked in any browser, and the gate that saw it recorded a pass](#37-the-analytics-beacon-never-worked-in-any-browser-and-the-gate-that-saw-it-recorded-a-pass)
 
 ---
 
@@ -527,6 +531,137 @@ day's work:
 
 **Verified**: 1,279 unit tests, 9 integration tests against real Postgres, and
 migration 0037 applied live.
+
+---
+
+## 34. Six repair failures, one cause: nothing knew whether the workspace matched what was deployed
+
+**Found**: 2026-09-14, after six consecutive repair attempts on one product failed
+for six different reasons. Jesse named the cause: *"isn't this something to do with
+the workspaces being out of sync? Or the latest version not being deployed?"*
+
+**Severity**: Two of the six failures directly, a third aggravated. It also nearly
+caused real damage -- see the postscript.
+
+**Root cause**: The repair agent judges the *workspace*; its briefs describe the
+*deployed page*. Those agree only while everything has shipped, and they diverge
+exactly when it matters most: a repair applies a fix and the deploy never happens.
+
+Once diverged, every path misreads it. A repair opened the workspace, correctly saw
+the work already done, reported NOT_NEEDED -- and the handler closed both issues as
+invalid and promoted a validation landing page to LIVE while both defects were
+still on the page. A later repair, handed a brief describing defects absent from
+the files, spent its budget searching the whole container for a page that only
+exists on Vercel. The system recorded that as the agent failing.
+
+**Fix, in two goes, and the first was the weaker kind.** `workspace_undeployed`
+(migration 0038) recorded it as a *remembered* fact -- set by one code path,
+cleared by another -- and drifted immediately: every edit made before the column
+existed was invisible to it, so a workspace genuinely holding an unshipped fix
+reported false and had to be corrected by hand. That is the same failure as
+everything else that day: state the system believes rather than state it can check.
+
+`deployed_content_hash` (migration 0039) makes it checkable. Deploy records a
+digest of exactly the bundle it uploaded; asking whether the workspace is shipped
+means hashing the workspace the same way and comparing, so both sides are computed
+from reality at the moment the question is asked. Length-prefixed rather than
+delimiter-separated, because a delimiter that can occur inside base64 lets two
+different bundles collide. Plus: NOT_NEEDED with undeployed changes now verifies
+and ships instead of concluding there is nothing to do, and no longer forces LIVE.
+
+**Postscript, and the reason this entry matters most.** I re-queued that repair six
+times against a workspace I had last inspected properly hours earlier. Between
+attempts I checked one thing -- whether the copy defects were gone from index.html
+-- and carried that forward as "the workspace is fine". It was not: it had lost
+privacy.html, robots.txt, sitemap.xml, requirements.txt and its test file. I was
+one command from deploying a page whose privacy link 404s, replacing a
+stale-but-working page with a broken one. Jesse stopped it and called the right
+move: clear everything and rebuild from requirements.
+
+Verified narrowly, concluded broadly -- the identical mistake I had spent the day
+fixing in the system.
+
+---
+
+## 35. The repair agent had no way to make a small edit, and the logs could not say what it ran
+
+**Found**: 2026-09-14, watching a repair for two copy defects exhaust its 16-step
+budget.
+
+**Severity**: Every small repair was expensive and likely to fail, and the failure
+was attributed to the agent.
+
+**Root cause**: The workspace tools were `read_workspace_file`,
+`write_workspace_file` and `run_workspace_command` -- nothing in between. Changing
+two sentences in a 15KB page meant reproducing all 15KB or driving sed through the
+shell. The agent chose the shell, spent its whole budget there, never called
+`write_workspace_file` once, and was recorded as "used its entire budget without
+finishing". It was not being careless; it had no better move.
+
+**And the logs actively misled the diagnosis.** `run_workspace_command` wraps every
+command as `export PATH=...; {command}`, and `sandbox.execute` logs
+`shlex.split(cmd)[:1]` -- so every command any agent has ever run appears in the
+record as `export`. I read that as the agent running a no-op seven times, said so,
+and had to correct it. Same failure as a deploy reporting readyState=ERROR: the
+system did something and could not say what.
+
+**Fix**: `edit_workspace_file(path, old_string, new_string)` -- exact-match and
+unique-match, the contract a human editor works under. A snippet appearing twice is
+refused rather than guessed, because guessing is how a repair silently changes the
+wrong line. And the real command is logged before the prefix is added.
+
+**Verified**: the next repair used it (`workspace.file_edited`, twice) and applied
+its changes in 13 steps.
+
+---
+
+## 36. The live reviewer filed fake signups into the demand signal it was measuring
+
+**Found**: 2026-09-14, checking why `validation_signals` was non-empty after being
+cleared: `qa.tester.lead@example-agency.test`.
+
+**Severity**: Corrupts the one number a build-or-scrap decision is gated on, and
+had just been made recurring.
+
+**Root cause**: The periodic AUDITOR review uses a browser and is told to "actually
+try to do that thing yourself". On a landing page the thing is leaving an email
+address, so it invented one and it landed in the real table. `preship` already had
+a reserved `@factory-selftest.invalid` address the endpoint answers identically but
+never records or mails; AUDITOR did not. Extending that sweep to VALIDATING
+products the same day turned a latent problem into one signup per page per sweep.
+
+**Fix**: AUDITOR is given the same reserved address. A review that corrupts what it
+is measuring is worse than no review.
+
+---
+
+## 37. The analytics beacon never worked in any browser, and the gate that saw it recorded a pass
+
+**Found**: 2026-09-14, in the first clean end-to-end run's pre-ship browser review:
+`network_failures=8`, all `POST /analytics/{id} -> FAILED (net::ERR_FAILED)`.
+
+**Severity**: Every generated page's analytics silently collected nothing. The
+endpoint itself was fine -- curl returned 200 with correct CORS headers.
+
+**Root cause**: The page used `navigator.sendBeacon(url, new Blob([payload],
+{type: 'application/json'}))`. `application/json` is not CORS-safelisted, so the
+request requires a preflight, and `sendBeacon` cannot make preflighted requests.
+Worse, it returns true for *queued* rather than *delivered*, so the usual
+`if (sendBeacon(...)) {} else { fetch(...) }` fallback never ran and the failure
+was silent.
+
+Nothing that reads source could catch this, and neither could curl -- which is
+precisely what the browser review exists for, and it worked.
+
+**Then the gate recorded a pass anyway.** `preship.reviewed blocking=0
+action_succeeded=False`: it blocked only when the primary action was attempted
+*and* failed, so a review that never tried the form at all cleared it. The same
+shape as ran=False -- a check that did not happen must never be indistinguishable
+from a check that passed.
+
+**Fix**: the codegen prompt specifies `fetch(..., {keepalive: true})`, which
+survives unload without the restriction, and names why sendBeacon is wrong here.
+Not-attempted and attempted-but-failed now both block the release.
 
 ---
 
