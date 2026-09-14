@@ -402,3 +402,52 @@ async def test_deploy_declares_no_framework_for_a_pure_static_build(
     )
 
     assert captured["projectSettings"]["framework"] is None
+
+
+def test_a_static_page_does_not_ship_python_build_triggers(settings: Settings) -> None:
+    """Live root cause of a shippable landing page that could not deploy.
+
+    The page passed every gate, recorded zero requirement gaps, and the release
+    judgement said ship. Vercel then failed the build:
+
+        Error: No python entrypoint found. Set "tool.vercel.entrypoint" in
+        pyproject.toml or define an entrypoint in one of: app.py, index.py, ...
+
+    It carried a 15-byte `requirements.txt` (`pytest`) for the
+    `test_validation_page.py` beside it. Both exist so the build can be tested
+    locally; neither has anything to do with what gets served. Vercel's zero-config
+    detection saw `requirements.txt`, decided "Python project", and demanded an
+    entrypoint a static landing page will never have.
+    """
+    root = settings.workspace_root / "product-static"
+    root.mkdir(parents=True)
+    (root / "index.html").write_bytes(b"<html><body>hi</body></html>")
+    (root / "privacy.html").write_bytes(b"<html><body>privacy</body></html>")
+    (root / "requirements.txt").write_bytes(b"pytest>=8\n")
+    (root / "test_validation_page.py").write_bytes(b"def test_ok(): pass\n")
+
+    paths = {entry["file"] for entry in _collect_files("product-static", settings)}
+
+    assert paths == {"index.html", "privacy.html"}, (
+        "a deployment with no Python entrypoint is static, and these files can only "
+        f"mislead Vercel's builder -- got {sorted(paths)}"
+    )
+
+
+def test_a_real_backend_still_ships_its_requirements(settings: Settings) -> None:
+    """The exclusion must not fire when there IS a backend.
+
+    `requirements.txt` is exactly how Vercel learns what to install for a real MVP.
+    Stripping it there would break every product that actually has a backend, which
+    is a far worse failure than the one being fixed.
+    """
+    root = settings.workspace_root / "product-mvp"
+    (root / "app").mkdir(parents=True)
+    (root / "app" / "main.py").write_bytes(b"from fastapi import FastAPI\napp = FastAPI()\n")
+    (root / "requirements.txt").write_bytes(b"fastapi\n")
+    (root / "index.html").write_bytes(b"<html></html>")
+
+    paths = {entry["file"] for entry in _collect_files("product-mvp", settings)}
+
+    assert "requirements.txt" in paths
+    assert "app/main.py" in paths

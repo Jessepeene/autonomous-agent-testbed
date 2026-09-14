@@ -197,3 +197,50 @@ async def test_a_recurring_blocker_is_still_a_wall(session: AsyncSession) -> Non
     progress = await repository.product_progress(session, PRODUCT)
     assert progress.stuck == ["checkout returns 422"]
     assert progress.blocking_now == 1
+
+
+async def test_zero_blockers_twice_is_done_not_a_wall(session: AsyncSession) -> None:
+    """`0 < 0` is False, and reading that as "not converging" escalated a shipped build.
+
+    Live sequence: gaps=0, `release.decided decision=ship`, and twelve seconds later
+    `heal_stopped reason=not_converging blocking_now=0 blocking_before=0 stuck=0`.
+    Nothing was wrong with the product. Holding at zero is the definition of done.
+
+    This also covers the path with no issues at all: `_heal` handles deploy failures,
+    which never produce issue rows, so `blocking_now` is structurally zero there. Left
+    as False, every deploy failure walls on its first attempt and is never retried.
+    """
+    progress = await repository.product_progress(session, PRODUCT)
+    assert progress.blocking_now == 0
+    assert progress.converging is not False, (
+        "zero blockers must never read as a wall -- it is the state a finished "
+        "build is in, and the state every deploy failure is in"
+    )
+
+
+async def test_holding_steady_at_a_real_blocker_is_still_a_wall(
+    session: AsyncSession,
+) -> None:
+    """The signal the zero-case must not destroy: same count, still broken."""
+    await _file(session, "checkout returns 422", severity="high")
+    progress = await repository.product_progress(session, PRODUCT)
+
+    assert progress.blocking_now == 1
+    # Simulate a previous attempt that also had one blocker.
+    held = repository.ProductProgress(
+        attempts=2,
+        blocking_now=1,
+        blocking_at_last_attempt=1,
+        stuck=[],
+        last_decision="fix_first",
+    )
+    assert held.converging is False, "one blocker before and one now is a wall"
+
+    shrinking = repository.ProductProgress(
+        attempts=2,
+        blocking_now=1,
+        blocking_at_last_attempt=3,
+        stuck=[],
+        last_decision="fix_first",
+    )
+    assert shrinking.converging is True

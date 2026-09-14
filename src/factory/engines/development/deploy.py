@@ -126,7 +126,46 @@ def _collect_files(workspace: str, settings: Settings) -> list[dict[str, str]]:
                 "encoding": "base64",
             }
         )
+    if not _has_fastapi_entrypoint(payload):
+        payload = _without_python_build_triggers(payload)
     return payload
+
+
+#: Files that make Vercel's zero-config detection classify a deployment as a Python
+#: project. Harmless when there is a real backend -- `requirements.txt` is exactly
+#: how Vercel learns what to install -- and fatal when there is not.
+_PYTHON_BUILD_TRIGGERS = frozenset({"requirements.txt", "pyproject.toml", "Pipfile", "setup.py"})
+
+
+def _without_python_build_triggers(files: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Drop dev-only Python files from a deployment that has no Python entrypoint.
+
+    Live root cause of a validation landing page that passed every gate, was judged
+    shippable, and then failed to deploy::
+
+        Error: No python entrypoint found. Set "tool.vercel.entrypoint" in
+        pyproject.toml or define an entrypoint in one of: app.py, index.py, ...
+
+    The page is pure static HTML by design (`LANDING_PAGE_SYSTEM` forbids backend
+    logic). It carried a 15-byte `requirements.txt` holding `pytest`, for the
+    `test_validation_page.py` beside it -- both exist so the build can be tested
+    locally, and neither has anything to do with what gets served. Vercel saw
+    `requirements.txt`, concluded "Python project", and demanded an entrypoint that
+    a landing page will never have.
+
+    `_has_fastapi_entrypoint` already draws exactly the right line: a deployment
+    with no recognised entrypoint is static, and for a static deployment these files
+    can only mislead the builder. A real MVP keeps all of them -- that is how Vercel
+    learns what to install.
+    """
+    kept = []
+    for entry in files:
+        name = entry["file"].split("/")[-1]
+        if entry["file"] in _PYTHON_BUILD_TRIGGERS or name.startswith("test_"):
+            log.info("deploy.static_file_excluded", path=entry["file"])
+            continue
+        kept.append(entry)
+    return kept
 
 
 #: Vercel's zero-config FastAPI detection looks for a `FastAPI` instance named
@@ -294,10 +333,21 @@ async def deploy(
         ready_state = await _await_ready(deployment_id, token)
 
     if ready_state in _FAILED_STATES:
+        # The state name alone is not a defect report. This detail becomes the entire
+        # brief a repair agent is handed ("Deployment failed: {detail}"), and
+        # `readyState=ERROR` tells it nothing it can act on -- it cannot even tell a
+        # syntax error from a missing entrypoint from an out-of-memory build. Observed
+        # live: a landing page failed on "No python entrypoint found", the agent was
+        # told only "readyState=ERROR", and no amount of repair budget could have
+        # closed that gap. Vercel publishes the build log; ask for it.
+        build_log = await _build_error_text(deployment_id, token) if deployment_id else ""
         return DeployResult(
             ok=False,
             url=full_url,
-            detail=f"vercel build did not succeed (readyState={ready_state or 'unknown'})",
+            detail=(
+                f"vercel build did not succeed (readyState={ready_state or 'unknown'})"
+                + (f"\n\nVercel build log:\n{build_log}" if build_log else "")
+            ),
         )
     if ready_state not in _READY_STATES:
         # Still building after the poll budget -- Vercel taking unusually long is
@@ -312,6 +362,42 @@ async def deploy(
 
     log.info("deploy.published", product=product_name, url=full_url)
     return DeployResult(ok=True, url=full_url, detail="published", project=project_name)
+
+
+#: How much build log to carry back. Vercel's failures put the actionable line at
+#: the end (the error, then a docs link), so this keeps the tail rather than the head.
+_BUILD_LOG_CHARS = 3000
+
+
+async def _build_error_text(deployment_id: str, token: str) -> str:
+    """Vercel's own build output for a failed deployment, or "" if unavailable.
+
+    Best-effort by design: a deploy that already failed must not also fail to report,
+    so every error here degrades to the state name the caller already has.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            response = await client.get(
+                f"https://api.vercel.com/v3/deployments/{deployment_id}/events",
+                params={"limit": 200},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        if response.status_code != 200:
+            log.warning("deploy.build_log_unavailable", status=response.status_code)
+            return ""
+        body = response.json()
+        events = body if isinstance(body, list) else body.get("events", [])
+    except (httpx.HTTPError, ValueError) as exc:
+        log.warning("deploy.build_log_failed", detail=str(exc)[:200])
+        return ""
+
+    lines = []
+    for event in events:
+        payload = event.get("payload") if isinstance(event, dict) else None
+        text = (payload or {}).get("text") or (event.get("text") if isinstance(event, dict) else "")
+        if isinstance(text, str) and text.strip():
+            lines.append(f"[{event.get('type', 'log')}] {text.strip()}")
+    return "\n".join(lines)[-_BUILD_LOG_CHARS:]
 
 
 async def _await_ready(deployment_id: str, token: str) -> str:

@@ -3210,9 +3210,22 @@ class ProductProgress:
 
     @property
     def converging(self) -> bool | None:
-        """True if the blocking set shrank, False if it grew or held, None on a first
-        attempt with nothing to compare against."""
+        """True if the blocking set shrank, False if it grew or held, None when there
+        is no signal -- a first attempt, or nothing blocking to converge towards.
+
+        The zero case is not "held steady", it is *done*, and conflating the two cost
+        a release. A build reached `blocking_now = 0` with `blocking_at_last_attempt =
+        0`, the release judgement said **ship**, and `0 < 0` evaluated False -- so
+        `_heal` read a wall and escalated a product that had nothing wrong with it.
+
+        It matters most on the path that has no issues at all. `_heal` also handles
+        deploy failures, which are not issues and never appear in these counts, so
+        `blocking_now` is structurally zero there: without this, every deploy failure
+        walls on its first attempt and is never once retried.
+        """
         if self.blocking_at_last_attempt is None:
+            return None
+        if self.blocking_now == 0:
             return None
         return self.blocking_now < self.blocking_at_last_attempt
 
