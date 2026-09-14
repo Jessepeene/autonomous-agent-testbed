@@ -36,6 +36,7 @@ time it's fixed, not batched up afterward.**
 22. [An issue filed `open` never closed, so convergence could only ever read "not converging"](#22-an-issue-filed-open-never-closed-so-convergence-could-only-ever-read-not-converging)
 23. [`max_length` on model-written prose silently discarded whole responses, for the 4th and 5th time](#23-max_length-on-model-written-prose-silently-discarded-whole-responses-for-the-4th-and-5th-time)
 24. [The release decision inherited an 8,192-token budget that thinking ate before it could answer](#24-the-release-decision-inherited-an-8192-token-budget-that-thinking-ate-before-it-could-answer)
+25. [A cosmetic finding the release judge had accepted twice counted as a wall and escalated the product](#25-a-cosmetic-finding-the-release-judge-had-accepted-twice-counted-as-a-wall-and-escalated-the-product)
 
 ---
 
@@ -169,6 +170,49 @@ of the call, matching `find_requirement_gaps`.
 
 **Verified**: shipped alongside #22 and #23; the release judgement is the thing
 being watched on the next live build.
+
+---
+
+## 25. A cosmetic finding the release judge had accepted twice counted as a wall and escalated the product
+
+**Found**: 2026-09-14, while verifying that the fix for #22 would actually let
+product `06829d03` proceed. It would not have.
+
+**Severity**: Would have silently defeated #22's fix on the very product it was
+written for. Any product accumulating one recurring cosmetic finding escalates
+forever, regardless of whether anything is actually blocked.
+
+**Root cause**: `_heal` stops on a wall:
+
+```python
+walled = progress.converging is False or bool(progress.stuck)
+```
+
+`blocking_now` is severity-filtered to `critical`/`high`. `stuck` was not:
+
+```python
+stuck = [i.title for i in open_issues if i.times_seen >= 3]
+```
+
+So *any* issue seen three times became a wall. This product carried
+`bug_council:quality`, **medium**, `times_seen = 4`: a hardcoded copyright year
+in the footer. Not deploy-blocking, not counted in `blocking_now` — and enough
+on its own to make `walled` true on every attempt.
+
+The inversion is the point. The release judgement had weighed that exact finding
+**twice** and explicitly accepted it — *"Cosmetic, invisible to the demand
+signal, and cheap to fix later"* — and recorded that acceptance in
+`release.decided`. An issue recurring precisely **because** a judge decided not
+to fix it was then read as evidence that the approach was failing. The system
+punished itself for honouring its own decision.
+
+**Fix**: filter `stuck` by the same severity set as `blocking_now`. "We keep
+failing at the same thing" is only a wall when the thing blocks; a recurring
+accepted trade is evidence the judgement is being honoured.
+
+**Verified**: `tests/integration/test_issue_closure.py` — a medium finding seen
+four times yields `stuck == []`, and a `high` one seen three times still yields
+a wall, so the signal the filter must not destroy is pinned.
 
 ---
 

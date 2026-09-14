@@ -157,3 +157,43 @@ async def test_one_source_does_not_close_another_sources_findings(
     assert closed == 1
     open_titles = {i.title for i in await repository.open_issues_for(session, PRODUCT)}
     assert open_titles == {"a council finding"}
+
+
+async def test_a_recurring_cosmetic_finding_is_not_a_wall(session: AsyncSession) -> None:
+    """`stuck` means "we keep failing at the same blocker", not "this keeps coming up".
+
+    `_heal` treats any `stuck` entry as a wall and escalates. Before the severity
+    filter, a medium cosmetic finding seen three times was enough to do that on its
+    own -- observed live as a hardcoded copyright year, seen four times, which the
+    release judgement had twice weighed and deliberately accepted as a trade worth
+    shipping with. Reading that as a wall inverts the decision that produced it: an
+    issue nobody intends to fix recurring is evidence the judgement is being
+    honoured, not evidence the approach is wrong.
+    """
+    for _ in range(4):
+        await repository.record_issue(
+            session,
+            product_id=PRODUCT,
+            kind="ui",
+            severity="medium",
+            title='Copyright notice hardcodes the literal year "(c) 2026"',
+            location="index.html footer",
+            found_by="bug_council:quality",
+        )
+
+    progress = await repository.product_progress(session, PRODUCT)
+    assert progress.stuck == [], (
+        "an accepted cosmetic trade must never read as a wall, or the product "
+        "escalates forever on something nobody intends to fix"
+    )
+    assert progress.blocking_now == 0
+
+
+async def test_a_recurring_blocker_is_still_a_wall(session: AsyncSession) -> None:
+    """The signal the filter must not destroy: the same blocker, three passes running."""
+    for _ in range(3):
+        await _file(session, "checkout returns 422", severity="high")
+
+    progress = await repository.product_progress(session, PRODUCT)
+    assert progress.stuck == ["checkout returns 422"]
+    assert progress.blocking_now == 1

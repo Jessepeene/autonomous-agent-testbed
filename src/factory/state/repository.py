@@ -3188,9 +3188,21 @@ class ProductProgress:
     attempts: int
     blocking_now: int
     blocking_at_last_attempt: int | None
-    #: Issues seen on three or more separate passes without ever being resolved.
-    #: The sharpest signal there is: not "we have tried a lot" but "we keep failing
-    #: at the same thing", which a heal counter could never distinguish.
+    #: Blocking issues seen on three or more separate passes without ever being
+    #: resolved. The sharpest signal there is: not "we have tried a lot" but "we
+    #: keep failing at the same thing", which a heal counter could never
+    #: distinguish.
+    #:
+    #: Severity-filtered for the same reason `blocking_now` is. A recurring
+    #: *cosmetic* finding is not a wall -- it is usually a deliberate trade, and
+    #: reading it as a wall inverts the meaning of the decision that made it.
+    #: Observed live: a hardcoded copyright year, medium severity, seen four
+    #: times, which the release judgement had twice weighed and explicitly
+    #: accepted ("cosmetic, invisible to the demand signal, and cheap to fix
+    #: later"). Because `_heal` treats any `stuck` entry as a wall, that accepted
+    #: trade escalated the product on its own, and would have gone on doing it
+    #: forever. An issue nobody intends to fix recurring is evidence the judgement
+    #: is being honoured, not evidence the approach is wrong.
     stuck: list[str]
     #: What was decided last time, so a second look starts from the first rather
     #: than re-deriving it.
@@ -3214,8 +3226,9 @@ async def product_progress(session: AsyncSession, product_id: str) -> ProductPro
     progress and the second is a wall, and only one of them is worth another attempt.
     """
     open_issues = await open_issues_for(session, product_id)
-    blocking_now = sum(1 for i in open_issues if i.severity in ("critical", "high"))
-    stuck = [i.title for i in open_issues if i.times_seen >= 3]
+    blocking = [i for i in open_issues if i.severity in ("critical", "high")]
+    blocking_now = len(blocking)
+    stuck = [i.title for i in blocking if i.times_seen >= 3]
 
     product = await get_product(session, product_id)
     attempts = product.heal_attempts if product else 0
