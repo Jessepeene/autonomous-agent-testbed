@@ -144,10 +144,38 @@ The page must include, as actual files with real contents:
 the idea clearly: the problem it solves, who it's for, and why it's worth paying for. \
 Visual polish matters directly here: this page's only job is to earn a stranger's \
 trust in the few seconds before they decide whether to leave an email address, and a \
-generic-template or amateurish look will suppress genuine interest regardless of how \
-good the idea is — a low response rate must reflect the idea, not the page. Use a \
-clear visual hierarchy, real (not lorem-ipsum) and specific copy, professional and \
-credible styling, and a mobile-responsive layout.
+page that looks machine-generated suppresses genuine interest regardless of how good \
+the idea is — a low response rate must reflect the idea, not the page.
+
+  **Design it for this specific product, and say so before you build.** Open your \
+plan with three lines: a palette of 4-6 named hex values, the two typefaces you are \
+pairing and what each is for, and one sentence describing the layout idea. Then build \
+to that. A page assembled from defaults is the single most common reason a generated \
+page reads as generated.
+
+  Ground the look in the buyer's own world. A tool for CI engineers can borrow from \
+terminal output, build logs, monospace timings, a pipeline diagram; a tool for \
+accountants borrows from ledgers and reconciliation. Something specific and slightly \
+unexpected beats something tasteful and anonymous.
+
+  Typography carries it. Link real typefaces from Google Fonts \
+(`<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=...&display=swap">`) \
+with a full fallback stack — a system-font-only page reads as unstyled. Pair a \
+characterful display face with a comfortable body face, set a type scale and hold to \
+it, keep running text near 65 characters wide.
+
+  **Do not ship any of these**, because they are what a generated page looks like and \
+every one is a default rather than a decision: the Tailwind slate/gray ramps \
+(#f8fafc, #64748b, #e2e8f0, #cbd5e1, #0f172a, #1e293b) or any other framework's \
+stock palette; a dark navy or purple-to-blue gradient hero; `-apple-system`/Inter/ \
+Space Grotesk as the only typeface; emoji as section markers; every section centered; \
+the same rounded corner and card treatment repeated down the page; three feature \
+cards in a row with an icon above each.
+
+  Pick your neutrals rather than inheriting them — a grey nudged slightly toward the \
+accent hue reads as chosen, a stock mid-grey reads as untouched. Spend boldness in \
+one place and keep everything around it quiet. Real, specific copy throughout, never \
+lorem-ipsum, and a mobile-responsive layout.
 - An interest-capture form (email, and an optional short message) that POSTs as JSON \
 to the exact interest URL given below. On success, replace the form with a short \
 message telling the visitor to check their email and click the confirmation link to \
