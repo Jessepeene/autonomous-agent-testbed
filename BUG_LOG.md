@@ -41,6 +41,9 @@ time it's fixed, not batched up afterward.**
 27. [The repair agent was told `readyState=ERROR` and nothing else](#27-the-repair-agent-was-told-readystateerror-and-nothing-else)
 28. [`converging` read zero blockers as a wall, escalating a build that had just been approved to ship](#28-converging-read-zero-blockers-as-a-wall-escalating-a-build-that-had-just-been-approved-to-ship)
 29. [Every new product ships behind Vercel's SSO login wall — the residual gap from #5, as predicted](#29-every-new-product-ships-behind-vercels-sso-login-wall--the-residual-gap-from-5-as-predicted)
+30. [No CORS anywhere: every interest form on every page ever shipped failed in the browser](#30-no-cors-anywhere-every-interest-form-on-every-page-ever-shipped-failed-in-the-browser)
+31. [Validation pages never got a design brief — the call sat below the early return](#31-validation-pages-never-got-a-design-brief--the-call-sat-below-the-early-return)
+32. [The landing page published its own internal provenance to customers](#32-the-landing-page-published-its-own-internal-provenance-to-customers)
 
 ---
 
@@ -360,6 +363,102 @@ its forgiving error handling made a real, unmocked request to api.vercel.com
 invisible inside the unit suite — the call went out, 403'd on a fake token,
 logged a warning, and the test passed anyway. Caught by timing it. An autouse
 fixture now keeps `httpx.AsyncClient.patch` off the network for the whole file.
+
+---
+
+## 30. No CORS anywhere: every interest form on every page ever shipped failed in the browser
+
+**Found**: 2026-09-14, by Jesse, who opened the first product this factory shipped
+and tried the form. "Form doesn't work."
+
+**Severity**: The whole point of the validation stage. A landing page exists to
+collect interest; the interest signal gates every build-or-scrap decision; and it
+could never arrive from a browser. Every page this factory has ever deployed.
+
+**Root cause**: The FastAPI app had no CORS middleware at all. Every landing page
+is served from a `*.vercel.app` origin and posts to `/interest/{product_id}` on
+the factory's own domain, so every submission is cross-origin:
+
+```
+OPTIONS /interest/{id}  ->  405 Method Not Allowed, no CORS headers
+POST    /interest/{id}  ->  200 {"received":true}, no Access-Control-Allow-Origin
+```
+
+`Content-Type: application/json` makes the request non-simple, so the browser
+*must* preflight; a 405 means the fetch is never sent. And even past that, no
+`Access-Control-Allow-Origin` on the response means the page cannot read it. Two
+independent failures, either fatal.
+
+**Why nothing caught it — the important part.** Every judge in the pipeline reads
+source. The gap check compares files to acceptance criteria, Bug Council reviews
+code in six categories, the generated `test_validate.py` asserts against the HTML
+on disk, and the contract and SEO checks grep for strings. All five passed,
+correctly: the markup *is* right. `curl` passed too, because `curl` sends no
+`Origin` and needs no preflight. The defect existed only in the gap between
+correct source and a working product, and nothing in the pipeline stood there.
+
+**Fix**: `CORSMiddleware`, scoped as narrowly as the two public beacons need —
+POST/OPTIONS only (no GET is ever cross-origin readable, so `/dashboard/*`,
+`/metrics` and `/health` gain nothing), `allow_credentials=False`, and
+`allow_origins=["*"]` because each product deploys to a fresh random subdomain
+that cannot be known in advance. Abuse stays bounded by `abuse.rate_limit`.
+
+**And the structural fix**: `engines/development/preship.py` — see below.
+
+**Verified**: live preflight 405 → 200 with the right headers; then a real
+Playwright browser on the real deployed page filled the form, clicked, and
+recorded `POST /interest/{id} -> 200`, `FAILURES: 0`.
+
+---
+
+## 31. Validation pages never got a design brief — the call sat below the early return
+
+**Found**: 2026-09-14, by Jesse. "No design brief."
+
+**Severity**: Cosmetic in effect, total in scope — the dashboard's design panel
+was empty for every product this factory has ever shipped.
+
+**Root cause**: `_verify_and_ship` calls `build_design_brief` after deploy. The
+`is_validation` branch returns at line 1753; the call sat at 1782. Validation
+pages are the only thing this factory currently ships, so the one product type
+that existed was the one type that never reached the call.
+
+**Fix**: moved above the branch. Still never blocks shipping — it degrades to
+`None` on any failure and no-ops when one is already cached.
+
+---
+
+## 32. The landing page published its own internal provenance to customers
+
+**Found**: 2026-09-14, by Jesse, reading the live page: *"This pain is real and
+public — read the corroborating discussion in this App Center issue: GitHub:
+microsoft/appcenter issue #427. This is a bit weird to have on your landing page
+right?"*
+
+**Severity**: Credibility, and it would have recurred on every page. A prospect
+sees the page linking the forum thread the idea was scraped from.
+
+**Root cause**: The codegen prompt hands the model:
+
+```
+- evidence: {idea.source_url}
+```
+
+with nothing saying what the field is for. It is internal Discovery provenance. A
+field labelled "evidence", handed to a copywriter with no framing, is material —
+the model was not wrong to use it. Same shape as #23 and #29: the thing that was
+missing was never in the model, it was in what the model was told.
+
+**Fix**: the field is now labelled as internal provenance explicitly not for the
+page, plus a hard constraint that nothing internal to the factory — provenance,
+issue trackers, research sources, the validation process itself — may appear.
+
+**Related, same commit** (Jesse's decision, not a bug): validation pages now
+describe the product in the present tense like any company describes what it
+sells, rather than announcing they are not real, since a page that says the
+product does not exist measures nothing. Two limits written into the prompt as
+firm: never invent evidence (testimonials, logos, usage counts, press), and never
+imply the visitor can buy now, because the page only ever collects an email.
 
 ---
 
