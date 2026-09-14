@@ -20,7 +20,24 @@ from factory.settings import EngineName
 
 
 class Contract(BaseModel):
-    """Base for anything an LLM is asked to produce."""
+    """Base for anything an LLM is asked to produce.
+
+    A note on `max_length`, learned the same way three times: do not put one on a
+    prose field a model writes. `ReviewVerdict.summary` at 200 discarded a real
+    review of a real defect; `details` at 2000 discarded the retry; `evidence` at 600
+    discarded a gap report. Every limit chosen here has been wrong, which is evidence
+    against the practice rather than against the numbers.
+
+    They also bound nothing. The database columns behind these are `Text`, every
+    consumer truncates at the point of use, and the genuine ceiling on a response is
+    `max_tokens` -- enforced by the API rather than by hope. A `max_length` is a
+    second, redundant bound whose only distinct effect is to convert a verbose but
+    correct answer into total loss.
+
+    `min_length` is the opposite and stays: an empty summary really is useless, and
+    that is a defect worth failing on. Caps on *list* lengths stay too -- a report
+    with five hundred findings is broken in a way a long sentence is not.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -664,11 +681,11 @@ class AcceptanceCriterion(Contract):
     that references it unfalsifiable too.
     """
 
-    criterion: str = Field(min_length=10, max_length=300)
+    criterion: str = Field(min_length=10)
     #: Why this matters, so a release decision can weigh it rather than only tick
     #: it. A reviewer that knows *why* a criterion exists can tell a near-miss from
     #: a real failure; one that only has the rule cannot.
-    why: str = Field(min_length=10, max_length=300)
+    why: str = Field(min_length=10)
 
 
 class WorkRequirements(Contract):
@@ -687,7 +704,7 @@ class WorkRequirements(Contract):
       an argument nobody wrote down.
     """
 
-    goal: str = Field(min_length=20, max_length=500)
+    goal: str = Field(min_length=20)
     must: list[AcceptanceCriterion] = Field(min_length=1, max_length=12)
     should: list[AcceptanceCriterion] = Field(default_factory=list, max_length=12)
     out_of_scope: list[str] = Field(default_factory=list, max_length=12)
@@ -707,7 +724,7 @@ class ReleaseDecision(Contract):
     """
 
     decision: Literal["ship", "fix_first", "rethink", "abandon"]
-    rationale: str = Field(min_length=30, max_length=1500)
+    rationale: str = Field(min_length=30)
     #: MUST criteria this build does not meet. Non-empty is close to decisive: a
     #: product that does not do what it had to do is not shippable, whatever else is
     #: true of it.
@@ -731,12 +748,12 @@ class RequirementGap(Contract):
     issues became 28 in a single cycle.
     """
 
-    criterion: str = Field(min_length=10, max_length=300)
+    criterion: str = Field(min_length=10)
     tier: Literal["must", "should"]
     #: What in the product shows this is unmet. Required, because a gap asserted
     #: without evidence is an opinion, and the whole point of comparing against a
     #: written standard is that the answer is checkable.
-    evidence: str = Field(min_length=10, max_length=600)
+    evidence: str = Field(min_length=10)
 
 
 class GapReport(Contract):

@@ -110,6 +110,13 @@ async def find_requirement_gaps(
             prompt=prompt,
             engine=EngineName.DEVELOPMENT,
             task_id=task_id,
+            # Sized here rather than inherited from ANALYSIS's 8_192 default, which
+            # thinking consumed entirely before a single gap was emitted -- the same
+            # per-category-constant problem as the old flat result cap. `parse`
+            # already takes this, so the caller that knows the shape of the call is
+            # the right place to set it: this one reads an entire codebase against a
+            # list of criteria and answers about every one of them.
+            max_tokens=32_000,
         )
     except Exception as exc:
         log.warning("gaps.comparison_failed", detail=str(exc)[:200])

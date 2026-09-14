@@ -51,30 +51,29 @@ class ReviewVerdict(Contract):
     #: Deliberately the first field: everything else is only meaningful once this
     #: is true, and a reviewer that found nothing must have a cheap way to say so.
     defect_found: bool
-    #: Generous rather than tight, and the target lengths live in the prompt
-    #: instead (`_REVIEW_VERDICT_SYSTEM`).
+    #: No length cap at all, and the target lengths live in the prompt instead
+    #: (`_REVIEW_VERDICT_SYSTEM`). See `Contract`'s docstring: every max_length
+    #: chosen for a prose field here has been wrong, they bound nothing the database
+    #: needs, and `max_tokens` is the real ceiling.
     #:
-    #: These were 200/2000, and the prompt -- which asks for "what was done, what
+    #: These were 200/2000. The prompt -- which asks for "what was done, what
     #: happened, what should have happened", for "an engineer who cannot see the
     #: page" -- never mentioned either number. The first live POC review wrote a
     #: perfectly good writeup, overran 200 on `summary`, had its repair attempt
     #: overrun 2000 on `details`, and the whole review was discarded: a real defect
-    #: found on a real page and thrown away over a limit nobody told the model
-    #: about. That is the same outcome as the step-limit loss this extraction step
-    #: was built to prevent, arriving by a different door.
-    #:
-    #: A cap still exists so genuinely absurd output fails rather than flowing into
-    #: a task payload, and `queue_review_patch` truncates what it forwards anyway.
-    summary: str = Field(default="", max_length=500)
-    details: str = Field(default="", max_length=4000)
+    #: on a real page thrown away over a limit nobody told the model about. Raising
+    #: them to 500/4000 only moved the cliff; `queue_review_patch` truncates what it
+    #: forwards anyway, so the cap was never protecting anything downstream.
+    summary: str = Field(default="")
+    details: str = Field(default="")
     #: Where the defect lives -- an endpoint, a selector, a file:line, a page area.
     #: This is what gives a finding an identity that survives rewording, so the
     #: same defect found next week matches the existing issue instead of filing a
     #: fifth copy of it (see `factory/issues.py`). Best-effort: a reviewer that
     #: cannot name one still gets an issue, matched on wording instead.
-    location: str = Field(default="", max_length=300)
-    kind: str = Field(default="bug", max_length=24)
-    severity: str = Field(default="medium", max_length=16)
+    location: str = Field(default="")
+    kind: str = Field(default="bug")
+    severity: str = Field(default="medium")
 
 
 async def queue_review_patch(
