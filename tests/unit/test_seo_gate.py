@@ -19,8 +19,14 @@ from factory.state.schemas import CouncilResult, ProductStatus
 from factory.supervisor.context import FactoryContext
 
 
+#: Set per-test where the build kind matters; `_verify_and_ship` reads it off the
+#: product row the stub returns.
+_build_kind = {"value": "mvp"}
+
+
 @pytest.fixture(autouse=True)
 def _no_real_db(monkeypatch: pytest.MonkeyPatch) -> None:
+    _build_kind["value"] = "mvp"
     """`_verify_and_ship` writes to the database at several points (status
     transitions, resolving heal attempts, enqueueing the post-deploy harvest) --
     all stubbed rather than standing up a real session, matching
@@ -45,6 +51,13 @@ def _no_real_db(monkeypatch: pytest.MonkeyPatch) -> None:
         # some later attempt instead of this one) -- exactly like every other
         # stub here, real domain-request behaviour has its own dedicated tests.
         return None
+
+    async def fake_get_build_kind(session: object, product_id: str) -> str:
+        # The one fact the gate reads, stubbed on its own. It used to be a
+        # parameter, and both repair call sites dropped it -- so a landing page
+        # was re-verified as an MVP on every fix and the contract demanded Stripe
+        # wiring its own requirements forbade.
+        return _build_kind["value"]
 
     @dataclass(slots=True)
     class _FakeIdeaRow:
@@ -79,6 +92,7 @@ def _no_real_db(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setattr(repository, "enqueue_task", fake_enqueue_task)
     monkeypatch.setattr(repository, "get_product", fake_get_product)
+    monkeypatch.setattr(repository, "get_build_kind", fake_get_build_kind)
     monkeypatch.setattr(repository, "get_idea", fake_get_idea)
 
 
@@ -306,7 +320,12 @@ async def test_a_validation_page_is_not_flagged_for_missing_stripe_wiring(
     own "This is deliberately NOT a real product" section) -- the contract gate must
     not check for PRODUCT_PRICE_CENTS/client_reference_id when is_validation=True, or
     every single validation build would heal forever on a requirement that doesn't
-    apply to it."""
+    apply to it.
+
+    The kind is now read from the product rather than passed in, because as a
+    parameter both repair call sites dropped it -- so this exemption held on the
+    first build and silently stopped holding on every repair after it."""
+    _build_kind["value"] = "validation"
     ctx.sandbox = _passing_sandbox()
     _write_workspace(
         ctx,
@@ -353,7 +372,6 @@ async def test_a_validation_page_is_not_flagged_for_missing_stripe_wiring(
         workspace="product-1",
         test_command="pytest -q",
         idea_id="idea-1",
-        is_validation=True,
     )
 
     assert heal_called is False

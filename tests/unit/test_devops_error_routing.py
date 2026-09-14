@@ -177,7 +177,15 @@ def _no_real_db(monkeypatch: pytest.MonkeyPatch) -> None:
         # stub cannot look up simply skips the checks that need the row.
         return None
 
+
+    async def fake_get_build_kind(session: object, product_id: str) -> str:
+        # The single fact `_verify_and_ship` reads to know what it is verifying.
+        # These tests are all about a real MVP build reaching (or not reaching) the
+        # council and deploy, so `mvp` is the kind under test.
+        return "mvp"
+
     monkeypatch.setattr(repository, "set_product_status", fake_set_product_status)
+    monkeypatch.setattr(repository, "get_build_kind", fake_get_build_kind)
     monkeypatch.setattr(repository, "get_product", fake_get_product)
     monkeypatch.setattr(repository, "live_requirements", fake_live_requirements)
     monkeypatch.setattr(repository, "open_issues_for", fake_open_issues_for)

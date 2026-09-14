@@ -156,6 +156,14 @@ class Product(Base):
     workspace_path: Mapped[str | None] = mapped_column(String(1000))
     deploy_url: Mapped[str | None] = mapped_column(String(1000))
     heal_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: Whether this is still a validation landing page or a real MVP.
+    #:
+    #: Lives here rather than being passed to `_verify_and_ship`, because as a
+    #: parameter two of its four call sites forgot it -- both repair paths -- so a
+    #: landing page was re-verified as an MVP the moment it needed a fix, and the
+    #: codegen contract then demanded Stripe wiring its own requirements forbade.
+    #: A fact four call sites must remember is a fact waiting to be dropped.
+    build_kind: Mapped[str] = mapped_column(String(16), nullable=False, default="validation")
     #: Which Learning-Loop version of LANDING_PAGE_SYSTEM built this product's
     #: validation page, if it went through validation. Set once, read by
     #: EVALUATE_VALIDATION (run after HARVEST_LEADS/SEND_OUTREACH have both

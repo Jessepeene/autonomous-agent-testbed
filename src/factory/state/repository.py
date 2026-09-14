@@ -3140,3 +3140,31 @@ async def live_requirements(
         Requirement.superseded_at.is_(None),
     )
     return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def set_build_kind(session: AsyncSession, product_id: str, build_kind: str) -> None:
+    """Record whether this product is a validation page or a real MVP.
+
+    Called once, at the point a build of that kind actually starts. `_verify_and_ship`
+    reads it rather than being told -- as a parameter it was silently dropped by both
+    repair call sites, which is what turned a landing page into a product with a
+    broken checkout over 25 days.
+    """
+    await session.execute(
+        update(Product).where(Product.id == product_id).values(build_kind=build_kind)
+    )
+
+
+async def get_build_kind(session: AsyncSession, product_id: str) -> str:
+    """Whether this product is still a validation page or a real MVP.
+
+    A single scalar rather than the whole product row, because the verification gate
+    needs exactly this one fact and nothing else -- and because fetching the row for
+    it couples the gate to every other thing a caller might have stubbed or not.
+
+    Defaults to `validation` for a product that cannot be found: that is where every
+    product starts, and erring toward "landing page" means an unknown product is
+    never asked for payment wiring it was not meant to have.
+    """
+    stmt = select(Product.build_kind).where(Product.id == product_id)
+    return (await session.execute(stmt)).scalar_one_or_none() or "validation"

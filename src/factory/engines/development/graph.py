@@ -228,6 +228,8 @@ async def _build(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
             await repository.set_product_status(
                 session, product_id, ProductStatus.BUILDING, test_command=plan.test_command
             )
+            # The transition out of validation, recorded where it actually happens.
+            await repository.set_build_kind(session, product_id, "mvp")
             repair.write_initial_knowledge(
                 workspace,
                 ctx.settings,
@@ -338,7 +340,6 @@ async def _build_landing_page(ctx: FactoryContext, session: AsyncSession, task: 
                 test_command=plan.test_command,
                 idea_id=idea.id,
                 task_id=task.id,
-                is_validation=True,
             )
     except LockUnavailable:
         return f"development: product {product_id} is locked by another worker"
@@ -1316,8 +1317,18 @@ async def _verify_and_ship(
     test_command: str,
     idea_id: str,
     task_id: str | None = None,
-    is_validation: bool = False,
 ) -> str:
+    # Read from the product, never taken as a parameter. It *was* a parameter, and
+    # two of this function's four call sites -- both repair paths -- never passed
+    # it. So a landing page verified correctly when built, and the moment it needed
+    # any repair it was re-verified as a full MVP: the codegen contract then
+    # demanded STRIPE_API_KEY, PRODUCT_PRICE_CENTS and client_reference_id on a page
+    # whose own requirements list payment as out of scope. The repair agent built
+    # the checkout it was told to, that checkout 422'd because nothing was behind
+    # it, and fixing that ran for 25 days. The product became an MVP because this
+    # gate kept insisting it was one.
+    is_validation = await repository.get_build_kind(session, product_id) == "validation"
+
     await repository.set_product_status(session, product_id, ProductStatus.REVIEWING)
 
     # Cheapest, earliest check, same reasoning as the SEO gate below: this runs
@@ -1493,8 +1504,9 @@ async def _verify_and_ship(
     # company, and it was a boolean -- which is what made the build a retry loop
     # rather than a process: every transition was automatic, so the system had one
     # move and made it until a counter ran out.
-    product_row = await repository.get_product(session, product_id)
     stored_requirements = await repository.live_requirements(session, "product", product_id)
+    product_row = await repository.get_product(session, product_id)
+    heal_attempts_so_far = product_row.heal_attempts if product_row else 0
     decision = await decide_release(
         ctx,
         session,
@@ -1502,7 +1514,7 @@ async def _verify_and_ship(
         product_name=product_name,
         council=council,
         requirements=_requirements_from_row(stored_requirements) if stored_requirements else None,
-        heal_attempts=product_row.heal_attempts if product_row else 0,
+        heal_attempts=heal_attempts_so_far,
         task_id=task_id,
     )
 
