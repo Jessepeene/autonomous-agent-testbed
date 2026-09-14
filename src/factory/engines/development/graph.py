@@ -1806,7 +1806,38 @@ async def _heal(
         origin="development:heal",
     )
 
-    if attempts >= ctx.settings.max_heal_cycles:
+    # Stop on a wall, not on a count.
+    #
+    # This was `attempts >= max_heal_cycles`, and it is the reason a blank-slate
+    # landing page that had *already been fixed* escalated anyway: by attempt three
+    # the workspace passed the contract check and the SEO check with zero violations
+    # and carried no backend, no auth and no Stripe -- and a counter ended it
+    # regardless, because nothing here ever asked whether the work was going
+    # anywhere. The same shape as every other bug found today: a blind rule
+    # overruling an informed judgement, and firing first.
+    #
+    # `product_progress` answers the question the counter could not. A run that
+    # closed blockers since the last decision is working, and there is no principled
+    # number of attempts at which working should stop. A run whose blocking set has
+    # not moved, or that keeps re-finding the same criterion, is a wall -- and one
+    # more attempt at a wall is worse than saying so.
+    progress = await repository.product_progress(session, product_id)
+    walled = progress.converging is False or bool(progress.stuck)
+    # The cost backstop, deliberately not the decision. It exists so an oscillating
+    # repair cannot bill indefinitely, and it sits far enough out that it is not
+    # what normally ends a run.
+    out_of_budget = attempts >= ctx.settings.max_heal_cycles * 2
+
+    if walled or out_of_budget:
+        log.info(
+            "development.heal_stopped",
+            product_id=product_id,
+            attempts=attempts,
+            reason="budget" if out_of_budget and not walled else "not_converging",
+            blocking_now=progress.blocking_now,
+            blocking_before=progress.blocking_at_last_attempt,
+            stuck=len(progress.stuck),
+        )
         await repository.record_heal_attempt(
             session,
             product_id=product_id,

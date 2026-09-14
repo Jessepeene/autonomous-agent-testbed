@@ -62,3 +62,45 @@ def test_progress_carries_the_previous_decision() -> None:
     """So a second look starts from the first rather than re-deriving it -- the
     thread across attempts, without anything having to remember it."""
     assert _progress(last_decision="rethink").last_decision == "rethink"
+
+
+class TestWhenHealingStops:
+    """The counter that ended a run which had already succeeded.
+
+    `_heal` escalated on `attempts >= max_heal_cycles`, independently of anything
+    that knew whether the work was going anywhere. Observed live on a blank-slate
+    landing page: by attempt three the workspace passed the contract check and the
+    SEO check with zero violations and carried no backend, no auth and no Stripe --
+    the gap had been fixed -- and it escalated anyway.
+
+    The release judgement had convergence and could say rethink. The counter fired
+    first and never consulted it. Same shape as every other bug found that day: a
+    blind rule overruling an informed judgement.
+    """
+
+    def test_work_that_is_closing_blockers_is_not_a_wall(self) -> None:
+        progress = _progress(blocking_now=1, blocking_at_last_attempt=4, stuck=[])
+        walled = progress.converging is False or bool(progress.stuck)
+        assert not walled, "a run that is closing blockers should keep going"
+
+    def test_a_blocking_set_that_has_not_moved_is_a_wall(self) -> None:
+        progress = _progress(blocking_now=4, blocking_at_last_attempt=4, stuck=[])
+        assert progress.converging is False or bool(progress.stuck)
+
+    def test_the_same_criterion_failing_repeatedly_is_a_wall(self) -> None:
+        """Even while the overall count falls. Trading one blocker for another looks
+        like progress in aggregate and is not."""
+        progress = _progress(
+            blocking_now=3,
+            blocking_at_last_attempt=4,
+            stuck=["MUST not met: a visitor can submit an email"],
+        )
+        assert progress.converging is True
+        assert bool(progress.stuck), "a criterion that keeps failing is its own signal"
+
+    def test_a_first_attempt_is_never_a_wall(self) -> None:
+        """`converging` is None with nothing to compare against, and `None is False`
+        is False -- so a first attempt continues rather than being stopped by a
+        comparison that does not exist yet."""
+        progress = _progress(blocking_at_last_attempt=None, stuck=[])
+        assert not (progress.converging is False or bool(progress.stuck))
