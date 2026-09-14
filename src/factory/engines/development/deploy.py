@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 
@@ -60,6 +61,11 @@ class DeployResult:
     #: slug from `product_name`, which can drift across builds. `None` on dry-run
     #: or failure, when no real Vercel project was touched.
     project: str | None = None
+    #: Digest of the bundle actually uploaded, on success. Recorded on the product
+    #: so that "has this workspace shipped?" is answered by hashing the workspace
+    #: and comparing -- computed from reality on both sides, rather than tracked by
+    #: a flag two code paths have to keep honest between them.
+    content_hash: str | None = None
 
 
 _INFRA_STATUS = {401, 403, 429, 500, 502, 503, 504}
@@ -103,6 +109,34 @@ def deploy_requires_approval(
             f"{len(blocking)} finding(s) at a severity that cannot ship: "
             + "; ".join(f"[{f.severity}/{f.category}] {f.summary}" for f in blocking[:5])
         )
+
+
+def content_digest(files: list[dict[str, str]]) -> str:
+    """SHA-256 over a deployment bundle -- path and bytes, order-independent.
+
+    Lets "is what is on disk the same as what is live?" be computed from both
+    sides at the moment it is asked, instead of tracked by a flag that two code
+    paths have to keep honest between them. A flag can be stale and was; a digest
+    computed from the files cannot be.
+    """
+    digest = hashlib.sha256()
+    for entry in sorted(files, key=lambda e: e["file"]):
+        # Length-prefixed rather than delimiter-separated: a delimiter that can
+        # occur in the data makes two different bundles hashable to the same value,
+        # and base64 payloads are long enough that picking a "safe" separator is a
+        # guess rather than a guarantee.
+        path = entry["file"].encode("utf-8")
+        data = entry["data"].encode("ascii")
+        digest.update(f"{len(path)}:".encode())
+        digest.update(path)
+        digest.update(f"{len(data)}:".encode())
+        digest.update(data)
+    return digest.hexdigest()
+
+
+def workspace_digest(workspace: str, settings: Settings) -> str:
+    """The digest the workspace *would* deploy as, right now."""
+    return content_digest(_collect_files(workspace, settings))
 
 
 def _collect_files(workspace: str, settings: Settings) -> list[dict[str, str]]:
@@ -398,7 +432,13 @@ async def deploy(
     # project is created by the call above, and there is no earlier point to do it.
     await _disable_sso_protection(project_name, token)
     log.info("deploy.published", product=product_name, url=full_url)
-    return DeployResult(ok=True, url=full_url, detail="published", project=project_name)
+    return DeployResult(
+        ok=True,
+        url=full_url,
+        detail="published",
+        project=project_name,
+        content_hash=content_digest(files),
+    )
 
 
 async def _disable_sso_protection(project_name: str, token: str) -> None:

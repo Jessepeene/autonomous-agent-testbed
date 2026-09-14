@@ -1190,6 +1190,34 @@ async def _patch(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
         return f"development: product {product_id} is locked by another worker"
 
 
+def _workspace_differs_from_deployment(
+    ctx: FactoryContext, product: Product, workspace: str
+) -> bool:
+    """Does this workspace hold anything the customer has not been given?
+
+    Asked, not remembered. The digest of the last successful deploy is on the
+    product; hashing the workspace the same way and comparing answers the question
+    from reality on both sides, so there is no flag for two code paths to keep
+    honest between them.
+
+    `workspace_undeployed` remains the fallback for products deployed before the
+    digest existed, where the honest answer is that nobody knows -- and that is the
+    case this was needed for: a workspace genuinely holding an unshipped fix
+    reported `false`, because the column was added after the edits were made.
+
+    Degrades to the flag on any failure. A workspace that cannot be read is not
+    evidence that it matches what is live.
+    """
+    if not product.deployed_content_hash:
+        return bool(product.workspace_undeployed)
+    try:
+        current = deploy_module.workspace_digest(workspace, ctx.settings)
+    except OSError as exc:
+        log.warning("development.workspace_digest_failed", detail=str(exc)[:200])
+        return bool(product.workspace_undeployed)
+    return current != product.deployed_content_hash
+
+
 async def _patch_surgically(
     ctx: FactoryContext,
     session: AsyncSession,
@@ -1263,7 +1291,7 @@ async def _patch_surgically(
         # workspace, correctly saw the work already done, and closed both issues as
         # invalid while the defects were still on the page in front of visitors.
         # "Already fixed here" is not "fixed for the customer".
-        if product.workspace_undeployed:
+        if _workspace_differs_from_deployment(ctx, product, workspace):
             log.info("development.repair_already_applied", product_id=product_id)
             return await _verify_and_ship(
                 ctx,
@@ -1332,6 +1360,22 @@ async def _patch_surgically(
     await repository.set_product_status(
         session, product_id, ProductStatus.PATCHING, workspace_undeployed=True
     )
+
+    # The issues this repair was commissioned for have had their work done. `fixed`
+    # is a claim, not a conclusion -- the next review either fails to find the defect
+    # and closes it, or reports it again and reopens it -- and that distinction is
+    # already why this status exists.
+    #
+    # It has to happen here rather than only after a successful deploy, because
+    # `blocking_now` counts open issues and the wall check runs on the way to that
+    # deploy. Left open, the count cannot fall on the attempt that actually fixed
+    # something: observed as `repair.applied` followed four seconds later by
+    # `heal_stopped blocking_now=2 blocking_before=2`, escalating the one attempt
+    # that had worked.
+    if task.id:
+        await repository.mark_issue_fixed(
+            session, task_id=task.id, resolution="Repaired in the workspace, pending verification"
+        )
 
     result = await _verify_and_ship(
         ctx,
@@ -1874,8 +1918,11 @@ async def _verify_and_ship(
             ProductStatus.VALIDATING,
             deploy_url=result.url,
             heal_attempts=0,
-            # The workspace and the customer now agree again.
+            # The workspace and the customer now agree again -- recorded as the
+            # digest of what was actually uploaded, so the next caller can verify
+            # it rather than trust the flag beside it.
             workspace_undeployed=False,
+            deployed_content_hash=result.content_hash,
         )
         await repository.enqueue_task(
             session,
@@ -1894,8 +1941,11 @@ async def _verify_and_ship(
         ProductStatus.LIVE,
         deploy_url=result.url,
         heal_attempts=0,
-        # The workspace and the customer now agree again.
+        # The workspace and the customer now agree again -- recorded as the digest
+        # of what was actually uploaded, so the next caller can verify it rather
+        # than trust the flag beside it.
         workspace_undeployed=False,
+        deployed_content_hash=result.content_hash,
     )
     # The work this issue was assigned shipped. That is `fixed` -- a claim, not a
     # conclusion. The next review either fails to find the defect (and closes it) or

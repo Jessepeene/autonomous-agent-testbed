@@ -479,3 +479,62 @@ def test_the_static_filter_is_an_allowlist_not_a_list_of_known_offenders(
     assert paths == {"index.html", "styles.css", "logo.svg", "robots.txt"}, (
         f"only browser-requestable files may ship; got {sorted(paths)}"
     )
+
+
+def test_the_deploy_digest_is_a_fact_about_the_bundle(settings: Settings) -> None:
+    """"Is this workspace shipped?" has to be answerable, not remembered.
+
+    `workspace_undeployed` (a boolean set by one code path and cleared by another)
+    was the first answer and it drifted immediately: every edit made before the
+    column existed was invisible to it, so a workspace genuinely holding an
+    unshipped fix reported `false` and five repair attempts could not close the gap.
+
+    A digest computed from the files cannot drift, because both sides are computed
+    from reality at the moment the question is asked.
+
+    Calls `_collect_files` directly rather than `workspace_digest`, because this
+    module's autouse fixture stubs the collector to a fixed payload -- which would
+    make every digest identical and the assertion vacuous.
+    """
+    from factory.engines.development.deploy import content_digest
+
+    root = settings.workspace_root / "product-digest"
+    root.mkdir(parents=True)
+    (root / "index.html").write_bytes(b"<html>original</html>")
+
+    before = content_digest(_collect_files("product-digest", settings))
+    assert before == content_digest(_collect_files("product-digest", settings)), "must be stable"
+
+    (root / "index.html").write_bytes(b"<html>repaired</html>")
+    after = content_digest(_collect_files("product-digest", settings))
+
+    assert after != before, (
+        "a changed workspace must produce a different digest, or a repair that "
+        "never shipped is indistinguishable from one that did"
+    )
+
+
+def test_the_digest_does_not_depend_on_file_order(settings: Settings) -> None:
+    """Two bundles with the same content are the same deployment."""
+    from factory.engines.development.deploy import content_digest
+
+    a = [
+        {"file": "index.html", "data": "aGk=", "encoding": "base64"},
+        {"file": "styles.css", "data": "Ym9keQ==", "encoding": "base64"},
+    ]
+    assert content_digest(a) == content_digest(list(reversed(a)))
+
+
+def test_two_different_bundles_cannot_collide_on_a_delimiter(settings: Settings) -> None:
+    """Length-prefixed, not delimiter-separated.
+
+    A separator that can occur inside the data lets two different bundles hash to
+    one value -- and base64 payloads are long enough that picking a "safe" byte is
+    a guess rather than a guarantee.
+    """
+    from factory.engines.development.deploy import content_digest
+
+    left = [{"file": "a", "data": "bc", "encoding": "base64"}]
+    right = [{"file": "ab", "data": "c", "encoding": "base64"}]
+
+    assert content_digest(left) != content_digest(right)

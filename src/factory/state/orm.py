@@ -238,6 +238,12 @@ class Product(Base):
     workspace_undeployed: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=false()
     )
+    #: SHA-256 over the exact bundle the last successful deploy uploaded. Makes
+    #: "is the workspace shipped?" a question that can be *asked* -- hash the
+    #: workspace the same way and compare -- rather than a flag two code paths have
+    #: to keep honest between them. `workspace_undeployed` above is the fallback for
+    #: products deployed before this existed, where the answer is genuinely unknown.
+    deployed_content_hash: Mapped[str | None] = mapped_column(String(64))
 
     __table_args__ = (Index("ix_products_status", "status"),)
 
