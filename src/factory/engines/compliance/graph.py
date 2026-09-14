@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from factory.engines.compliance import assessor
 from factory.engines.compliance.rules import idea_risk_category_hits
+from factory.engines.discovery.demand import assess_demand
 from factory.hitl import interrupts
 from factory.logging import get_logger
 from factory.memory import store as memory_store
@@ -170,6 +171,46 @@ async def _create_validation(session: AsyncSession, ctx: FactoryContext, idea_ro
         raise ValidationCapacityExceeded(
             f"{active}/{ctx.settings.max_concurrent_validations} validations already running"
         )
+
+    # Does the evidence actually justify spending on this? Nothing asked before.
+    # Every idea this factory has produced carries `evidence_count = 2`, all of them
+    # from one GitHub thread, and the only gate on that number anywhere is
+    # `if evidence_count == 0` -- so two comments bought a real build as easily as
+    # two hundred would have. This reads the posts instead of counting them, which
+    # only became possible once `idea_evidence` stopped throwing them away.
+    #
+    # Here rather than in Discovery on purpose: Discovery emits many ideas per
+    # cycle and most never reach this point, so assessing them all would pay for
+    # judgement nobody uses. This runs once, on the one idea about to cost money.
+    assessment = await assess_demand(
+        ctx,
+        session,
+        idea_id=idea_row.id,
+        problem_statement=idea_row.problem_statement,
+        target_niche=idea_row.target_niche,
+    )
+    if assessment is not None:
+        await repository.record_demand_assessment(
+            session, idea_id=idea_row.id, assessment=assessment
+        )
+        if assessment.verdict == "insufficient":
+            # Not a capacity error and not a failure -- a judgement, recorded, with
+            # its reasoning kept so a human can disagree with it.
+            await repository.set_idea_status(session, idea_row.id, "rejected")
+            log.info(
+                "compliance.demand_insufficient",
+                idea_id=idea_row.id,
+                reasoning=assessment.reasoning[:300],
+            )
+            return (
+                f"compliance: idea {idea_row.id} approved on compliance but not built -- "
+                f"the evidence does not support it: {assessment.reasoning[:200]}"
+            )
+    # A `thin` verdict deliberately still builds. A landing page is the cheapest
+    # instrument there is for exactly the question thin evidence leaves open, and
+    # refusing to run it because the evidence is weak is how a factory only ever
+    # builds things it already knew. The assessment is stored either way, so the
+    # release judgement and the requirements both see how strong the case was.
 
     product_id = await repository.create_product(
         session, name=idea_row.target_niche[:80], idea_id=idea_row.id

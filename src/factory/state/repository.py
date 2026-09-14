@@ -33,6 +33,7 @@ from factory.state.orm import (
     EntityVerdictRow,
     HealAttempt,
     Idea,
+    IdeaEvidence,
     IntegrationAlert,
     Interrupt,
     Issue,
@@ -3411,3 +3412,64 @@ async def recently_shipped_products(
         )
         for p in products
     ]
+
+
+async def record_idea_evidence(
+    session: AsyncSession, *, idea_id: str, signals: Sequence[Any]
+) -> int:
+    """Keep the raw signals an idea was drawn from. Returns how many were stored.
+
+    Called at idea-creation time, where the cluster is still in hand. A few minutes
+    later it is gone: `drain_scout_signals` deletes its buffer, and the fixed
+    sources never persisted anything at all.
+
+    Idempotent by deletion-and-rewrite rather than upsert -- an idea's evidence is
+    the cluster it came from, so a re-run replaces it wholesale rather than merging
+    two versions of the same set.
+    """
+    await session.execute(delete(IdeaEvidence).where(IdeaEvidence.idea_id == idea_id))
+    stored = 0
+    for signal in signals:
+        session.add(
+            IdeaEvidence(
+                id=new_id(),
+                idea_id=idea_id,
+                title=str(getattr(signal, "title", ""))[:300],
+                body=str(getattr(signal, "body", "")),
+                url=str(getattr(signal, "url", ""))[:500],
+                source=str(getattr(signal, "source", ""))[:60],
+                engagement=int(getattr(signal, "engagement", 0) or 0),
+            )
+        )
+        stored += 1
+    if stored:
+        await session.flush()
+    return stored
+
+
+async def evidence_for_idea(session: AsyncSession, idea_id: str) -> list[IdeaEvidence]:
+    """Everything real people wrote that this idea rests on, most-discussed first."""
+    stmt = (
+        select(IdeaEvidence)
+        .where(IdeaEvidence.idea_id == idea_id)
+        .order_by(IdeaEvidence.engagement.desc())
+    )
+    return list((await session.execute(stmt)).scalars().all())
+
+
+async def record_demand_assessment(
+    session: AsyncSession, *, idea_id: str, assessment: Any
+) -> None:
+    """Keep the demand judgement and the audience brief with the idea.
+
+    Stored whatever the verdict, including `thin` -- the reasoning is what lets a
+    human disagree with a rejection, and the audience brief is what the landing
+    page copy and the acceptance criteria should both be written from. Losing it
+    would repeat the mistake that made this necessary: a judgement made, acted on,
+    and then unavailable to everything downstream.
+    """
+    idea = await session.get(Idea, idea_id)
+    if idea is None:  # pragma: no cover - caller holds the row
+        return
+    idea.demand_assessment = assessment.model_dump_json()
+    await session.flush()

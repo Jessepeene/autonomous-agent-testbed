@@ -267,7 +267,17 @@ async def _audit_live_products(ctx: FactoryContext, session: AsyncSession) -> st
     this pass still makes, against the real fetched body, for the separate
     "does this still look right" question a raw status code can't answer.
     """
-    stmt = select(Product).where(Product.status == ProductStatus.LIVE.value).limit(50)
+    # VALIDATING as well as LIVE, and the omission was not cosmetic. A validation
+    # landing page is the only thing this factory currently ships, so restricting
+    # this sweep to LIVE meant the one product type in existence got no periodic
+    # review at all -- the same LIVE-only gate that kept the browser reviewer away
+    # from the page whose form had never worked. A page in front of real visitors
+    # is live in every sense that matters here, whatever the column says.
+    stmt = (
+        select(Product)
+        .where(Product.status.in_((ProductStatus.LIVE.value, ProductStatus.VALIDATING.value)))
+        .limit(50)
+    )
     live = (await session.execute(stmt)).scalars().all()
     if not live:
         return "maintenance/audit-live-products: no live products"

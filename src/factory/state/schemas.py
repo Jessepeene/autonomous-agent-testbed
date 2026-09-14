@@ -812,3 +812,40 @@ class PreShipReview(Contract):
     findings: list[VisitorFinding] = Field(default_factory=list, max_length=20)
     #: The reviewer's own account, for a human reading the record later.
     summary: str = Field(default="")
+
+
+class DemandAssessment(Contract):
+    """Whether the evidence behind an idea justifies spending on it, and who it is for.
+
+    One schema for both because they come from one reading of the same material.
+    Splitting them would mean either reading the evidence twice or -- far worse --
+    writing the audience brief from the idea's own generated prose, which is
+    inventing the customer and then believing it.
+    """
+
+    verdict: Literal["sufficient", "thin", "insufficient"]
+    #: Why, in terms of what the evidence actually says. Read by a human deciding
+    #: whether to overrule it.
+    reasoning: str = Field(min_length=30)
+    #: How many genuinely independent sources, judged rather than counted: several
+    #: people agreeing in one thread is one data point about one community. This is
+    #: the number `evidence_count` was mistaken for.
+    independent_sources: int = Field(ge=0)
+    #: The specific, costly problems found -- ideally quoting the person. Empty is a
+    #: strong signal on its own: evidence nobody could quote a concrete complaint
+    #: from is vague agreement.
+    concrete_pains: list[str] = Field(default_factory=list, max_length=10)
+    #: For `thin`: what evidence would change the verdict. The actionable half.
+    would_change_verdict: list[str] = Field(default_factory=list, max_length=6)
+
+    #: --- the audience brief, grounded in the same evidence ---
+    #: Who has this problem: role, what they are responsible for, how they are
+    #: measured. Specific beats flattering; a landing page has to speak to this.
+    audience: str = Field(default="")
+    #: What they already do about it -- the workarounds, scripts and tools they
+    #: maintain. The strongest evidence available short of a sale, and the thing a
+    #: pitch has to be better than.
+    current_workarounds: list[str] = Field(default_factory=list, max_length=8)
+    #: Their own words for the problem. Copy that uses a different vocabulary than
+    #: the buyer reads as written by someone who has not done the job.
+    their_vocabulary: list[str] = Field(default_factory=list, max_length=12)

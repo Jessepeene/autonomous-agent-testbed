@@ -106,6 +106,12 @@ class Idea(Base):
     evidence_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: The demand judgement and audience brief, as `DemandAssessment` JSON. Kept on
+    #: the idea rather than derived on demand because the evidence it was read from
+    #: is expensive to re-read and the judgement is what downstream work is written
+    #: against -- the landing page copy and the acceptance criteria should both come
+    #: from the audience brief rather than from the idea's own generated prose.
+    demand_assessment: Mapped[str | None] = mapped_column(Text)
     #: Per-dimension breakdown behind the blended `score` above -- added in
     #: 0023_idea_defensibility so a future weights change can be backtested against
     #: real historical ideas instead of only the single number that survived every
@@ -1323,4 +1329,45 @@ class Requirement(Base):
             "subject_kind IN ('product','task','issue','campaign')",
             name="requirement_subject_kind_valid",
         ),
+    )
+
+
+class IdeaEvidence(Base):
+    """The raw signals an idea was actually drawn from, kept.
+
+    The opposite of `ScoutSignal` above, deliberately. That one is a hand-off
+    buffer emptied the moment clustering reads it, so until this table existed
+    nothing in the factory could see what real people had written about a problem
+    once the Discovery cycle ended -- only a `source_url` and an integer survived.
+
+    Two consequences, and they are the reason this exists:
+
+    - An audience brief had nothing to be built from. Generating one anyway means
+      inventing the customer from the idea's own generated prose and then trusting
+      it, which is worse than having none.
+    - `evidence_count` could be displayed but never judged. Every idea this factory
+      has produced carries `evidence_count = 2`, and the only gate anywhere is
+      `if evidence_count == 0` -- so two comments on one GitHub thread cleared the
+      bar to build a product as easily as two hundred would have.
+
+    `ondelete="CASCADE"`: this is evidence *for* an idea and has no meaning without
+    it.
+    """
+
+    __tablename__ = "idea_evidence"
+
+    id: Mapped[str] = _pk()
+    idea_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("ideas.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    #: What somebody actually wrote. `Text`, never a bounded `String` -- truncating
+    #: a complaint to fit a column loses exactly the specific half that made it
+    #: worth keeping. Readers truncate at the point of use.
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    url: Mapped[str] = mapped_column(String(500), nullable=False)
+    source: Mapped[str] = mapped_column(String(60), nullable=False)
+    engagement: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )

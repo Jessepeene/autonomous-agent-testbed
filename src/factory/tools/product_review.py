@@ -107,11 +107,15 @@ async def queue_review_patch(
     product = await repository.get_product(session, product_id)
     if product is None:  # pragma: no cover - caller pins a real product
         return None, f"no product with id {product_id!r}"
-    if product.status != ProductStatus.LIVE.value:
+    if product.status not in (ProductStatus.LIVE.value, ProductStatus.VALIDATING.value):
         # Re-derived here rather than trusted from the caller's earlier check: a
         # product can start a build between the review starting and this call, and
         # patching mid-build fights `product_lock`.
-        return None, f"product is {product.status}, not live -- a patch would collide"
+        #
+        # VALIDATING counts. Refusing to patch one meant a reviewer could find a
+        # real defect on a live landing page and have nowhere to send it, which is
+        # a review that costs money and changes nothing.
+        return None, f"product is {product.status}, not reviewable -- a patch would collide"
 
     # File the finding *before* commissioning work, and file it whether or not the
     # patch is queued. The issue is the durable record; the task is one attempt at

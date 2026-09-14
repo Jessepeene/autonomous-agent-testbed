@@ -253,7 +253,8 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
     stored = 0
     unevidenced = 0
     for idea in kept:
-        evidence_count = _evidence_count_for(idea, clusters)
+        cluster = find_cluster_for_source_url(clusters, str(idea.source_url))
+        evidence_count = cluster.size if cluster is not None else 0
         if evidence_count == 0:
             # Tier 2 finding #8, system-wide verification plan: `source_url` is
             # supposed to be one of the cluster's own signal URLs, copied
@@ -280,6 +281,18 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
         if idea_id is None:
             continue  # already known — de-duplicated by fingerprint
         stored += 1
+        # Keep what this idea actually rests on. The cluster is in hand right here
+        # and nowhere else ever again: `drain_scout_signals` empties its buffer in
+        # the same call that reads it, and the fixed HN/GitHub/Reddit sources hand
+        # `Signal` objects straight to the clusterer in memory without persisting
+        # anything. Until this line, everything real people had written about the
+        # problem was discarded the moment an idea was written from it, leaving a
+        # URL and an integer -- which is why no later stage could research the
+        # audience or weigh whether the evidence justified a build.
+        if cluster is not None:
+            await repository.record_idea_evidence(
+                session, idea_id=idea_id, signals=cluster.signals
+            )
         await repository.enqueue_task(
             session,
             kind=TaskKind.ASSESS_COMPLIANCE,
