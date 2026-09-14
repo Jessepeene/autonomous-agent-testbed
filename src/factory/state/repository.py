@@ -3609,6 +3609,25 @@ async def answered_questions_for_task(session: AsyncSession, task_id: str) -> li
 
 
 @dataclass(slots=True)
+class DesignSubject:
+    """One product as Design sees it: what it is, and what can be done to it yet.
+
+    `status` and `deployed` are carried rather than filtered on, because which of
+    them matters is a judgement and judgements belong to the manager. A product
+    still being built cannot be *reviewed* -- there is nothing to look at -- but it
+    is the best possible moment to write its guidelines, since the builder is about
+    to need them.
+    """
+
+    id: str
+    name: str
+    status: str
+    #: Whether there is a page in the world to look at. Without one, a review has
+    #: nothing to review; with one, it does, whatever the product's status says.
+    deployed: bool
+
+
+@dataclass(slots=True)
 class DesignDomain:
     """What the Design manager can see of its own department, as rows not memory.
 
@@ -3618,12 +3637,12 @@ class DesignDomain:
     nothing in it can be hallucinated and every claim it supports is checkable.
     """
 
-    #: Shipped, and nobody has written down how it should look. The most common
-    #: reason there is work to do.
-    without_guidelines: list[tuple[str, str]]
-    #: Live, with guidelines, and no design review recorded against the current
+    #: Nobody has written down how it should look. The most common reason there is
+    #: work to do.
+    without_guidelines: list[DesignSubject]
+    #: Has guidelines, and no design review recorded against the current
     #: deployment. The manager decides whether that is worth its cost.
-    unreviewed: list[tuple[str, str]]
+    unreviewed: list[DesignSubject]
     #: Design findings still open across every product, newest first. Several
     #: products sharing one complaint is evidence about the house style rather than
     #: about any of them.
@@ -3633,21 +3652,32 @@ class DesignDomain:
 
 
 async def design_domain(session: AsyncSession) -> DesignDomain:
-    """Everything the Design manager needs to decide what to do next."""
-    live = (
+    """Everything the Design manager needs to decide what to do next.
+
+    Every product that is not retired, deliberately -- an earlier version looked
+    only at `VALIDATING` and `LIVE`, which excluded every state a product is in
+    *while it is being built*. That made this department structurally unable to do
+    the thing its own storage describes: guidelines are "a standard written before
+    the work, that the builder works to" (`record_design_guidelines`), and a
+    department that only sees shipped products can only ever write them afterwards.
+
+    Observed as silence rather than as an error. The manager ran, saw an empty
+    domain, and correctly reported nothing worth doing -- which is indistinguishable
+    from a department with nothing to do.
+
+    Retired is the one exclusion, and it needs no judgement: nobody will look at it
+    again.
+    """
+    subjects = (
         (
             await session.execute(
-                select(Product).where(
-                    Product.status.in_(
-                        (ProductStatus.VALIDATING.value, ProductStatus.LIVE.value)
-                    )
-                )
+                select(Product).where(Product.status != ProductStatus.RETIRED.value)
             )
         )
         .scalars()
         .all()
     )
-    ids = [p.id for p in live]
+    ids = [p.id for p in subjects]
 
     with_guidelines: set[str] = set()
     reviewed: set[str] = set()
@@ -3698,10 +3728,18 @@ async def design_domain(session: AsyncSession) -> DesignDomain:
 
     pending = await open_questions_for(session, EngineName.DESIGN.value)
 
+    def _subject(product: Product) -> DesignSubject:
+        return DesignSubject(
+            id=product.id,
+            name=product.name,
+            status=str(product.status),
+            deployed=bool(product.deploy_url),
+        )
+
     return DesignDomain(
-        without_guidelines=[(p.id, p.name) for p in live if p.id not in with_guidelines],
+        without_guidelines=[_subject(p) for p in subjects if p.id not in with_guidelines],
         unreviewed=[
-            (p.id, p.name) for p in live if p.id in with_guidelines and p.id not in reviewed
+            _subject(p) for p in subjects if p.id in with_guidelines and p.id not in reviewed
         ],
         open_findings=[(i.product_id or "", i.title) for i in findings],
         open_questions=len(pending),

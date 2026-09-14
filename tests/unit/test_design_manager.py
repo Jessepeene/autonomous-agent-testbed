@@ -32,7 +32,11 @@ def channel(monkeypatch) -> dict:
 
     async def fake_domain(session):
         return repository.DesignDomain(
-            without_guidelines=[("p-1", "Shardline")],
+            without_guidelines=[
+                repository.DesignSubject(
+                    id="p-1", name="Shardline", status="planned", deployed=True
+                )
+            ],
             unreviewed=[],
             open_findings=[],
             open_questions=0,

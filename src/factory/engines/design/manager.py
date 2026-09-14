@@ -96,19 +96,32 @@ Write your assessment first, then what follows from it -- not the other way roun
 """
 
 
+def _subject_line(subject: repository.DesignSubject) -> str:
+    """One product, with the two facts that change what is worth doing to it.
+
+    Its status and whether a page exists are stated rather than filtered on. A
+    product still being built cannot be reviewed -- there is nothing to look at --
+    but it is the best moment to write its guidelines, because the builder is about
+    to need them. Which of those matters is the manager's call, so it gets the facts
+    rather than a shortlist somebody else narrowed for it.
+    """
+    page = "a page is deployed" if subject.deployed else "nothing deployed to look at yet"
+    return f"  - {subject.id}  {subject.name}\n      status: {subject.status}, {page}"
+
+
 def _render_domain(domain: repository.DesignDomain) -> str:
     """The department's state as the manager sees it: rows, never recollection."""
     lines: list[str] = []
 
     if domain.without_guidelines:
-        lines.append("Live products with no design guidelines written for them:")
-        lines += [f"  - {pid}  {name}" for pid, name in domain.without_guidelines[:10]]
+        lines.append("Products with no design guidelines written for them:")
+        lines += [_subject_line(s) for s in domain.without_guidelines[:10]]
     else:
-        lines.append("Every live product has design guidelines.")
+        lines.append("Every product has design guidelines.")
 
     if domain.unreviewed:
         lines.append("\nHave guidelines, never reviewed against what actually shipped:")
-        lines += [f"  - {pid}  {name}" for pid, name in domain.unreviewed[:10]]
+        lines += [_subject_line(s) for s in domain.unreviewed[:10]]
     else:
         lines.append("\nEvery product with guidelines has been reviewed at least once.")
 

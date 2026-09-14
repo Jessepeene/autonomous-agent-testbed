@@ -560,3 +560,73 @@ def _scored_idea():
         build_feasibility=0.6,
         adoption_ease=0.8,
     )
+
+
+async def test_design_sees_a_product_while_it_is_still_being_built(
+    session: AsyncSession,
+) -> None:
+    """The scoping bug, and the reason it was invisible.
+
+    `design_domain` looked only at VALIDATING and LIVE, which excludes every state
+    a product is in *while it is being built* -- PLANNED, BUILDING, REVIEWING,
+    PATCHING. That made the department structurally unable to do the thing its own
+    storage describes: design guidelines are "a standard written before the work,
+    that the builder works to", and a department that only sees shipped products can
+    only ever write them afterwards.
+
+    It surfaced as silence, not as an error. The manager ran, saw an empty domain,
+    and reported nothing worth doing -- indistinguishable from a department that
+    genuinely had nothing to do.
+    """
+    from factory.state.schemas import ScoredIdea
+
+    def _idea(suffix: str) -> ScoredIdea:
+        base = _scored_idea()
+        return base.model_copy(update={"target_niche": f"{base.target_niche} ({suffix})"})
+
+    ideas = [await repository.upsert_idea(session, _idea(s)) for s in ("b", "l", "r")]
+    assert all(i is not None for i in ideas)
+    building = await repository.create_product(session, name="Still Building", idea_id=ideas[0])
+    live = await repository.create_product(session, name="Shipped", idea_id=ideas[1])
+    dead = await repository.create_product(session, name="Retired", idea_id=ideas[2])
+    await repository.set_product_status(session, building, ProductStatus.BUILDING)
+    await repository.set_product_status(session, live, ProductStatus.LIVE)
+    await repository.set_product_status(session, dead, ProductStatus.RETIRED)
+
+    domain = await repository.design_domain(session)
+    seen = {s.id for s in domain.without_guidelines}
+
+    assert building in seen, "a product being built is exactly when guidelines matter"
+    assert live in seen
+    # The one exclusion that needs no judgement: nobody will look at it again.
+    assert dead not in seen
+
+
+async def test_the_manager_is_told_what_it_can_actually_act_on(
+    session: AsyncSession,
+) -> None:
+    """Status and deployment are carried, not filtered on.
+
+    A product with nothing deployed cannot be *reviewed* -- there is nothing to look
+    at -- but its guidelines are worth writing. Deciding which of those applies is
+    the manager's judgement, so the domain states the facts rather than handing it a
+    shortlist somebody else narrowed.
+    """
+    idea = await repository.upsert_idea(session, _scored_idea())
+    assert idea is not None
+    product = await repository.create_product(session, name="No Page Yet", idea_id=idea)
+    await repository.set_product_status(session, product, ProductStatus.PLANNED)
+
+    subject = next(
+        s for s in (await repository.design_domain(session)).without_guidelines if s.id == product
+    )
+    assert subject.status == ProductStatus.PLANNED.value
+    assert subject.deployed is False
+
+    await repository.set_product_status(
+        session, product, ProductStatus.LIVE, deploy_url="https://example.com"
+    )
+    subject = next(
+        s for s in (await repository.design_domain(session)).without_guidelines if s.id == product
+    )
+    assert subject.deployed is True
