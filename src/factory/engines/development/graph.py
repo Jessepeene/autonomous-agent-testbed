@@ -26,6 +26,7 @@ from factory.engines.development import (
     dependencies,
     design_brief,
     domain,
+    preship,
     repair,
     seo,
 )
@@ -1730,7 +1731,59 @@ async def _verify_and_ship(
             category="deploy_failure",
         )
 
+    # The product is deployed but not yet shipped. Everything that judged it up to
+    # here read source -- the gap check against criteria, Bug Council's categories,
+    # the generated test against HTML on disk, the contract and SEO greps. None of
+    # them can answer "does it work", and the difference is not academic: a missing
+    # CORS configuration meant every form on every page this factory ever deployed
+    # failed in the browser while all five source reviewers passed it.
+    #
+    # This has to run after the deploy -- there is no URL to open before one -- so
+    # "before shipping" means before the product counts as live and before marketing
+    # starts working it.
+    preship_outcome = await preship.review_before_ship(
+        ctx,
+        session,
+        product_id=product_id,
+        product_name=product_name,
+        deploy_url=result.url or "",
+        custom_domain=getattr(product_row, "custom_domain", None),
+        requirements=requirements,
+        task_id=task_id,
+    )
+    if preship_outcome.ran and not preship_outcome.may_ship:
+        # Findings are already filed as issues. Route to repair rather than
+        # escalating: these are ordinary defects with a concrete brief, and the
+        # convergence logic decides when that stops being worth another attempt.
+        log.info(
+            "development.preship_blocked",
+            product_id=product_id,
+            blocking=len(preship_outcome.blocking),
+            url=result.url,
+        )
+        return await _heal(
+            ctx,
+            session,
+            product_id,
+            "The page deployed, but a reviewer using it in a real browser could not "
+            "ship it. Fix these, and only these:\n"
+            + "\n".join(f"- {item}" for item in preship_outcome.blocking[:10]),
+            idea_id,
+            category="preship_review",
+        )
+
     await repository.resolve_pending_heal_attempts(session, product_id, "healed")
+
+    # Above the `is_validation` branch deliberately. This used to sit below it, past
+    # the early `return`, so the only product type this factory actually ships was
+    # the one that never got a design brief -- every landing page deployed with the
+    # dashboard's design panel empty. Never blocks shipping: `build_design_brief`
+    # degrades to None on any failure and no-ops when one is already cached.
+    if result.url:
+        await design_brief.build_design_brief(
+            ctx, session, product_id=product_id, deploy_url=result.url, task_id=task_id
+        )
+
     if is_validation:
         # Stays VALIDATING, not LIVE -- this is a pitch page, not a real product.
         # A distinct idempotency-key namespace (leads:validate:*) is deliberate:
@@ -1776,13 +1829,6 @@ async def _verify_and_ship(
         product_id=product_id,
         priority=120,
     )
-    # Dashboard-facing only, never blocks shipping -- build_design_brief()
-    # already degrades to None on any failure and is a no-op if this product
-    # already has one cached (a repair-pass redeploy hitting this same line).
-    if result.url:
-        await design_brief.build_design_brief(
-            ctx, session, product_id=product_id, deploy_url=result.url, task_id=task_id
-        )
     # Asked once, ever, per product -- never blocking (the product is already
     # reachable on its Vercel subdomain). A redeploy of an already-live product
     # (a repair pass, a growth_seo edit) must not ask again, hence the guard.

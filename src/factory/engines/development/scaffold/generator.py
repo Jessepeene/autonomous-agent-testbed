@@ -175,7 +175,29 @@ rule below), and a README with run instructions. The sandbox installs nothing \
 beyond this file, so requirements.txt must list pytest itself, not just the \
 packages the tests import.
 
-This is deliberately NOT a real product:
+How to write it: as a product page, not an experiment report.
+
+The page is a demand test, but it must never read like one. Describe the product in \
+the present tense, the way any company describes something it sells: what it does, \
+who it is for, what it costs. Do not tell the visitor the product does not exist \
+yet, do not describe the page as a test or a validation, and do not hedge what the \
+product does. A page that announces it is not a real product measures nothing, \
+because nobody signs up for something that is not there.
+
+Two things you must never do, and they are firm:
+
+- **Never invent evidence.** No testimonials, no customer names or logos, no \
+"trusted by 400 engineering teams", no case studies, no review scores, no press \
+mentions, no usage numbers. Each of those is a fabricated claim about real people \
+and none of them is yours to make. Persuade with the problem and the solution, \
+which are real.
+- **Never take payment or imply the visitor can buy now.** State the price plainly \
+as what it will cost. The only thing this page ever collects is an email address, \
+so a button promising a purchase or a trial that the visitor cannot actually start \
+is a lie told at the most important moment on the page. "Get early access" is \
+honest and converts; "Start your free trial" leading to an email box is not.
+
+Build no more than the page needs:
 - No authentication, no user accounts, no database beyond nothing.
 - No Stripe or any billing integration.
 - No backend business logic of any kind beyond serving the static page. If a minimal \
@@ -186,6 +208,12 @@ Hard constraints:
 - Do not write files outside the project directory. All paths are relative, with no \
 leading slash and no "..".
 - test_command must be a single shell command that runs the suite.
+- Nothing internal to this factory may appear on the page. The prompt gives you \
+context about where the idea came from and how it was assessed — that is background \
+for you, never material for the visitor. No links to issue trackers, forums, \
+discussions or research sources, no "this problem is real, see X", no mention of \
+the factory, the validation process, or the idea's provenance. A visitor should see \
+a company describing its product, with no trace of how the page came to exist.
 - requirements.txt runs on Python 3.13 in a container with no compiler toolchain and \
 no writable-and-executable temp directory (/tmp is mounted noexec). Never pin an \
 exact old version of a package with a compiled extension — use a minimum-version \
@@ -275,7 +303,14 @@ async def generate_scaffold(
         f"- target self-serve price: ${idea.self_serve_price_usd:.2f}/month (context "
         f"for what to build -- the actual Checkout amount comes from "
         f"PRODUCT_PRICE_CENTS at request time, see the system prompt)\n"
-        f"- evidence: {idea.source_url}\n\n"
+        # Labelled, because an unlabelled field called "evidence" is material to a
+        # copywriter. A generated page cited it on the live site -- "This pain is
+        # real and public: read the corroborating discussion in this App Center
+        # issue" with a link to the GitHub thread Discovery had scraped the idea
+        # from. That is internal provenance, published to customers, and the model
+        # was not wrong to use it: nothing said what the field was for.
+        f"- where we found this problem discussed (internal provenance, NOT for the "
+        f"page and never to be linked or referenced on it): {idea.source_url}\n\n"
         f'Analytics beacon URL (POST JSON {{"path": ..., "referrer": ...}} here, '
         f"exactly, verbatim): {analytics_url}\n\n"
     )
@@ -350,7 +385,14 @@ async def generate_landing_page(
         f"- monetization: {idea.monetization_hypothesis}\n"
         f"- target self-serve price: ${idea.self_serve_price_usd:.2f}/month -- the "
         f"pitch should state this price\n"
-        f"- evidence: {idea.source_url}\n\n"
+        # Labelled, because an unlabelled field called "evidence" is material to a
+        # copywriter. A generated page cited it on the live site -- "This pain is
+        # real and public: read the corroborating discussion in this App Center
+        # issue" with a link to the GitHub thread Discovery had scraped the idea
+        # from. That is internal provenance, published to customers, and the model
+        # was not wrong to use it: nothing said what the field was for.
+        f"- where we found this problem discussed (internal provenance, NOT for the "
+        f"page and never to be linked or referenced on it): {idea.source_url}\n\n"
         f'Interest capture URL (POST JSON {{"email": ..., "message": ...}} here, '
         f"exactly, verbatim): {interest_url}\n\n"
         f'Analytics beacon URL (POST JSON {{"path": ..., "referrer": ...}} here, '

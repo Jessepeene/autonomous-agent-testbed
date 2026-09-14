@@ -248,6 +248,12 @@ async def confirm_interest(token: str) -> Response:
     )
 
 
+#: Address suffix reserved for the pre-ship browser review's own form submission.
+#: `.invalid` is reserved by RFC 2606 and can never be a real domain, so no genuine
+#: visitor can collide with this and no mail can ever be delivered to it.
+SELF_TEST_SUFFIX = "@factory-selftest.invalid"
+
+
 class InterestSubmission(BaseModel):
     #: No `pydantic[email]`/`email-validator` dependency in this project (see
     #: `fisher_exact_less` using stdlib `math.comb` for the same reason) -- a loose
@@ -296,6 +302,21 @@ async def interest(
     at insert time (see `insert_validation_signal`), so the rest of the
     pipeline never needs a dry-run-aware branch.
     """
+    if submission.email.strip().lower().endswith(SELF_TEST_SUFFIX):
+        # The pre-ship browser review actually submits this form, because that is the
+        # only way to learn whether a visitor can. It must not leave a trace: a
+        # recorded row would inflate the very count a build-or-scrap decision is
+        # gated on, and a confirmation email to an address nobody owns is a
+        # guaranteed bounce against a deliverability reputation the factory freezes
+        # sending over.
+        #
+        # Answered identically to a real submission on purpose -- same status, same
+        # body, same CORS envelope. The reviewer is testing whether the browser can
+        # complete a submission, so anything that made this path distinguishable from
+        # the real one would make the test prove something other than what is asked.
+        log.info("interest.self_test", product_id=product_id)
+        return {"received": True}
+
     settings = get_settings()
     require_confirmation = (
         settings.validation_require_double_opt_in and not settings.factory_dry_run

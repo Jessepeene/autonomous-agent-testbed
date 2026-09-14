@@ -770,3 +770,45 @@ class GapReport(Contract):
     #: a criterion that passed -- the instrumentation principle, applied to the
     #: comparison itself.
     undetermined: list[str] = Field(default_factory=list, max_length=20)
+
+
+class VisitorFinding(Contract):
+    """One thing wrong with the deployed page, seen by using it.
+
+    Deliberately separate from `ReviewFinding` (code review) and `RequirementGap`
+    (source vs criteria). This is the third question, and the only one that needs a
+    browser: *does the thing work, and would a real buyer take it seriously?*
+    """
+
+    #: `broken` is anything a visitor cannot do that the page offers -- the form
+    #: that silently fails, the link to nowhere. `credibility` is what a prospect
+    #: would hold against it: internal jargon, leaked provenance, contradictions,
+    #: copy that reads like scaffolding. `cosmetic` is neither.
+    kind: Literal["broken", "credibility", "cosmetic"]
+    summary: str = Field(min_length=5)
+    #: What was actually observed -- the action taken and what happened. "Looks
+    #: wrong" is not evidence; "filled the email field, clicked Join, the request to
+    #: /interest failed and the page showed an error" is.
+    evidence: str = Field(default="")
+
+
+class PreShipReview(Contract):
+    """What a reviewer found by opening the deployed page and using it.
+
+    The gap this closes, stated plainly: every other judge in this factory reads
+    *source*. The gap check compares files to criteria, Bug Council reviews code
+    categories, the generated test asserts against HTML on disk, and the contract
+    and SEO checks grep strings. A form that is correctly written and cannot
+    actually submit passes all five, which is exactly what happened -- no CORS
+    configuration anywhere, so every form on every page this factory ever shipped
+    failed in the browser while `curl` reported success.
+    """
+
+    #: Did the reviewer actually complete the thing the page exists for? Separate
+    #: from the findings list because it is the one question that is not a matter of
+    #: judgement, and a review that never managed to try must not read as a pass.
+    primary_action_attempted: bool
+    primary_action_succeeded: bool
+    findings: list[VisitorFinding] = Field(default_factory=list, max_length=20)
+    #: The reviewer's own account, for a human reading the record later.
+    summary: str = Field(default="")

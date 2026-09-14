@@ -136,6 +136,17 @@ class BrowserSession:
         #: reports is what *that action* caused -- see `_drain_instruments`.
         self._requests: list[dict[str, Any]] = []
         self._console: list[str] = []
+        # The drainable lists above are per-action, which is what the reviewer needs
+        # ("clicking Join fired *this* request"). These two are never drained, so
+        # code outside the agent loop can judge the session as a whole afterwards.
+        #
+        # That split is the point. Asking an agent "did the form work?" and
+        # believing the answer is the trust gap this whole review exists to close --
+        # a request that failed is a fact, not an opinion, and the caller should not
+        # have to hope the agent mentioned it. The agent decides what to click; the
+        # deterministic check decides whether it worked.
+        self.observed_requests: list[dict[str, Any]] = []
+        self.observed_console: list[str] = []
 
     async def __aenter__(self) -> ToolRegistry:
         # Deferred: `playwright` is an optional extra, present only in the Docker
@@ -182,25 +193,28 @@ class BrowserSession:
                     except Exception:
                         entry["body"] = "(response body could not be read)"
                 self._requests.append(entry)
+                self.observed_requests.append(entry)
             except Exception:  # noqa: S110 - an instrument must never break the run
                 pass
 
         def _on_failed(request: Any) -> None:
             try:
-                self._requests.append(
-                    {
-                        "method": request.method,
-                        "url": request.url[:200],
-                        "status": f"FAILED ({request.failure})",
-                    }
-                )
+                failure = {
+                    "method": request.method,
+                    "url": request.url[:200],
+                    "status": f"FAILED ({request.failure})",
+                }
+                self._requests.append(failure)
+                self.observed_requests.append(failure)
             except Exception:  # noqa: S110 - as above
                 pass
 
         def _on_console(message: Any) -> None:
             try:
                 if message.type in ("error", "warning"):
-                    self._console.append(f"{message.type}: {message.text[:200]}")
+                    line = f"{message.type}: {message.text[:200]}"
+                    self._console.append(line)
+                    self.observed_console.append(line)
             except Exception:  # noqa: S110 - as above
                 pass
 
