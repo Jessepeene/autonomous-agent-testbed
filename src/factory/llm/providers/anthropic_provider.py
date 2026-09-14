@@ -61,8 +61,6 @@ def _classify_status_error(name: Provider, exc: anthropic.APIStatusError) -> Pro
     return ProviderUnavailable(name, detail, status=exc.status_code)
 
 
-
-
 def _tool_result_block(result: ToolResult) -> dict[str, Any]:
     """One tool result, with its images inline when it produced any.
 
@@ -94,6 +92,7 @@ def _tool_result_block(result: ToolResult) -> dict[str, Any]:
         "is_error": result.is_error,
     }
 
+
 def _user_content(prompt: str, images: list[Image] | None) -> str | list[dict[str, Any]]:
     """The user turn, as a plain string or as blocks when images are attached.
 
@@ -116,6 +115,7 @@ def _user_content(prompt: str, images: list[Image] | None) -> str | list[dict[st
     ]
     blocks.append({"type": "text", "text": prompt})
     return blocks
+
 
 def _system_blocks(system: str, cache_prefix: str | None) -> list[dict[str, Any]]:
     """Without a shared prefix: one block, the whole system prompt cached. With one:
@@ -240,6 +240,38 @@ class AnthropicProvider:
             latency_ms=elapsed_ms,
         )
 
+    def _content_blocks(self, response: Any, elapsed_ms: int) -> list[Any]:
+        """The response's content blocks, or a provider failure if there are none.
+
+        `content` can come back as ``null`` on a 200. Observed live on DeepSeek, and
+        it took the whole factory down: `TypeError: 'NoneType' object is not
+        iterable` raised inside the orchestrator's own call -- the one call every
+        tick makes -- so every tick died and no engine ran at all for fifteen
+        minutes.
+
+        The damage was not the missing content, it was the *kind* of error. A
+        provider returning nothing usable is an ordinary provider failure, and
+        `SchemaViolation` is the existing shape for "answered, but not with what was
+        asked for"; retry and failover already know what to do with it. A TypeError
+        escapes all of that and kills the caller.
+
+        Guarded here rather than at each call site because every path that reads a
+        response has the same hole, and this class is the one both providers share --
+        fixing the four sites individually would leave the fifth one somebody adds.
+
+        An *empty* list is passed through deliberately: each caller already has a
+        far better message for it, naming the stop reason and the block types it did
+        get, and replacing those with a generic one would cost a real diagnosis.
+        """
+        blocks = getattr(response, "content", None)
+        if blocks is None:
+            raise SchemaViolation(
+                f"{self.name} returned a response with no content field at all "
+                f"(stop_reason={getattr(response, 'stop_reason', 'unknown')!r})",
+                usage=self._usage(response, elapsed_ms),
+            )
+        return list(blocks)
+
     async def _request(self, kwargs: dict[str, Any], *, stream: bool) -> Any:
         client = self._get_client()
         if self._use_fallbacks:
@@ -325,9 +357,8 @@ class AnthropicProvider:
                 usage=self._usage(response, elapsed_ms),
             )
 
-        text = "".join(
-            block.text for block in response.content if getattr(block, "type", None) == "text"
-        )
+        blocks = self._content_blocks(response, elapsed_ms)
+        text = "".join(block.text for block in blocks if getattr(block, "type", None) == "text")
         if not text.strip():
             # Deliberately over-informative: this fires rarely enough (and burns a full
             # paid call each time) that guessing the cause from a bare message wastes a
@@ -335,7 +366,7 @@ class AnthropicProvider:
             # entire max_tokens budget before any answer text is produced -- stop_reason
             # "max_tokens" with only a "thinking" block confirms that; anything else
             # points elsewhere.
-            block_types = [getattr(block, "type", "?") for block in response.content]
+            block_types = [getattr(block, "type", "?") for block in blocks]
             raise SchemaViolation(
                 "claude returned no text content "
                 f"(stop_reason={getattr(response, 'stop_reason', None)!r}, "
@@ -401,7 +432,7 @@ class AnthropicProvider:
 
         text_parts: list[str] = []
         calls: list[ToolCall] = []
-        for block in response.content:
+        for block in self._content_blocks(response, elapsed_ms):
             kind = getattr(block, "type", None)
             if kind == "text":
                 text_parts.append(block.text)

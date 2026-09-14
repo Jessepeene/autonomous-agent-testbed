@@ -53,7 +53,6 @@ SchemaT = TypeVar("SchemaT", bound=BaseModel)
 _BASE_URL = "https://api.deepseek.com/anthropic"
 
 
-
 def _validate_tolerating_extras[T: BaseModel](schema: type[T], payload: Any) -> T:
     """Validate `payload`, salvaging the one failure mode DeepSeek actually causes.
 
@@ -221,7 +220,11 @@ class DeepSeekProvider(AnthropicProvider):
                 usage=self._usage(response, elapsed_ms),
             )
 
-        for block in response.content:
+        # Shared with the base class, because a null `content` on a 200 is not a
+        # DeepSeek quirk -- it is a hole every response-reading path had.
+        blocks = self._content_blocks(response, elapsed_ms)
+
+        for block in blocks:
             is_result = getattr(block, "type", None) == "tool_use" and (
                 getattr(block, "name", None) == tool_name
             )
@@ -240,7 +243,7 @@ class DeepSeekProvider(AnthropicProvider):
                     usage=self._usage(response, elapsed_ms),
                 )
 
-        block_types = [getattr(block, "type", "?") for block in response.content]
+        block_types = [getattr(block, "type", "?") for block in blocks]
         stop_reason = getattr(response, "stop_reason", None)
 
         # Two very different causes, and conflating them sent me hunting the wrong

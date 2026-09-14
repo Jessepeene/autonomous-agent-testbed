@@ -28,11 +28,32 @@ counting as failed -- its docstring describes this exact case -- `interrupts` is
 already an addressed question with a reply, and `resolve_reply` already resumes
 work an answer unblocks. What was missing is that the recipient could only ever be
 a person.
+
+**This is the company's channel, not any one department's.** The first version was
+not: the Design manager held its own routing, its own delivery call and its own
+park, so Marketing would have had to write all three again and get all three
+subtly right. Everything general lives here, and a department reaches it two ways
+depending on what it is doing:
+
+- **Doing work** -- an agent ends with `RESULT: BLOCKED` and its question in prose.
+  `raise_blocked_question` parses it. The agent needs no vocabulary beyond the
+  result contract it already has.
+- **Deciding** -- a manager returns a `ManagerDecision`, whose `needs_to_know` is a
+  field rather than an action, so asking never competes with real work for a slot.
+  `raise_decision_questions` handles all of it, and `ASKING_GUIDANCE` is the prompt
+  paragraph that goes with it.
+
+Both funnel into `ask` -> `route` -> `deliver`, so a new department gets routing to
+a person on ambiguity, delivery to either a queue or a human, and a parked-not-
+failed tick without writing any of it. Resuming is `answers_for`; parking is
+`park_until_answered`. A department that open-codes any of this has re-introduced
+the bug this module exists to remove.
 """
 
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,7 +62,7 @@ from factory.logging import get_logger
 from factory.settings import EngineName
 from factory.state import repository
 from factory.state.orm import Question
-from factory.state.schemas import InterruptReason, TaskKind
+from factory.state.schemas import InterruptReason, ManagerDecision, TaskKind
 
 log = get_logger(__name__)
 
@@ -74,6 +95,10 @@ ANSWERABLE = {
     EngineName.FINANCE: "what a product has earned or cost, and pricing decisions",
     EngineName.DISCOVERY: (
         "where an idea came from, what evidence supports it, and what was rejected"
+    ),
+    EngineName.DESIGN: (
+        "how a product is supposed to look, what its design guidelines say, what a "
+        "review of the live page found, and what the house style requires"
     ),
 }
 
@@ -133,6 +158,7 @@ def route(question: str, asked_by: EngineName) -> str:
         EngineName.FINANCE: ("price", "pricing", "revenue", "cost", "charge", "refund"),
         EngineName.DISCOVERY: ("idea come from", "evidence", "source of the idea", "why this idea"),
         EngineName.DEVELOPMENT: ("deployed", "the page", "requirement", "criteria", "workspace"),
+        EngineName.DESIGN: ("design guideline", "house style", "look like", "visual", "branding"),
     }
     matched = [
         engine
@@ -153,6 +179,139 @@ def route(question: str, asked_by: EngineName) -> str:
     # would come back confident and wrong, indistinguishable to the asker from a
     # real answer.
     return repository.HUMAN
+
+
+#: The paragraph every decision-maker in this company gets, verbatim.
+#:
+#: Shared rather than written per department, because the failure it prevents is not
+#: department-specific: a manager that cannot establish a fact will otherwise invent
+#: it or decline to act, and both are worse than asking. Any prompt asking a model to
+#: *decide* something should include this; a prompt asking one to *do* something
+#: already has the `RESULT: BLOCKED` contract instead.
+ASKING_GUIDANCE = """\
+Not knowing is not a reason to do nothing -- it is a reason to find out. If what \
+stops you deciding is a fact somebody else in this company holds, say so rather than \
+guessing, and rather than declining because you are unsure. Ask for a fact, not for \
+permission, and ask the smallest question that would actually change your decision -- \
+a broad question gets a broad answer that settles nothing. Your work parks and \
+resumes with the answer, so asking costs you a delay and nothing else. The one thing \
+you must never do is invent the answer and act on it.\
+"""
+
+
+async def ask(
+    session: AsyncSession,
+    *,
+    asked_by: EngineName,
+    question: str,
+    context: str = "",
+    ask_of: str = "",
+    blocking_task_id: str | None = None,
+    asked_by_task_id: str | None = None,
+    product_id: str | None = None,
+) -> Question | None:
+    """Ask another part of the company something, and put it in front of them.
+
+    The single entry point, whatever is doing the asking. An agent mid-run reaches it
+    through `raise_blocked_question`, which parses its BLOCKED report first; a manager
+    deciding what work is worth doing reaches it through `raise_decision_questions`,
+    because a structured decision has no result contract to report through. Both
+    produce the same record, the same routing and the same delivery -- which is the
+    reason this lives here rather than in either caller.
+
+    ``ask_of`` names a department when the caller knows one. Anything unrecognised is
+    routed rather than trusted, and an unroutable question reaches a person rather
+    than going nowhere.
+    """
+    text = question.strip()
+    if not text:
+        # Nothing to ask is not a question. Inventing one on the caller's behalf
+        # would put a fabricated request in front of whoever receives it.
+        log.info("comms.empty_question", asked_by=asked_by.value)
+        return None
+
+    named = ask_of.strip().lower()
+    asked_of = named if named in {engine.value for engine in ANSWERABLE} else route(text, asked_by)
+
+    row = await repository.ask_question(
+        session,
+        asked_by_engine=asked_by.value,
+        asked_of=asked_of,
+        question=text,
+        context=context,
+        asked_by_task_id=asked_by_task_id,
+        blocking_task_id=blocking_task_id,
+        product_id=product_id,
+    )
+    await deliver(session, row, asked_by=asked_by)
+    return row
+
+
+async def park_until_answered(session: AsyncSession, task_id: str, *, reason: str) -> None:
+    """Hold work that is waiting on somebody else, without counting it as a failure.
+
+    Deferred rather than failed, and the distinction is load-bearing: waiting on a
+    colleague is not an attempt at anything, so counting it as one would spend a
+    product's repair budget on other people's response times.
+    """
+    await repository.defer_task(
+        session,
+        task_id,
+        not_before=datetime.now(UTC) + timedelta(hours=BLOCKED_RETRY_HOURS),
+        reason=reason,
+    )
+
+
+async def answers_for(session: AsyncSession, task_id: str) -> str:
+    """Answers this task was waiting on, rendered for its prompt. ``""`` if none.
+
+    Every resuming caller needs this and none of them should implement it: work
+    released by an answer and then re-run *without* the answer blocks again on exactly
+    the same question, which is a loop rather than a conversation.
+    """
+    return render_answers(await repository.answered_questions_for_task(session, task_id))
+
+
+async def raise_decision_questions(
+    session: AsyncSession,
+    *,
+    asked_by: EngineName,
+    decision: ManagerDecision,
+    task_id: str,
+    product_id: str | None = None,
+) -> int:
+    """Ask everything a manager said it needed to know, and park its tick. Returns how many.
+
+    The one call a department manager makes, which is the point: a Marketing or
+    Finance manager gets this behaviour by inheriting `ManagerDecision` and calling
+    this, with no comms code of its own to get subtly wrong.
+
+    The *tick* is what parks, not the work it would have commissioned. That is
+    deliberate -- the manager has not decided yet, and a decision made without the
+    answer is exactly the guess it declined to make. Whatever it was sure enough to
+    commission alongside its questions still goes ahead; being unsure about one thing
+    is not being unsure about everything.
+    """
+    asked = 0
+    for item in decision.needs_to_know:
+        row = await ask(
+            session,
+            asked_by=asked_by,
+            question=item.question,
+            context=decision.assessment[:1000],
+            ask_of=item.ask_of,
+            asked_by_task_id=task_id,
+            blocking_task_id=task_id,
+            product_id=product_id,
+        )
+        if row is not None:
+            asked += 1
+
+    if asked:
+        await park_until_answered(
+            session, task_id, reason=f"{asked_by.value} manager waiting on {asked} question(s)"
+        )
+    return asked
 
 
 async def raise_blocked_question(
@@ -176,48 +335,58 @@ async def raise_blocked_question(
         log.info("comms.blocked_without_question", asked_by=asked_by.value)
         return None
 
-    asked_of = named.value if named is not None else route(question_text, asked_by)
-    row = await repository.ask_question(
+    return await ask(
         session,
-        asked_by_engine=asked_by.value,
-        asked_of=asked_of,
+        asked_by=asked_by,
         question=question_text,
         context=context,
-        asked_by_task_id=asked_by_task_id,
+        ask_of=named.value if named is not None else "",
         blocking_task_id=blocking_task_id,
+        asked_by_task_id=asked_by_task_id,
         product_id=product_id,
     )
 
-    if asked_of == repository.HUMAN:
-        # The existing path, unchanged. A question nobody in the organisation can
-        # answer is exactly what an interrupt is for, and reaching a person beats a
-        # silent retry even when no department could have helped.
+
+async def deliver(session: AsyncSession, question: Question, *, asked_by: EngineName) -> None:
+    """Put a recorded question in front of whoever has to answer it.
+
+    Delivery is separate from recording because the two recipients are not alike: a
+    department gets a task it will pick up like any other work, a person gets an
+    interrupt. Every asker funnels through here via `ask`, so neither kind of
+    recipient is something a caller has to know about -- which is what stops the next
+    department inventing its own half of this and getting the person case wrong.
+    """
+    if question.asked_of == repository.HUMAN:
+        # A question nobody in the organisation can answer is exactly what an
+        # interrupt is for, and reaching a person beats silence even when no
+        # department could have helped.
         await interrupts.request(
             session,
             reason=InterruptReason.DATA_INTEGRITY,
             subject=f"{asked_by.value} is blocked and needs an answer",
             detail=(
-                f"{asked_by.value} cannot proceed without knowing:\n\n{question_text}\n\n"
-                + (f"What it already knows:\n{context}\n\n" if context else "")
+                f"{asked_by.value} cannot proceed without knowing:\n\n"
+                f"{question.question}\n\n"
+                + (f"What it already knows:\n{question.context}\n\n" if question.context else "")
                 + "The work is parked, not failed. Answering releases it."
             ),
             headline="❓ A department is blocked on a question",
             reply_hint="Reply with the answer and the blocked work resumes.",
-            product_id=product_id,
+            product_id=question.product_id,
         )
-    else:
-        await repository.enqueue_task(
-            session,
-            kind=TaskKind.ANSWER_QUESTION,
-            engine=EngineName(asked_of),
-            idempotency_key=f"answer:{row.id}",
-            payload={"question_id": row.id},
-            product_id=product_id,
-            # Above ordinary build work: somebody else is parked waiting on this,
-            # so answering late costs more than the answer is worth.
-            priority=110,
-        )
-    return row
+        return
+
+    await repository.enqueue_task(
+        session,
+        kind=TaskKind.ANSWER_QUESTION,
+        engine=EngineName(question.asked_of),
+        idempotency_key=f"answer:{question.id}",
+        payload={"question_id": question.id},
+        product_id=question.product_id,
+        # Above ordinary build work: somebody else is parked waiting on this, so
+        # answering late costs more than the answer is worth.
+        priority=110,
+    )
 
 
 def render_answers(answers: list[Question]) -> str:

@@ -15,6 +15,8 @@ confused one, least likely to spend a step on it.
 
 from __future__ import annotations
 
+from pydantic import Field
+
 from factory import comms
 from factory.settings import EngineName
 from factory.state import repository
@@ -87,16 +89,13 @@ def test_routing_recognises_what_a_department_actually_holds() -> None:
         comms.route("is storing this field permitted under gdpr?", EngineName.DEVELOPMENT)
         == EngineName.COMPLIANCE.value
     )
-    assert (
-        comms.route("is the price final?", EngineName.DEVELOPMENT) == EngineName.FINANCE.value
-    )
+    assert comms.route("is the price final?", EngineName.DEVELOPMENT) == EngineName.FINANCE.value
 
 
 def test_a_department_is_never_routed_its_own_question() -> None:
     """If it could answer, it would not be blocked."""
     assert (
-        comms.route("what does the deployed page say?", EngineName.DEVELOPMENT)
-        == repository.HUMAN
+        comms.route("what does the deployed page say?", EngineName.DEVELOPMENT) == repository.HUMAN
     )
 
 
@@ -138,3 +137,134 @@ def test_an_ambiguous_question_goes_to_a_person_rather_than_the_first_match() ->
         comms.route("are we allowed to email these prospects?", EngineName.DEVELOPMENT)
         == repository.HUMAN
     )
+
+
+def test_asking_is_a_state_of_the_decision_not_an_action_it_elects() -> None:
+    """The thesis of this module, pinned where a refactor would break it.
+
+    `report_product_issue` proved an elected action loses: both live runs spent
+    their whole step budget investigating and never chose to call it. The same
+    mistake is easy to make again in a decision schema -- an `ask` entry in an
+    action list competes with real work for one of a handful of slots, and the
+    manager most in need of asking is the one with the least to spare.
+
+    So `needs_to_know` is a field on every manager's decision, filled in while it
+    describes its situation, and no department's action list contains "ask".
+    """
+    from factory.state.schemas import DesignAction, ManagerDecision
+
+    assert "needs_to_know" in ManagerDecision.model_fields
+
+    for action in _manager_action_schemas():
+        kinds = action.model_fields["kind"].annotation
+        assert "ask" not in getattr(kinds, "__args__", ()), f"{action.__name__} elects to ask"
+
+    assert DesignAction in _manager_action_schemas()
+
+
+def _manager_action_schemas() -> list[type]:
+    """Every action schema a department manager commissions through."""
+    from factory.state.schemas import DesignAction
+
+    return [DesignAction]
+
+
+def test_every_department_that_can_be_asked_can_answer() -> None:
+    """A question routed to a department whose runner drops it is worse than none.
+
+    It is recorded, delivered, and waited on forever -- the asker's work parks and
+    its answer never comes, which looks from the outside exactly like a hang. The
+    registry and the runners have to agree, and nothing but this makes them.
+    """
+    import importlib
+
+    from factory.state.schemas import TaskKind
+
+    for engine in comms.ANSWERABLE:
+        graph = importlib.import_module(f"factory.engines.{engine.value}.graph")
+        source = graph.__file__ or ""
+        assert source, f"{engine.value} has no runner"
+        with open(source, encoding="utf-8") as handle:
+            assert TaskKind.ANSWER_QUESTION.name in handle.read(), (
+                f"{engine.value} can be asked questions but its runner never answers one"
+            )
+
+
+async def test_a_manager_asks_and_parks_without_writing_any_comms_code(monkeypatch) -> None:
+    """The generality claim, tested with a department that does not exist.
+
+    The point of `raise_decision_questions` is that the next manager -- Marketing,
+    Finance, whoever -- inherits this by subclassing `ManagerDecision` and making
+    one call. If this test needs anything department-specific to pass, the channel
+    is a Design feature wearing a general name.
+    """
+    from factory.state.schemas import Ask, ManagerDecision
+
+    class SupplyDecision(ManagerDecision):
+        """A department invented for this test. No comms code of its own."""
+
+        actions: list[str] = Field(default_factory=list)
+
+    recorded: dict[str, object] = {}
+
+    async def fake_ask_question(session, **kwargs):
+        from factory.state.orm import Question
+
+        recorded["asked"] = kwargs
+        return Question(
+            id="q-1",
+            product_id=None,
+            **{
+                k: v
+                for k, v in kwargs.items()
+                if k in {"asked_by_engine", "asked_of", "question", "context"}
+            },
+        )
+
+    async def fake_enqueue(session, **kwargs):
+        recorded["delivered_to"] = kwargs.get("engine")
+        return "t-1"
+
+    async def fake_defer(session, task_id, **kwargs):
+        recorded["parked"] = (task_id, kwargs.get("reason"))
+
+    monkeypatch.setattr(repository, "ask_question", fake_ask_question)
+    monkeypatch.setattr(repository, "enqueue_task", fake_enqueue)
+    monkeypatch.setattr(repository, "defer_task", fake_defer)
+
+    decision = SupplyDecision(
+        assessment="Cannot tell whether this product is still being sold.",
+        needs_to_know=[Ask(question="Is this product still being sold?", ask_of="finance")],
+    )
+
+    asked = await comms.raise_decision_questions(
+        object(), asked_by=EngineName.DESIGN, decision=decision, task_id="tick-1"
+    )
+
+    assert asked == 1
+    assert recorded["asked"]["asked_of"] == "finance"
+    # The assessment travels with the question: an answerer that cannot see why it
+    # was asked answers the words rather than the need.
+    assert "still being sold" in str(recorded["asked"]["context"])
+    assert recorded["delivered_to"] == EngineName.FINANCE
+    # The *tick* parks, not the work it would have commissioned -- the manager has
+    # not decided yet, and deciding without the answer is the guess it declined.
+    assert recorded["parked"][0] == "tick-1"
+
+
+async def test_a_manager_that_asks_nothing_is_never_parked(monkeypatch) -> None:
+    """Parking a tick that asked nothing would stall a department for six hours."""
+
+    async def explode(*args, **kwargs):
+        raise AssertionError("a manager with no questions must not touch the channel")
+
+    monkeypatch.setattr(repository, "ask_question", explode)
+    monkeypatch.setattr(repository, "defer_task", explode)
+
+    from factory.state.schemas import ManagerDecision
+
+    decision = ManagerDecision(assessment="Everything here looks fine, nothing to do.")
+    asked = await comms.raise_decision_questions(
+        object(), asked_by=EngineName.DESIGN, decision=decision, task_id="tick-2"
+    )
+    assert asked == 0

@@ -39,6 +39,7 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from factory import comms
 from factory.hitl import interrupts
 from factory.logging import get_logger
 from factory.settings import EngineName, TaskType
@@ -49,7 +50,7 @@ from factory.supervisor.context import FactoryContext
 
 log = get_logger(__name__)
 
-MANAGER_SYSTEM = """\
+MANAGER_SYSTEM = f"""\
 You run the design department of a small software company. Once a day you look at \
 what your department is responsible for and decide what, if anything, is worth \
 doing.
@@ -82,11 +83,16 @@ is. Spend attention where a real visitor will see the result.
 - One product with an odd finding is a product problem. Three with the same \
 finding is a standard problem, and fixing them one at a time is how you stay busy \
 forever without improving anything.
-- If something genuinely blocks you and another department would know, ask rather \
-than guess. Your work parks and resumes with the answer.
 
-Write your assessment first, then the actions that follow from it -- not the other \
-way round.\
+What you could not establish goes in `needs_to_know`, and it is not one of the \
+things you commission -- you can ask and still commission the work you were sure \
+about. "Is this product worth investing design attention in" is a real question \
+with a real owner, and deciding nothing because nobody told you is a worse outcome \
+than asking.
+
+{comms.ASKING_GUIDANCE}
+
+Write your assessment first, then what follows from it -- not the other way round.\
 """
 
 
@@ -128,15 +134,21 @@ async def run_manager_tick(ctx: FactoryContext, session: AsyncSession, task: Tas
     """Look at the department, decide what matters, commission it."""
     domain = await repository.design_domain(session)
 
+    # If this tick was parked on a question, it is running again because somebody
+    # answered. Put the answer in front of the manager, or the round trip bought
+    # nothing and it parks again on exactly the question it just had answered.
+    answered = await comms.answers_for(session, task.id)
+
     try:
         decision = await ctx.llm.parse(
             DesignDecision,
             task_type=TaskType.ANALYSIS,
             system=MANAGER_SYSTEM,
             prompt=(
-                "This is what your department looks like right now.\n\n"
-                f"{_render_domain(domain)}\n\n"
-                "What, if anything, is worth doing?"
+                (f"{answered}\n\n" if answered else "")
+                + "This is what your department looks like right now.\n\n"
+                + f"{_render_domain(domain)}\n\n"
+                + "What, if anything, is worth doing?"
             ),
             engine=EngineName.DESIGN,
             task_id=task.id,
@@ -162,11 +174,25 @@ async def run_manager_tick(ctx: FactoryContext, session: AsyncSession, task: Tas
                 {"kind": a.kind, "product_id": a.product_id, "why": a.why[:200]}
                 for a in decision.actions
             ],
+            "asked": [q.question[:200] for q in decision.needs_to_know],
         },
     )
 
+    # Before the empty-actions check, because the likeliest shape of a tick with
+    # questions is *no actions and one question* -- exactly what happened live. Read
+    # in the other order, "I cannot establish whether this matters, so I am asking"
+    # would be logged as "nothing worth doing" and the question silently dropped.
+    #
+    # General machinery, called identically by every department manager: this module
+    # holds no comms code of its own.
+    asked = await comms.raise_decision_questions(
+        session, asked_by=EngineName.DESIGN, decision=decision, task_id=task.id
+    )
+
     if not decision.actions:
-        log.info("design.nothing_to_do", assessment=decision.assessment[:200])
+        log.info("design.nothing_to_do", asked=asked, assessment=decision.assessment[:200])
+        if asked:
+            return f"design: asked {asked} question(s) and parked -- {decision.assessment[:150]}"
         return f"design: nothing worth doing -- {decision.assessment[:200]}"
 
     commissioned = 0
@@ -219,6 +245,9 @@ async def run_manager_tick(ctx: FactoryContext, session: AsyncSession, task: Tas
         "design.commissioned",
         actions=len(decision.actions),
         commissioned=commissioned,
+        asked=asked,
         assessment=decision.assessment[:200],
     )
-    return f"design: commissioned {commissioned} of {len(decision.actions)} action(s)"
+    return f"design: commissioned {commissioned} of {len(decision.actions)} action(s)" + (
+        f", asked {asked} question(s) and parked" if asked else ""
+    )

@@ -12,7 +12,7 @@ spend for that product until it is healthy again.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1100,10 +1100,10 @@ async def _patch(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
     # answered. Without this the channel is decorative: the work would be released
     # and then re-run with exactly the information that blocked it the first time,
     # and it would block again on the same thing.
-    answers = await repository.answered_questions_for_task(session, task.id)
-    if answers:
-        healing = comms.render_answers(answers) + "\n\n" + healing
-        log.info("development.resumed_with_answers", product_id=product_id, answers=len(answers))
+    answered = await comms.answers_for(session, task.id)
+    if answered:
+        healing = f"{answered}\n\n{healing}"
+        log.info("development.resumed_with_answers", product_id=product_id)
     category = str(task.payload.get("category", ""))
 
     try:
@@ -1364,10 +1364,9 @@ async def _patch_surgically(
             context=healing[:1500],
         )
         if question is not None:
-            await repository.defer_task(
+            await comms.park_until_answered(
                 session,
                 task.id,
-                not_before=datetime.now(UTC) + timedelta(hours=comms.BLOCKED_RETRY_HOURS),
                 reason=f"blocked on question {question.id} to {question.asked_of}",
             )
             await repository.release_product_lock(session, product_id)

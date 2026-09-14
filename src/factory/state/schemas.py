@@ -916,6 +916,57 @@ class DesignGuidelines(Contract):
     must_avoid: list[str] = Field(default_factory=list, max_length=10)
 
 
+class Ask(Contract):
+    """Something a decision-maker needs to know before it can decide.
+
+    Not an action, and the distinction is the whole design. `factory/comms.py` was
+    written on the finding that asking cannot be something an agent *elects* to do:
+    `report_product_issue` shipped as a tool and both live runs spent their entire
+    step budget investigating without ever choosing to call it. An elected action
+    competes with the real work for attention, and the one most in need of asking is
+    the confused one, least able to spare it.
+
+    So this is a field on the decision rather than an entry in its action list. The
+    model does not choose to ask; it describes its situation, and "what I could not
+    establish" is part of that description. Filling it in is not spending a slot.
+    """
+
+    #: The single thing that would change the decision. A fact, not permission, and
+    #: the smallest question that unblocks -- a broad question gets a broad answer
+    #: that settles nothing and costs another round trip to find that out.
+    question: str = Field(min_length=5)
+    #: Which department holds the answer, if the asker knows. Empty is fine and
+    #: common: the question is routed, and an unroutable one reaches a person rather
+    #: than going nowhere.
+    ask_of: str = Field(default="")
+
+
+class ManagerDecision(Contract):
+    """What a department manager concluded this tick. The base every manager shares.
+
+    A manager decides *what work is worth doing*; deterministic code turns that into
+    tasks. Subclasses add the actions their department can actually commission --
+    the rail that keeps a manager from doing anything the system cannot execute or
+    record.
+
+    Both fields here are general because both failures they prevent are. A decision
+    whose reasoning is reconstructed afterwards is not a decision, so `assessment` is
+    written first. And a manager that cannot establish a fact will otherwise either
+    invent it or decline to act -- observed on the Design manager's first live tick,
+    which correctly commissioned nothing because it could not tell whether the
+    product was worth the spend, having been told to ask by a system with no channel
+    to ask through.
+    """
+
+    #: What it made of its department's state, written before anything follows from
+    #: it.
+    assessment: str = Field(min_length=20)
+    #: What it could not establish. Empty on most ticks; never a failure when set --
+    #: a manager that asks instead of guessing is the behaviour this exists for, and
+    #: the work parks and resumes with the answer rather than proceeding without it.
+    needs_to_know: list[Ask] = Field(default_factory=list, max_length=3)
+
+
 class DesignAction(Contract):
     """One thing the Design manager decided to commission."""
 
@@ -932,7 +983,7 @@ class DesignAction(Contract):
     why: str = Field(min_length=10)
 
 
-class DesignDecision(Contract):
+class DesignDecision(ManagerDecision):
     """What the Design manager decided to do this tick, and why.
 
     The manager's whole output. It does not perform work -- it decides what work
@@ -942,9 +993,6 @@ class DesignDecision(Contract):
     can only commission things the system knows how to execute.
     """
 
-    #: What it made of the department's state. Written before the actions, because
-    #: a decision whose reasoning is reconstructed after the fact is not one.
-    assessment: str = Field(min_length=20)
     #: Deliberately allowed to be empty, and that is not a failure. A department
     #: with nothing worth doing that says so is working correctly; one that always
     #: finds work is manufacturing it, and every item here costs real money.

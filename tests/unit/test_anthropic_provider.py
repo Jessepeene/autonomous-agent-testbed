@@ -35,3 +35,48 @@ def test_every_other_model_still_gets_a_real_effort_value() -> None:
     assert provider._effort(TaskType.CODE_GENERATION, real_model) == provider._settings.effort_code
     assert provider._effort(TaskType.CODE_REVIEW, real_model) == provider._settings.effort_review
     assert provider._effort(TaskType.ANALYSIS, real_model) == "high"
+
+
+def test_a_null_content_field_is_a_provider_failure_not_a_crash() -> None:
+    """The bug that took the whole factory down for fifteen minutes.
+
+    DeepSeek returned a 200 whose `content` was null. Every path that read a
+    response iterated it directly, so it raised `TypeError: 'NoneType' object is not
+    iterable` -- inside the orchestrator's own call, which is the one call every
+    tick makes. Every tick died and no engine ran at all.
+
+    The missing content was not the damage; the *kind* of error was. A provider
+    returning nothing usable is an ordinary provider failure, and retry and failover
+    already handle `SchemaViolation`. A TypeError escapes all of it and kills the
+    caller, which is why this is guarded in the shared base class rather than at the
+    call sites -- DeepSeek extends this provider, and both inherit the fix.
+    """
+    from types import SimpleNamespace
+
+    import pytest
+
+    from factory.llm.providers.base import SchemaViolation
+
+    provider = _provider()
+    response = SimpleNamespace(content=None, stop_reason="end_turn", usage=None)
+
+    with pytest.raises(SchemaViolation) as caught:
+        provider._content_blocks(response, 120)
+
+    assert "no content field" in str(caught.value)
+
+
+def test_an_empty_content_list_keeps_the_callers_better_message() -> None:
+    """Empty is not null, and conflating them would cost a real diagnosis.
+
+    Each caller already has a far better message for an empty response -- naming the
+    stop reason and the block types it actually got, which is what distinguishes
+    "thinking ate the whole budget" from "ignored a forced tool_choice". A generic
+    guard here would replace all of that with nothing.
+    """
+    from types import SimpleNamespace
+
+    provider = _provider()
+    response = SimpleNamespace(content=[], stop_reason="max_tokens", usage=None)
+
+    assert provider._content_blocks(response, 120) == []
