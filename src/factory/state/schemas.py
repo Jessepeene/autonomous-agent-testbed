@@ -718,3 +718,38 @@ class ReleaseDecision(Contract):
     #: For `fix_first`: the fewest changes that would make this shippable. Not every
     #: finding -- a long list here is how a product never ships.
     fix_first: list[str] = Field(default_factory=list, max_length=10)
+
+
+class RequirementGap(Contract):
+    """One acceptance criterion the product does not meet.
+
+    A *gap*, deliberately, not a finding. The difference is what makes "done"
+    reachable: gaps are the distance between a product and a stated standard, so
+    there are finitely many and fixing one removes it. Findings are whatever a
+    reviewer happens to notice, and there is always another one -- which is why a
+    gate defined as "no outstanding findings" could never be satisfied, and why 19
+    issues became 28 in a single cycle.
+    """
+
+    criterion: str = Field(min_length=10, max_length=300)
+    tier: Literal["must", "should"]
+    #: What in the product shows this is unmet. Required, because a gap asserted
+    #: without evidence is an opinion, and the whole point of comparing against a
+    #: written standard is that the answer is checkable.
+    evidence: str = Field(min_length=10, max_length=600)
+
+
+class GapReport(Contract):
+    """The comparison of one build against its acceptance criteria."""
+
+    gaps: list[RequirementGap] = Field(default_factory=list, max_length=20)
+    #: Criteria confirmed met, by the same pass. Present so that "done" is a positive
+    #: statement backed by evidence rather than the absence of complaints -- and so a
+    #: reviewer that looked at nothing and reported nothing is distinguishable from
+    #: one that checked and found the product sound.
+    met: list[str] = Field(default_factory=list, max_length=20)
+    #: What the reviewer could not determine from what it was given. Stated rather
+    #: than silently folded into "met", because a criterion nobody could check is not
+    #: a criterion that passed -- the instrumentation principle, applied to the
+    #: comparison itself.
+    undetermined: list[str] = Field(default_factory=list, max_length=20)

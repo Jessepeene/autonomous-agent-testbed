@@ -29,6 +29,7 @@ from factory.engines.development import (
     seo,
 )
 from factory.engines.development import deploy as deploy_module
+from factory.engines.development.gaps import find_requirement_gaps, record_gaps_as_issues
 from factory.engines.development.release import decide_release
 from factory.engines.development.requirements import (
     render_for_prompt,
@@ -1514,12 +1515,30 @@ async def _verify_and_ship(
 
     deploy_blocking = council.deploy_blocking
 
+    # The one comparison that asks whether this build does what it was for.
+    # Everything above judges it against something else -- the codegen contract
+    # against hardcoded environment facts, Bug Council against six fixed categories
+    # -- and neither can read the requirements at all. A page can satisfy every one
+    # of them and still tell its visitors "no tracking scripts" while running one.
+    #
+    # Gaps become issues on the same footing as any other finding, so the release
+    # judgement below weighs them with everything else. What makes them different is
+    # that they are finite: fixing a gap removes it, and when there are none the work
+    # is done -- which "no outstanding findings" can never be.
+    stored_requirements = await repository.live_requirements(session, "product", product_id)
+    requirements = _requirements_from_row(stored_requirements) if stored_requirements else None
+    if requirements is not None:
+        report = await find_requirement_gaps(
+            ctx, sources=sources, requirements=requirements, task_id=task_id
+        )
+        if report is not None:
+            await record_gaps_as_issues(session, product_id, report)
+
     # The release judgement, where an `if` used to be. Whether this is good enough
     # to put in front of a real person is the highest-judgement moment in the
     # company, and it was a boolean -- which is what made the build a retry loop
     # rather than a process: every transition was automatic, so the system had one
     # move and made it until a counter ran out.
-    stored_requirements = await repository.live_requirements(session, "product", product_id)
     product_row = await repository.get_product(session, product_id)
     heal_attempts_so_far = product_row.heal_attempts if product_row else 0
     decision = await decide_release(
@@ -1528,7 +1547,7 @@ async def _verify_and_ship(
         product_id=product_id,
         product_name=product_name,
         council=council,
-        requirements=_requirements_from_row(stored_requirements) if stored_requirements else None,
+        requirements=requirements,
         heal_attempts=heal_attempts_so_far,
         task_id=task_id,
     )
