@@ -40,6 +40,7 @@ time it's fixed, not batched up afterward.**
 26. [A static landing page shipped `requirements.txt`, so Vercel built it as a Python app and failed](#26-a-static-landing-page-shipped-requirementstxt-so-vercel-built-it-as-a-python-app-and-failed)
 27. [The repair agent was told `readyState=ERROR` and nothing else](#27-the-repair-agent-was-told-readystateerror-and-nothing-else)
 28. [`converging` read zero blockers as a wall, escalating a build that had just been approved to ship](#28-converging-read-zero-blockers-as-a-wall-escalating-a-build-that-had-just-been-approved-to-ship)
+29. [Every new product ships behind Vercel's SSO login wall — the residual gap from #5, as predicted](#29-every-new-product-ships-behind-vercels-sso-login-wall--the-residual-gap-from-5-as-predicted)
 
 ---
 
@@ -308,6 +309,57 @@ alongside the existing `None` for a first attempt.
 **Verified**: `tests/integration/test_issue_closure.py` — zero blockers never
 reads as a wall, while one-before-and-one-now still does and 3→1 still reads as
 converging.
+
+---
+
+## 29. Every new product ships behind Vercel's SSO login wall — the residual gap from #5, as predicted
+
+**Found**: 2026-09-14, by curling the first URL this factory ever successfully
+deployed end to end. It returned 200 — of `<title>Login – Vercel</title>`.
+
+**Severity**: Defeats the entire purpose of a validation page. It exists to
+measure whether strangers want the idea; behind a login it measures nothing, and
+the `harvest_leads` task that runs seconds after the deploy read zero from a page
+no visitor could open.
+
+**Root cause**: Not new. Entry #5 found this on 2026-08-20, fixed it by hand on
+one project, and recorded the gap exactly:
+
+> this was disabled on one project only ... Every future product's Vercel project
+> will need the same manual step (or a real custom domain, which is exempt by
+> design) **until this is automated in `deploy.py` itself.**
+
+It then recurred on the very next project this factory ever created. Vercel sets
+`ssoProtection: {"deploymentType": "all_except_custom_domains"}` on new projects,
+so every `*.vercel.app` URL 302s to `vercel.com/sso-api`.
+
+The lesson worth keeping is not about Vercel. A known defect with a known
+one-line fix, written down in the place the team reads, still shipped — because
+"someone will remember to do this next time" is not a control. Same shape as #23,
+where a rule in a docstring did not stop two schemas from breaking it.
+
+**Fix**: `_disable_sso_protection` — `PATCH /v9/projects/{name}` with
+`{"ssoProtection": null}` on every successful deploy. Best-effort: it logs and
+continues on failure, because a page that is up but gated still beats failing a
+deploy that otherwise worked.
+
+The tradeoff is the one taken deliberately in #5: this disables protection for
+all deployments on the project, previews included. Each project here hosts
+exactly one product whose whole purpose is public reachability, so protection was
+guarding nothing. A real custom domain is exempt by design and remains the better
+end state — see `domain.ensure_requested`.
+
+**Verified**: applied live to `shardrunner` first, which took the page from a
+Vercel login form to `<title>ShardRunner — iOS UI Test Sharding for CI Teams</title>`
+with `fetch(INTEREST_URL)` wired to `/interest/06829d037f...`. Two unit tests: a
+successful deploy issues the PATCH with the right body, and a deploy still
+succeeds when that call fails.
+
+**Also fixed here**: the new call runs on the success path of every deploy, and
+its forgiving error handling made a real, unmocked request to api.vercel.com
+invisible inside the unit suite — the call went out, 403'd on a fake token,
+logged a warning, and the test passed anyway. Caught by timing it. An autouse
+fixture now keeps `httpx.AsyncClient.patch` off the network for the whole file.
 
 ---
 

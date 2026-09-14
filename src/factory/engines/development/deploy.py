@@ -360,8 +360,57 @@ async def deploy(
             is_infra=True,
         )
 
+    # A page nobody can open has not shipped. Vercel protects every `*.vercel.app`
+    # URL on a new project by default, so this has to run on each deploy -- the
+    # project is created by the call above, and there is no earlier point to do it.
+    await _disable_sso_protection(project_name, token)
     log.info("deploy.published", product=product_name, url=full_url)
     return DeployResult(ok=True, url=full_url, detail="published", project=project_name)
+
+
+async def _disable_sso_protection(project_name: str, token: str) -> None:
+    """Make the deployment publicly reachable. Best-effort, never blocks a deploy.
+
+    Vercel protects every deployment URL on a new project by default
+    (`ssoProtection: {"deploymentType": "all_except_custom_domains"}`), so the
+    `*.vercel.app` URL 302s to `vercel.com/sso-api` and any visitor gets a login
+    page. A validation landing page exists to measure whether strangers want the
+    idea; behind a login it measures nothing, and the lead harvest that runs
+    straight after the deploy reads zero from a page nobody could open.
+
+    This was found and fixed by hand on one project on 2026-08-20 (BUG_LOG 5),
+    which recorded the residual gap precisely: *"Every future product's Vercel
+    project will need the same manual step ... until this is automated in
+    `deploy.py` itself."* It then recurred on the next project ever created, which
+    is what this is.
+
+    The tradeoff is the one taken deliberately then: this disables protection for
+    every deployment on the project, previews included. Each project here hosts
+    exactly one product whose entire purpose is to be publicly reachable, so there
+    is nothing on it that protection was guarding. A real custom domain is exempt
+    by design and remains the better end state -- see `domain.ensure_requested`.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            response = await client.patch(
+                f"https://api.vercel.com/v9/projects/{project_name}",
+                json={"ssoProtection": None},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    except httpx.HTTPError as exc:
+        # The deployment itself succeeded; a page that is up but gated is still a
+        # better outcome than failing the deploy over it.
+        log.warning("deploy.sso_disable_failed", project=project_name, detail=str(exc)[:200])
+        return
+    if response.status_code != 200:
+        log.warning(
+            "deploy.sso_disable_rejected",
+            project=project_name,
+            status=response.status_code,
+            detail=response.text[:200],
+        )
+        return
+    log.info("deploy.sso_disabled", project=project_name)
 
 
 #: How much build log to carry back. Vercel's failures put the actionable line at

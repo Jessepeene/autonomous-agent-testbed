@@ -28,6 +28,29 @@ def _approved_council() -> CouncilResult:
     return CouncilResult(approved=True, verdicts=[])
 
 
+#: Records every PATCH a test's deploy issued, so the SSO call can be asserted on.
+_sso_calls: list[tuple[str, Any]] = []
+
+
+@pytest.fixture(autouse=True)
+def _no_real_patch_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep `_disable_sso_protection` off the network.
+
+    It runs on the success path of every deploy, and its own error handling is
+    deliberately forgiving -- a project that is up but gated beats failing a deploy
+    that worked. That forgiveness makes a real, unmocked request to api.vercel.com
+    invisible: the call goes out, 403s on the fake token, logs a warning, and the
+    test passes anyway. Caught exactly that way, by timing the call.
+    """
+    _sso_calls.clear()
+
+    async def fake_patch(self: httpx.AsyncClient, url: str, **kwargs: Any) -> httpx.Response:
+        _sso_calls.append((url, kwargs.get("json")))
+        return httpx.Response(200, json={"ssoProtection": None}, request=_REQUEST)
+
+    monkeypatch.setattr(httpx.AsyncClient, "patch", fake_patch)
+
+
 @pytest.fixture(autouse=True)
 def _fixed_files(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
@@ -188,7 +211,9 @@ async def test_a_content_rejection_status_is_not_infra(
     assert result.is_infra is False
 
 
-async def test_transport_error_is_infra(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_transport_error_is_infra(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
     async def fail_post(self: httpx.AsyncClient, url: str, **kwargs: Any) -> httpx.Response:
         raise httpx.ConnectError("connection refused", request=_REQUEST)
 
@@ -198,3 +223,58 @@ async def test_transport_error_is_infra(settings: Settings, monkeypatch: pytest.
 
     assert result.ok is False
     assert result.is_infra is True
+
+
+async def test_a_successful_deploy_makes_the_page_publicly_reachable(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A page nobody can open has not shipped.
+
+    Vercel protects every `*.vercel.app` URL on a new project by default, so the
+    deployment 302s to `vercel.com/sso-api` and a visitor gets a login form. This
+    was found by hand on 2026-08-20 (BUG_LOG 5), fixed on that one project, and
+    the entry recorded the residual gap exactly: every future project needs the
+    same step "until this is automated in `deploy.py` itself". It then recurred on
+    the very next project this factory created -- a demand-validation page behind
+    a login, with the lead harvest reading zero from it.
+    """
+
+    async def fake_post(self: httpx.AsyncClient, url: str, **kwargs: Any) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"url": "shardrunner.vercel.app", "readyState": "READY", "id": "dpl_1"},
+            request=_REQUEST,
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    result = await _deploy(_live(settings))
+
+    assert result.ok is True
+    assert _sso_calls, "a successful deploy must disable SSO protection, or nobody can see it"
+    url, body = _sso_calls[-1]
+    assert "/v9/projects/" in url
+    assert body == {"ssoProtection": None}
+
+
+async def test_a_deploy_still_succeeds_when_the_sso_call_fails(
+    settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Best-effort by design: a page that is up but gated beats losing the deploy."""
+
+    async def fake_post(self: httpx.AsyncClient, url: str, **kwargs: Any) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"url": "shardrunner.vercel.app", "readyState": "READY", "id": "dpl_1"},
+            request=_REQUEST,
+        )
+
+    async def failing_patch(self: httpx.AsyncClient, url: str, **kwargs: Any) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=_REQUEST)
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+    monkeypatch.setattr(httpx.AsyncClient, "patch", failing_patch)
+
+    result = await _deploy(_live(settings))
+
+    assert result.ok is True
