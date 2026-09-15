@@ -27,6 +27,16 @@ class UnsafeWorkspace(ValueError):
     """The requested workspace name could escape the workspace root."""
 
 
+class UnknownWorkspace(ValueError):
+    """A safe name, but no workspace by it exists.
+
+    Distinct from `UnsafeWorkspace` because the two mean opposite things to the
+    caller: that one is an attempt to leave the sandbox, this one is a name that was
+    guessed. Conflating them would report an invented workspace as a security event
+    and bury the thing that actually needs saying -- use the name you were given.
+    """
+
+
 class DevOpsError(RuntimeError):
     """A sandbox failure that looks like a host/environment problem rather than a
     bug in the generated application code — a missing binary, a permission block, a
@@ -127,11 +137,26 @@ class SandboxRunner(Protocol):
     ) -> SandboxResult: ...
 
 
-def resolve_workspace(workspace: str, settings: Settings | None = None) -> Path:
+def resolve_workspace(
+    workspace: str, settings: Settings | None = None, *, create: bool = False
+) -> Path:
     """Map a workspace name to a directory under the workspace root.
 
     Rejects anything that is not a plain name, so ``../`` or an absolute path cannot
     mount the host filesystem into a container.
+
+    **Creating is explicit, and the default is not to.** This used to `mkdir` on
+    every call, which meant a workspace name an agent invented became a real empty
+    directory the moment it was mentioned -- so a command run against a guess
+    succeeded, returned nothing useful, and taught the agent nothing. It then guessed
+    again. Production accumulated 15 such directories against 2 real products,
+    including one literally named `nonexistent-xyz-123`, and an agent was observed
+    burning steps on `find / -maxdepth 3 -type d -name '*workspace*'` looking for the
+    workspace it had been told it had.
+
+    Failing loudly is the useful answer: "there is no workspace called 'api'" is true
+    and actionable, where an empty directory is a plausible lie. Only the two places
+    that genuinely bring a workspace into existence pass ``create=True``.
     """
     settings = settings or get_settings()
     if not _SAFE_WORKSPACE.match(workspace):
@@ -140,7 +165,14 @@ def resolve_workspace(workspace: str, settings: Settings | None = None) -> Path:
     path = (root / workspace).resolve()
     if path != root and root not in path.parents:
         raise UnsafeWorkspace(f"workspace {workspace!r} escapes {root}")
-    path.mkdir(parents=True, exist_ok=True)
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+    elif not path.is_dir():
+        raise UnknownWorkspace(
+            f"there is no workspace called {workspace!r}. It was never created, so "
+            "nothing can be read from or run in it. If you were given a workspace "
+            "name, use exactly that name; do not guess at one."
+        )
     return path
 
 

@@ -531,7 +531,11 @@ def clear_workspace(workspace: str, settings: Settings | None = None) -> None:
     the deterministic guarantee; the prompt guidance in `generate_scaffold` is the
     complementary attempt to avoid needing it in the first place.
     """
-    root = resolve_workspace(workspace, settings)
+    # The other of the two creators -- see `resolve_workspace`. This runs before
+    # `write_plan` on a first build, so it is the first thing to touch the directory
+    # and must be allowed to bring it into existence rather than failing on a product
+    # that has never been built.
+    root = resolve_workspace(workspace, settings, create=True)
 
     def _log_delete_failure(func: object, path: str, exc: BaseException) -> None:
         # ignore_errors=True previously swallowed every deletion failure (a
@@ -575,7 +579,9 @@ def clear_workspace(workspace: str, settings: Settings | None = None) -> None:
 
 def write_plan(plan: ScaffoldPlan, workspace: str, settings: Settings | None = None) -> list[str]:
     """Materialise the plan into the product workspace. Returns the paths written."""
-    root = resolve_workspace(workspace, settings)
+    # One of exactly two places a workspace is brought into existence -- see
+    # `resolve_workspace`. A first build has nowhere to write yet.
+    root = resolve_workspace(workspace, settings, create=True)
     written: list[str] = []
     for generated in plan.files:
         target = safe_target(root, generated.path)

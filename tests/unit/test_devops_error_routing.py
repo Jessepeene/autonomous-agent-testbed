@@ -16,6 +16,7 @@ from factory.engines.development import bug_council
 from factory.engines.development import deploy as deploy_module
 from factory.engines.development import graph as dev_graph
 from factory.sandbox.runner import DevOpsError, SandboxResult, is_devops_error
+from factory.settings import Settings
 from factory.state import repository
 from factory.state.schemas import CouncilResult, ProductStatus
 from factory.supervisor.context import FactoryContext
@@ -132,6 +133,18 @@ class _ScriptedSandbox:
     ) -> SandboxResult:
         self.calls.append({"command": command, "network": network, "env": env})
         return self.results.pop(0)
+
+
+@pytest.fixture(autouse=True)
+def _workspace_exists(settings: Settings) -> None:
+    """`product-1` is the workspace every test here verifies and ships.
+
+    Created explicitly because `resolve_workspace` no longer brings a workspace into
+    existence just by being asked about one -- in production `write_plan` has always
+    created it before `_verify_and_ship` runs, and a name nobody created is now an
+    error rather than a silently empty directory.
+    """
+    (settings.workspace_root / "product-1").mkdir(parents=True, exist_ok=True)
 
 
 @pytest.fixture(autouse=True)

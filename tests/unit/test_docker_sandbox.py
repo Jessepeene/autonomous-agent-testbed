@@ -26,6 +26,11 @@ def _flag_value(argv: list[str], flag: str) -> str:
 
 @pytest.fixture
 def sandbox(settings: Settings) -> DockerSandbox:
+    # `product-1` is the workspace every execute test runs against. Created here
+    # because `resolve_workspace` no longer conjures one on demand -- in production
+    # `write_plan` has always created it long before anything runs in it, and a name
+    # nobody created is now an error rather than an empty room.
+    (settings.workspace_root / "product-1").mkdir(parents=True, exist_ok=True)
     return DockerSandbox(settings)
 
 

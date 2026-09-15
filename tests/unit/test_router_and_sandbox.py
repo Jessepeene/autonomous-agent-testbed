@@ -23,7 +23,12 @@ from factory.llm.router import (
 )
 from factory.llm.schema import json_schema_for
 from factory.sandbox.disabled import DisabledSandbox
-from factory.sandbox.runner import SandboxUnavailable, UnsafeWorkspace, resolve_workspace
+from factory.sandbox.runner import (
+    SandboxUnavailable,
+    UnknownWorkspace,
+    UnsafeWorkspace,
+    resolve_workspace,
+)
 from factory.settings import Settings, TaskType
 
 # --- POC model override -----------------------------------------------------
@@ -285,5 +290,31 @@ def test_workspace_names_that_could_escape_are_refused(name: str, settings: Sett
 
 
 def test_valid_workspace_resolves_under_root(settings: Settings) -> None:
-    path = resolve_workspace("product-abc123", settings)
+    path = resolve_workspace("product-abc123", settings, create=True)
     assert path.parent == settings.workspace_root.resolve()
+    # Resolving again without `create` now succeeds, because it exists.
+    assert resolve_workspace("product-abc123", settings) == path
+
+
+def test_a_workspace_nobody_created_is_an_error_not_an_empty_room(
+    settings: Settings,
+) -> None:
+    """Creating on demand taught agents that guessing works.
+
+    `resolve_workspace` used to `mkdir` on every call, so a workspace name an agent
+    invented became a real empty directory the moment it was mentioned: the command
+    ran, succeeded, returned nothing useful, and taught it nothing -- so it guessed
+    again. Production accumulated 15 such directories against 2 real products,
+    including one named `nonexistent-xyz-123`, and an agent was observed spending
+    steps on `find / -maxdepth 3 -type d -name '*workspace*'` hunting for the
+    workspace it had been told it had.
+
+    An error is the useful answer. An empty directory is a plausible lie.
+    """
+    with pytest.raises(UnknownWorkspace):
+        resolve_workspace("api", settings)
+
+    # Still distinct from an attempt to escape the root: opposite meanings, and
+    # reporting a guess as a security event would bury the thing worth saying.
+    with pytest.raises(UnsafeWorkspace):
+        resolve_workspace("../etc", settings)
