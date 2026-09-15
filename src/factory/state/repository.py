@@ -3346,6 +3346,65 @@ async def product_progress(session: AsyncSession, product_id: str) -> ProductPro
     )
 
 
+async def accept_issues(
+    session: AsyncSession,
+    *,
+    product_id: str,
+    accepted: list[tuple[str, str]],
+    decided_by_task_id: str | None = None,
+) -> int:
+    """Record that a release decision is shipping with these known flaws. Returns how many.
+
+    `wont_fix`, reusing the state `resolve_issues_as_invalid` already established and
+    for the same stated reason: *nothing was verified gone, a decision was made that
+    it should not be done.* Accepting a flaw and refusing a false brief are the same
+    kind of act — a judgement that this defect is not work — and they deserve the same
+    state rather than a second one that means almost the same thing.
+
+    Everything downstream then works without further change, which is the sign the
+    state was the right one: `OPEN_STATUSES` excludes `wont_fix`, so an accepted issue
+    stops counting toward the blocking set; and `record_issue`'s reopen list is
+    `("closed", "verified", "fixed")` — deliberately not this — so re-detecting an
+    accepted defect bumps `times_seen` and leaves the decision standing. It is
+    remembered, not forgotten, and never silently resurrected.
+
+    A reference that matches nothing is skipped and logged, never guessed at. The
+    judge picks from references it was shown; inventing one means it accepted
+    nothing, and acting on a near-match would silence a defect nobody chose.
+    """
+    applied = 0
+    for ref, why in accepted:
+        ref = (ref or "").strip()
+        if len(ref) < 4:
+            continue
+        stmt = select(Issue).where(
+            Issue.product_id == product_id,
+            Issue.id.startswith(ref),
+            Issue.status.in_(issues.OPEN_STATUSES),
+        )
+        matches = list((await session.execute(stmt)).scalars().all())
+        if len(matches) != 1:
+            # Zero means invented or already resolved; more than one means the
+            # reference is ambiguous. Neither is something to resolve by picking.
+            log.info(
+                "issue.acceptance_unmatched",
+                product_id=product_id,
+                ref=ref[:16],
+                matches=len(matches),
+            )
+            continue
+        issue = matches[0]
+        issue.status = "wont_fix"
+        issue.closed_at = _now()
+        issue.resolution = f"Accepted at release: {why.strip()[:900]}"
+        issue.fix_task_id = decided_by_task_id
+        applied += 1
+        log.info("issue.accepted", issue_id=issue.id, product_id=product_id)
+    if applied:
+        await session.flush()
+    return applied
+
+
 async def close_issues_as_invalid(
     session: AsyncSession, *, task_id: str, reason: str
 ) -> int:

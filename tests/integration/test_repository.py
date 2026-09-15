@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from factory.engines.compliance.minimize import ProvenanceMissing
 from factory.settings import EngineName
 from factory.state import repository
-from factory.state.orm import Base, Task
+from factory.state.orm import Base, Issue, Task
 from factory.state.schemas import InterruptReason, ProductStatus, TaskKind, TaskStatus
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -766,3 +766,92 @@ async def test_an_ordinary_task_still_completes(session: AsyncSession) -> None:
     assert await repository.complete_task(session, task_id) is True
     done = await session.get(Task, task_id)
     assert done is not None and done.status == TaskStatus.DONE.value
+
+
+async def test_an_accepted_flaw_stops_blocking_and_stays_accepted(
+    session: AsyncSession,
+) -> None:
+    """The defect that stopped a finished product shipping.
+
+    The release judge accepted two findings as "design choice, not functional" and
+    the next pass re-filed them as blocking, unchanged, then reported that the
+    blocking set was not shrinking. `accepted_issues` was free text written to a log
+    and read by nothing, while its own contract called it "what makes 'done'
+    reachable".
+
+    Two properties, and the second is the one that makes it durable: an accepted
+    flaw stops counting, and re-detecting it does not quietly resurrect it.
+    """
+    idea = await repository.upsert_idea(session, _scored_idea())
+    assert idea is not None
+    product = await repository.create_product(session, name="Shardline", idea_id=idea)
+
+    issue, created = await repository.record_issue(
+        session,
+        product_id=product,
+        kind="ui",
+        severity="high",
+        title="The page loads no webfont",
+        location="index.html",
+        found_by="requirements_gap_check",
+    )
+    assert created
+    issue_id = issue.id
+    assert len(await repository.open_issues_for(session, product)) == 1
+
+    applied = await repository.accept_issues(
+        session,
+        product_id=product,
+        accepted=[(issue_id[:8], "A design choice that does not affect validation.")],
+        decided_by_task_id="release-1",
+    )
+    assert applied == 1
+    assert await repository.open_issues_for(session, product) == [], "no longer blocking"
+
+    # The next verification pass finds the same thing, because it is still true.
+    await repository.record_issue(
+        session,
+        product_id=product,
+        kind="ui",
+        severity="high",
+        title="The page loads no webfont",
+        location="index.html",
+        found_by="requirements_gap_check",
+    )
+    still = await repository.open_issues_for(session, product)
+    assert still == [], "re-detecting an accepted flaw must not resurrect it"
+
+    row = await session.get(Issue, issue_id)
+    assert row is not None
+    assert row.status == "wont_fix"
+    assert row.times_seen == 2, "remembered, not forgotten"
+    assert "does not affect validation" in (row.resolution or "")
+
+
+async def test_an_invented_reference_accepts_nothing(session: AsyncSession) -> None:
+    """A judge that invents a reference has accepted nothing.
+
+    Acting on a near-match would silence a defect nobody chose to accept, which is
+    worse than the acceptance failing to apply.
+    """
+    idea = await repository.upsert_idea(session, _scored_idea())
+    assert idea is not None
+    product = await repository.create_product(session, name="Shardline", idea_id=idea)
+    await repository.record_issue(
+        session,
+        product_id=product,
+        kind="ui",
+        severity="high",
+        title="The page loads no webfont",
+        location="index.html",
+        found_by="requirements_gap_check",
+    )
+
+    applied = await repository.accept_issues(
+        session,
+        product_id=product,
+        accepted=[("deadbeef", "Not a real issue."), ("", "Empty.")],
+        decided_by_task_id="release-1",
+    )
+    assert applied == 0
+    assert len(await repository.open_issues_for(session, product)) == 1

@@ -722,6 +722,27 @@ class WorkRequirements(Contract):
     out_of_scope: list[str] = Field(default_factory=list, max_length=12)
 
 
+class AcceptedIssue(Contract):
+    """One known flaw a release decision is deliberately shipping with.
+
+    Carries the *reference* the judge was shown rather than a description of the
+    problem, because the acceptance has to reach the row it is about. Free text could
+    not: the judge's words and the issue's title are written by different callers at
+    different times, and matching them would be a guess dressed as a lookup.
+
+    The reason is kept because it is what makes this a decision rather than a
+    dismissal. It becomes the issue's own resolution text, so whoever finds the
+    defect later reads why it was left rather than assuming it was missed.
+    """
+
+    #: The short reference shown beside the issue in the prompt. Anything that does
+    #: not match a real issue is ignored -- a judge that invents one has accepted
+    #: nothing, and acting on a guess would silence a defect nobody chose to accept.
+    issue_ref: str = Field(min_length=4)
+    #: Why it is acceptable to ship with this. Goes on the record against the issue.
+    why: str = Field(min_length=10)
+
+
 class ReleaseDecision(Contract):
     """A judgement about whether to put this in front of a real person.
 
@@ -743,7 +764,17 @@ class ReleaseDecision(Contract):
     unmet_must: list[str] = Field(default_factory=list, max_length=12)
     #: Known problems being shipped with, deliberately. Recorded so the acceptance
     #: is a decision someone made rather than something nobody noticed.
-    accepted_issues: list[str] = Field(default_factory=list, max_length=20)
+    #:
+    #: **References, not prose.** This was `list[str]` of free text, which made the
+    #: acceptance unactionable: nothing could tell which rows the judge meant, so the
+    #: decision was written to a log and the same findings came back as blocking on
+    #: the next pass. Observed live -- the judge accepted "Webfont dependency (design
+    #: choice, not functional)" and eight minutes later reported "the blocking set is
+    #: not shrinking" about that very finding.
+    #:
+    #: The judge picks from references it was shown; deterministic code does the
+    #: state change. A reference it invents is ignored rather than guessed at.
+    accepted_issues: list[AcceptedIssue] = Field(default_factory=list, max_length=20)
     #: For `fix_first`: the fewest changes that would make this shippable. Not every
     #: finding -- a long list here is how a product never ships.
     fix_first: list[str] = Field(default_factory=list, max_length=10)

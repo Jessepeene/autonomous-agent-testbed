@@ -57,11 +57,24 @@ def test_shipping_with_known_issues_is_sayable() -> None:
     """The state the old gate could not express. "No blocking findings" is
     unbounded -- there is always another finding -- so `done` was unreachable.
     Accepting named issues deliberately is what makes it reachable."""
+    from factory.state.schemas import AcceptedIssue
+
     decision = _decision(
-        accepted_issues=["footer year is stale", "no loading spinner on submit"]
+        accepted_issues=[
+            AcceptedIssue(
+                issue_ref="a1b2c3d4", why="A stale footer year costs no visitor anything."
+            ),
+            AcceptedIssue(
+                issue_ref="e5f6a7b8", why="A spinner is polish; the form works without it."
+            ),
+        ]
     )
     assert decision.decision == "ship"
     assert len(decision.accepted_issues) == 2
+    # References, not prose. Free text could not reach the row it was about, so the
+    # acceptance was logged and the same findings came back blocking on the next
+    # pass -- observed live before this shape changed.
+    assert decision.accepted_issues[0].issue_ref == "a1b2c3d4"
 
 
 def test_fix_first_carries_what_specifically() -> None:

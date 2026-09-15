@@ -119,9 +119,16 @@ async def decide_release(
         facts += [f"  BLOCKED BY: [{f.severity}/{f.category}] {f.summary}" for f in blocking[:10]]
 
     if open_issues:
-        facts += ["", "Everything currently open against this product:"]
         facts += [
-            f"  [{i.severity}] {i.title} (seen {i.times_seen}x since "
+            "",
+            "Everything currently open against this product. The reference in "
+            "brackets is how you accept one -- put it in `accepted_issues` with your "
+            "reason, and it stops counting against this product until something "
+            "changes. An accepted issue is not fixed and is not forgotten; it is a "
+            "decision on the record.",
+        ]
+        facts += [
+            f"  [{i.id[:8]}] [{i.severity}] {i.title} (seen {i.times_seen}x since "
             f"{i.first_seen_at:%Y-%m-%d}, status {i.status})"
             for i in open_issues[:20]
         ]
@@ -201,6 +208,17 @@ async def decide_release(
             }
         )
 
+    # Make the acceptance real before recording it. A decision to ship with a known
+    # flaw that leaves the flaw counting as blocking is not a decision, it is a
+    # sentence in a log -- and the next pass re-files the same finding and reports
+    # that the blocking set is not shrinking, which is exactly what happened live.
+    accepted = await repository.accept_issues(
+        session,
+        product_id=product_id,
+        accepted=[(a.issue_ref, a.why) for a in decision.accepted_issues],
+        decided_by_task_id=task_id,
+    )
+
     await repository.record_task_event(
         session,
         event="release.decided",
@@ -211,7 +229,8 @@ async def decide_release(
             "decision": decision.decision,
             "rationale": decision.rationale[:1000],
             "unmet_must": decision.unmet_must[:10],
-            "accepted": decision.accepted_issues[:10],
+            "accepted": [f"{a.issue_ref}: {a.why[:120]}" for a in decision.accepted_issues[:10]],
+            "accepted_applied": accepted,
             "fix_first": decision.fix_first[:10],
             "heal_attempts": heal_attempts,
             # Recorded so the *next* decision can compare and see a direction.
@@ -226,5 +245,6 @@ async def decide_release(
         decision=decision.decision,
         unmet_must=len(decision.unmet_must),
         accepted=len(decision.accepted_issues),
+        accepted_applied=accepted,
     )
     return decision
