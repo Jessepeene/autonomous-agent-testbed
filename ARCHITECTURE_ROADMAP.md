@@ -157,6 +157,36 @@ The other two here are structural: a bounded terminal extraction call so a revie
 always ends in a decision rather than an exhausted ceiling, and a per-role
 `cost_cap_usd`.
 
+## The operator is an escalation target, not a subscriber (applies to every phase)
+
+Jesse's rule, stated when asked whether inbound customer replies should ping him:
+*"the system shouldn't need me, and if it does it would escalate."*
+
+It reads like a preference about notifications and it is not. It fixes what the
+human is *for* in this architecture:
+
+- **Needing a person is a failure state, not a feature.** It already has a channel —
+  `interrupts` — with a status, a reason vocabulary, a reply path, and a record of
+  whether it was ever dealt with.
+- **So there is no second, softer channel.** No "FYI" stream, no digest, no per-event
+  ping. Anything worth a person's attention is worth an escalation; anything not
+  worth an escalation is not worth a notification either. A parallel notify path is
+  how the operator quietly becomes a subscriber to work the system was supposed to
+  do, and then the backlog of things nobody handled is invisible because it scrolled
+  past instead of staying open.
+- **Which makes escalation volume load-bearing.** If the only way to reach a person
+  is an escalation, escalations must stay rare and each must mean something. That is
+  why duplicate storms and false auto-resolutions are not cosmetic bugs: eight
+  `provider_outage` notices for one unchanged condition, seven of them closing
+  themselves with "it is answering again", is the channel being devalued until a real
+  one is indistinguishable from noise.
+- **Corollary for anything unclassifiable.** When the system cannot decide what
+  something is, the answer is *escalate*, never *notify*. An escalation has to be
+  resolved; a message just goes by.
+
+Practical test for any new surface: if you are about to add a way to tell Jesse
+something, either it is an escalation or it should not reach him at all.
+
 ## Every entity keeps a living record (applies to every phase)
 
 The companion to the instrumentation principle, and the generalisation of Phase
@@ -694,6 +724,10 @@ doors.
   the briefing rule (counts, never addresses) applies with more force here, not less.
 - **A reply is untrusted input.** It is written by someone outside the company and
   will at some point contain text that reads like an instruction. It is data.
+- **No reply notifies Jesse.** Per the operator principle above: a reply the system
+  can handle is handled, and one it cannot is an *escalation*, not a ping. A reply
+  that cannot be classified confidently escalates rather than sitting unread — the
+  same conservatism `comms.route()` already applies to an unroutable question.
 - **Maintenance is autonomous; new capability is not.** See the triage table above.
   A bug report on a product already sold is not new spend and goes straight into the
   repair path; anything that would build something new accumulates as evidence and
