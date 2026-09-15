@@ -18,7 +18,7 @@ from factory.engines.development.requirements import (
 from factory.logging import get_logger
 from factory.sandbox.runner import DevOpsError, resolve_workspace
 from factory.settings import EngineName, Settings, TaskType
-from factory.state.schemas import ScaffoldPlan, ValidatedIdea
+from factory.state.schemas import DesignGuidelines, ScaffoldPlan, ValidatedIdea
 from factory.supervisor.context import FactoryContext
 
 log = get_logger(__name__)
@@ -318,6 +318,11 @@ async def generate_scaffold(
     product_id: str,
     task_id: str | None = None,
     existing_files: dict[str, str] | None = None,
+    #: The standard this build is held to, resolved by
+    #: `requirements.py::effective_design` -- this product's own guidelines when
+    #: Design wrote any, the house style when it did not. Defaulted so every
+    #: existing caller keeps its previous behaviour exactly.
+    design: DesignGuidelines = HOUSE_STYLE,
 ) -> ScaffoldPlan:
     """``existing_files`` (from `read_workspace`) turns this into a repair pass:
     the model sees exactly what is already on disk instead of regenerating a whole
@@ -354,8 +359,9 @@ async def generate_scaffold(
         "\n"
         # The same guidelines the gap check will judge the result against. One
         # rendering shared by builder and reviewer, so they cannot work to two
-        # different readings of the same standard.
-        + render_design_for_prompt(HOUSE_STYLE)
+        # different readings of the same standard -- which is why this is the
+        # resolved `design`, not the constant: the reviewer resolves it the same way.
+        + render_design_for_prompt(design)
         + "\n\n"
         + f'Analytics beacon URL (POST JSON {{"path": ..., "referrer": ...}} here, '
         f"exactly, verbatim): {analytics_url}\n\n"
@@ -401,6 +407,13 @@ async def generate_landing_page(
     #: build with none is exactly what happened before they existed -- a
     #: degradation, never a reason to refuse to build.
     requirements: str | None = None,
+    #: What the Design department decided *for this product*, when it has decided
+    #: anything. Deliberately `None` rather than defaulted to `HOUSE_STYLE`: the
+    #: system prompt above already carries the general direction in prose, so the
+    #: house style here would be a second copy of guidance the model already has.
+    #: A product's own guidelines are different in kind -- specific decisions rather
+    #: than instructions to decide -- and only those are worth the tokens.
+    design: DesignGuidelines | None = None,
 ) -> ScaffoldPlan:
     """A cheap, pitch-only page for the idea validation gate -- see
     `development/graph.py::_build_landing_page`. Unlike `generate_scaffold` (whose
@@ -465,6 +478,22 @@ async def generate_landing_page(
         prompt += (
             "ACCEPTANCE CRITERIA for this specific page -- it will be reviewed "
             "against exactly these:\n\n" + requirements + "\n\n"
+        )
+    if design is not None:
+        # The half of the loop that was missing. Design could write a standard for a
+        # specific product and store it; nothing read it, so the page it was written
+        # for was built to the general house style instead.
+        #
+        # Placed after the system prompt's general direction and marked as replacing
+        # it, because the two are different in kind: "choose 4-6 named hex values" is
+        # an instruction to decide, and "the palette is #E74C3C because it is the
+        # build-failed state this audience lives in" is the decision. Left ambiguous,
+        # a model asked to decide something already decided will decide it again.
+        prompt += (
+            "DESIGN GUIDELINES decided by the design department for this specific "
+            "product. Where these are more specific than the general direction "
+            "above, these win -- they are decisions already made, not suggestions "
+            "to weigh:\n\n" + render_design_for_prompt(design) + "\n\n"
         )
     prompt += "Produce the complete validation page."
     return await ctx.llm.parse(

@@ -41,7 +41,7 @@ from factory.engines.development.requirements import (
 from factory.logging import get_logger
 from factory.settings import EngineName, TaskType
 from factory.state import repository
-from factory.state.schemas import GapReport, WorkRequirements
+from factory.state.schemas import DesignGuidelines, GapReport, WorkRequirements
 from factory.supervisor.context import FactoryContext
 
 log = get_logger(__name__)
@@ -91,6 +91,10 @@ async def find_requirement_gaps(
     sources: dict[str, str],
     requirements: WorkRequirements,
     task_id: str | None = None,
+    #: Resolved the same way the builder resolves it, by
+    #: `requirements.py::effective_design`. A page built to one standard and judged
+    #: against another fails for reasons nobody can act on.
+    design: DesignGuidelines = HOUSE_STYLE,
 ) -> GapReport | None:
     """Compare a build against its acceptance criteria. ``None`` if it could not run.
 
@@ -110,7 +114,7 @@ async def find_requirement_gaps(
         # criterion and still read as generated, which is exactly what shipped and
         # what only a human caught. Guidelines written to be falsifiable make that
         # a gap like any other.
-        f"{render_design_for_prompt(HOUSE_STYLE)}\n\n"
+        f"{render_design_for_prompt(design)}\n\n"
         "Report which criteria are met, which are gaps, and which you could not "
         "determine from the code above. Judge the design guidelines the same way: "
         "a page using a framework's stock palette or no webfont at all is a gap "

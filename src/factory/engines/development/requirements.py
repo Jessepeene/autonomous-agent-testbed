@@ -267,6 +267,45 @@ HOUSE_STYLE = DesignGuidelines(
 )
 
 
+async def design_for_product(
+    session: AsyncSession, product_id: str
+) -> DesignGuidelines | None:
+    """What the Design department decided for this product. ``None`` if nobody wrote it.
+
+    The missing half of a loop that was otherwise complete. Design could write
+    guidelines and store them; `HOUSE_STYLE` was what the builder and the reviewer
+    actually read, so a standard written for one specific product could never reach
+    the page it was written for. Observed the day the department produced its first
+    real guideline -- a palette, a type scale and a stated direction, stored
+    correctly, and read by nothing.
+    """
+    # `live_design_guidelines` is typed `Any` because it reconstructs the contract
+    # from the generic requirement columns it was stored in. Narrowed here rather
+    # than cast, so a stored row that is not actually a `DesignGuidelines` degrades
+    # to the house style instead of reaching a prompt as whatever it happens to be.
+    stored = await repository.live_design_guidelines(session, product_id)
+    return stored if isinstance(stored, DesignGuidelines) else None
+
+
+def effective_design(product_design: DesignGuidelines | None) -> DesignGuidelines:
+    """The standard a build is actually held to.
+
+    A product's own guidelines when Design has written them, the house style when it
+    has not -- and the distinction is not a fallback so much as a difference in kind.
+    `HOUSE_STYLE` is *instructional*: "choose 4-6 named hex values and state them
+    before building". A product's guidelines are the *decided answer*: these hex
+    values, this typeface, this reason. So the specific one replaces the generic one
+    rather than stacking on it, and they do not contradict because the specific one
+    was written *from* the generic one.
+
+    Both the builder and the reviewer resolve through here, which is the property
+    that matters: a standard only works if everyone who acts on it reads the same
+    text, and a page built to one standard and judged against another fails for
+    reasons nobody can act on.
+    """
+    return product_design or HOUSE_STYLE
+
+
 def render_design_for_prompt(guidelines: DesignGuidelines) -> str:
     """Design guidelines as an instruction block, for the builder and the reviewer.
 

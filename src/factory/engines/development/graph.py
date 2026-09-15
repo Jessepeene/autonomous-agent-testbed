@@ -35,6 +35,8 @@ from factory.engines.development import deploy as deploy_module
 from factory.engines.development.gaps import find_requirement_gaps, record_gaps_as_issues
 from factory.engines.development.release import decide_release
 from factory.engines.development.requirements import (
+    design_for_product,
+    effective_design,
     render_for_prompt,
     write_landing_page_requirements,
 )
@@ -227,7 +229,13 @@ async def _build(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
                 ProductStatus.BUILDING,
                 workspace_path=workspace,
             )
-            plan = await generate_scaffold(ctx, idea, product_id=product_id, task_id=task.id)
+            plan = await generate_scaffold(
+                ctx,
+                idea,
+                product_id=product_id,
+                task_id=task.id,
+                design=effective_design(await design_for_product(session, product_id)),
+            )
             # A retried build_mvp task (after a crash mid-attempt) reuses this same
             # product-scoped workspace -- clear it so a stale partial write from the
             # earlier attempt can't survive alongside this one.
@@ -335,6 +343,7 @@ async def _build_landing_page(ctx: FactoryContext, session: AsyncSession, task: 
                 task_id=task.id,
                 ab_variants=ab_variants,
                 requirements=render_for_prompt(requirements) if requirements else None,
+                design=await design_for_product(session, product_id),
             )
             clear_workspace(workspace, ctx.settings)
             written = write_plan(plan, workspace, ctx.settings)
@@ -1173,6 +1182,7 @@ async def _patch(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
                 product_id=product_id,
                 task_id=task.id,
                 existing_files=existing,
+                design=effective_design(await design_for_product(session, product_id)),
             )
             # Clear *after* generating (so the model saw the old files) and *before*
             # writing (so nothing from the previous attempt survives alongside the
@@ -1736,7 +1746,11 @@ async def _verify_and_ship(
     requirements = _requirements_from_row(stored_requirements) if stored_requirements else None
     if requirements is not None:
         report = await find_requirement_gaps(
-            ctx, sources=sources, requirements=requirements, task_id=task_id
+            ctx,
+            sources=sources,
+            requirements=requirements,
+            task_id=task_id,
+            design=effective_design(await design_for_product(session, product_id)),
         )
         if report is not None:
             await record_gaps_as_issues(session, product_id, report)
