@@ -241,7 +241,7 @@ Do this audit **before** building each manager, not after:
 | 4 — General manager | cross-department trend, what changed, what's stuck | Mostly exists and is **thrown away**: `check_business_health` computes real concerns and `engines/maintenance.py` discards them; memory has no cross-product scope (gaps 3–4 above) |
 | Discovery (if ever) | whether a signal is real and not already mined | Weak — live logs show repeated `discovery.signal_not_grounded`, i.e. it cannot reliably verify its own sources |
 
-## Phase 1.5 — the record (prerequisite for Phase 2 and Phase 4)
+## Phase 1.5 — the record (prerequisite for Phase 2 and Phase 3)
 
 Not originally a phase, and it should have been. Phases 2 and 4 both reduce to
 "the manager can see what happened": Phase 2 *is* widening context, and a general
@@ -763,21 +763,163 @@ A Marketing manager without reply data is judging on a 14-day revenue lag. This 
 the learning loop a same-week signal and turns `outreach_conversion_rate` into
 something with a numerator.
 
-## Phase 3 — a second department manager
+## The department model (added 2026-09-15, after a full live run)
 
-Most likely Marketing (thin lead flow and stalled validations are a live symptom),
-reusing the Phase 1 shape. **Open question to decide at the time**: Marketing vs
-Discovery. Discovery is where spend scales fastest and a bad judgment call costs
-most, which argues for doing it later, not sooner.
+Jesse's reference for what a software business actually needs, and what this
+factory has against it. Everything from Phase 2.7 on is organised around this.
 
-## Phase 4 — the general manager
+| Needed | Owns | Here today |
+|---|---|---|
+| **Product / Management** | What are we building? **Who is it for?** Priorities, strategy, roadmap, decisions. | **Missing.** Discovery covers "what" only; Supervisor dispatches work but decides no strategy. |
+| **Development / Engineering** | Build, maintain, infrastructure, releases. | ✓ |
+| **Marketing / Sales** | Positioning, acquisition, campaigns. | ✓ |
+| **Finance / Administration** | Money in and out, budgets, obligations. | ✓ |
+| **Customer Support / Success** | Customer problems, feedback, retention. | **Missing** — scoped as Phase 2.6. |
 
-Closes gaps 3–5: add a department/cross-product memory scope; stop discarding
-`check_business_health`'s concerns and make them standing GM context; give
-Supervisor durable cross-tick awareness so it can decide where attention goes and
-escalate on judgment rather than from a fixed enum.
+Not departments at this size, per the same reference: Data & Analytics (initially
+Product/Management), Data Engineering (Engineering), BI (Finance/Management),
+HR, Legal (Compliance is an exception here — an autonomous system sending cold
+email genuinely needs it), Security and IT (Engineering).
+
+**Design is deliberately a department despite not being in that list**, and the
+justification is a capability rather than an org chart: it is the only role that can
+*look* at a page. Everything else reads source, and a page can be correct in every
+line and still read as machine-generated. A human org needs no such split because
+every human can see. Product owns the audience Design designs *for*.
+
+### What one live run showed was missing
+
+The 2026-09-15 run (idea → plan → product, 8m57s, $0.96) worked at every step and
+stopped at the last. Five gaps, and they are not five problems:
+
+1. Development never knew it needed design guidelines.
+2. Design does not know who it is building for.
+3. No audience understanding exists anywhere — **every idea in the database has
+   zero evidence rows.**
+4. Nothing decided how much effort the product deserved: a throwaway validation
+   page got three Opus reviewers, $0.61 of a $0.96 run.
+5. Analytics cannot change anything — both consumers are yes/no gates.
+
+**2, 3, 4 and 5 are one missing owner**, and Jesse's own reference says where it
+lives: Product/Management owns "who is it for", priorities, and (initially) data
+and analytics. Four thin departments for a company with one product would be the
+"human team on steroids" failure this whole plan exists to avoid.
+
+**1 is not an org gap at all.** A human developer does not build blind, but neither
+do they usually chase the brief — someone groomed the ticket. Development should
+not have to *realise* it lacks guidance; something should have judged the product
+not ready to build. That is Product's call, and framing it that way avoids the
+hardcoded gate ("no build without guidelines") that would otherwise creep in.
+
+## Phase 2.7 — make absence visible
+
+**Status**: identified 2026-09-15, not built. Small, and it serves four of the five
+gaps above on its own.
+
+Every one of those gaps is currently a **silent default**. `effective_design(None)`
+returns the house style and says nothing. `product_brief` states what is known and
+never what is not. So "nobody has researched this audience" and "this audience is
+thoroughly understood" produce identical-looking inputs to every decision.
+
+The change is not a rule that blocks a build. It is that **a brief states what is
+missing as plainly as what is present**: no audience researched, no design
+guidelines written, no review ever performed, zero interest after one approach.
+
+This is the instrumentation principle applied to absence — *ask what an expert looks
+at to decide, then check whether the system can show them that.* An absence is
+information, and it is the one kind this system systematically hides. Fixing it
+requires no new department and no ordering rule, and every decider benefits the same
+day.
+
+**Prerequisite running underneath everything below**: asking has to actually work.
+Four live manager runs, zero questions ever sent (Phase 2.5). Design was built as a
+full department and spent its entire life reporting "nothing worth doing" — first
+because it could not ask, then because it could not see its own products, then
+because its output could not be stored. **Standing up another department before the
+plumbing works repeats that exactly.**
+
+## Phase 3 — Product / Management (absorbs the general manager)
+
+**Rewritten 2026-09-15.** This was "a second department manager, most likely
+Marketing", with the general manager as a separate Phase 4. That was wrong in two
+ways: Marketing is not where the live gaps are, and **in a company this size the
+product manager and the general manager are the same person.** Splitting them
+produces two thin roles that each need the other's context.
+
+One department, owning:
+
+- **What we build and who it is for.** The audience question, with standing — a
+  *step* can be skipped silently, which is exactly what happened; an owner can say
+  "we do not know who this is for, so I am not authorising a build yet."
+- **How much effort a thing deserves.** The judgement the Design manager already
+  reached for and could not make, because there was nobody to ask. Scaling effort to
+  traction — a landing page nobody has visited and a product with real customers
+  should not get the same treatment.
+- **What the numbers mean.** Data and analytics initially, per the reference above.
+  Once it can see traction it revises who the product is for, which is gap 5 and
+  needs no new machinery — it is the department doing its job a second time.
+- The former Phase 4 content: cross-product memory scope, `check_business_health`'s
+  concerns as standing context rather than a discarded count, durable cross-tick
+  awareness, and escalation on judgement rather than a fixed enum.
+
+### How this would have changed the live run
+
+1. Product sees a new product: one sentence of audience, no guidelines, zero
+   traction, $29 price.
+2. It judges effort — a validation page for an unproven idea is a cheap instrument.
+   **That call alone removes the $0.61 of Opus review**, two-thirds of the run.
+3. It decides whether we know enough about the buyer to design for them. For a $29
+   test it likely says the idea text is enough — and that is a decision on the
+   record rather than a step nobody ran.
+4. It commissions guidelines, or judges the house style sufficient. Either way the
+   builder gets an answer instead of a silent fallback.
+5. The build works to a standard that specifies a palette and fonts, so **the two
+   findings that blocked this run do not arise** — they existed only because the
+   page invented a look and was then judged against a standard nobody had applied.
+
+**Limits, stated honestly.** This fixes causes. The `accepted_issues` defect — the
+release judge accepting a finding and the system ignoring it on the next pass — is
+an independent bug that would still have blocked this product, and must be fixed
+regardless of any org change.
+
+## Phase 4 — the rest of the organisation
+
+Not finished after Phase 3. What remains, in no fixed order:
+
+- **Customer Support / Success** — Phase 2.6, placed after Product because that is
+  when an inbound reply has somewhere meaningful to land.
+- **A Marketing manager** — the original Phase 3. Still worth doing; it was never
+  the most urgent, and it needs Phase 2.6's reply data or it judges on a 14-day
+  revenue lag.
+- **A Discovery manager** — deliberately later. Discovery is where spend scales
+  fastest and a bad judgement costs most.
+- **Audience understanding as real work rather than inference.** Zero evidence rows
+  today. Product owning the question does not by itself make the answer researched,
+  and the difference between "inferred from one sentence" and "observed" must stay
+  visible (Phase 2.7).
 
 ---
+
+## Department build order (added 2026-09-15)
+
+Distinct from the *record* build order below, which is about documentation types.
+This one is about who exists. Each step is a prerequisite for the next, and the
+reason is the same each time: **a department nothing can reach will reason well and
+commission nothing.** Design proved that over its entire life.
+
+1. **Asking works** (Phase 2.5). Four live runs, zero questions. Everything below
+   assumes a department can be reached and can reach others.
+2. **Absence is visible** (Phase 2.7). Cheap, no new roles, and it is what lets any
+   decider notice it is missing a standard rather than silently accept a default.
+3. **Product / Management** (Phase 3), absorbing the general manager. Closes four of
+   the five gaps the live run exposed.
+4. **Customer Support / Success** (Phase 2.6), then a **Marketing manager**, then
+   **Discovery** (Phase 4).
+
+Independent of all of it, and not blocked by any of it: the `accepted_issues` defect
+from the 2026-09-15 run. A release judge that accepts a known flaw and is overruled
+by the next pass makes "done" unreachable, which is the exact failure the four-way
+release judgement was built to escape.
 
 ## Handover: how the current system gives way
 
@@ -788,8 +930,9 @@ replacement has been observed working:
 |---|---|
 | 1 | `_content_freshness_issue`'s LLM call (deterministic uptime check stays) |
 | 1 | ✅ `audit-live-products`' dependence on the factory being idle |
-| 3 | per-department fixed maintenance slugs a manager now covers |
-| 4 | fixed-enum escalation reasons the GM can judge better; `check_business_health` becomes GM input rather than its own interrupt |
+| 2.7 | silent fallbacks that make an absence indistinguishable from a decision |
+| 3 | fixed-enum escalation reasons Product can judge better; `check_business_health` becomes standing context rather than its own interrupt; the assumption that every product deserves the same review spend |
+| 4 | per-department fixed maintenance slugs a manager now covers |
 
 The deterministic pieces that are genuinely *better* than judgment — HTTP status
 checks, Fisher's-exact trial evaluation, budget arithmetic, dedup by source URL —
