@@ -1931,3 +1931,61 @@ about; a manager with nothing to do is not parked; an answer reaches the prompt.
 exist, which is what "general" has to mean.
 
 **Status**: Fixed 2026-09-14, commit `b75c350`. Not yet deployed.
+
+## 27. The Design department's first real work was generated, rejected by the database, and regenerated twice more
+
+**Found**: 2026-09-15, minutes after the Design manager commissioned work for the
+first time ever — by an escalation monitor, not by any test.
+
+`record_design_guidelines` stores guidelines in `requirements` under
+`subject_kind='design'`, deliberately: they are the same kind of thing as
+acceptance criteria — a standard written before the work, that the builder works
+to and a reviewer judges against, superseded rather than rewritten.
+
+Migration `0034_requirements` constrained that column:
+
+```sql
+subject_kind IN ('product','task','issue','campaign')
+```
+
+So every design guideline ever produced was rejected on insert:
+
+```
+CheckViolationError: new row for relation "requirements" violates
+check constraint "ck_requirements_requirement_subject_kind_valid"
+```
+
+**The agent had already done the work.** The rejected row contained a real
+palette, a real typographic scale, and a stated design intent. The task retried,
+regenerated it from scratch, and had it destroyed again — three times — then
+escalated with nothing kept. Three paid generations, three discarded.
+
+**Why nothing caught it.** The mismatch is between a Python string literal and a
+SQL constraint, and neither file mentions the other — unreadable from either side.
+And the write was unreachable until this week: the Design manager reported
+"nothing worth doing" on every tick it had ever run, first because it had no way
+to ask the question it needed answered (entry 26), then because its domain query
+only saw products that had already shipped. **A department that never acts cannot
+fail**, and its silence looked identical to having nothing to do.
+
+**Fix**: `0041_design_requirements` widens the constraint, and the ORM matches.
+
+**The guard is not "design is allowed"**:
+`tests/unit/test_requirement_subject_kinds.py` parses every literal
+`subject_kind=` the codebase writes and every kind the CHECK constraint permits,
+and asserts the two agree — whichever kind somebody adds next. Verified it fails
+against the old constraint rather than assumed.
+
+**Second, smaller bug, found deploying the first**: migration 0041 passed the
+already-expanded constraint name to `drop_constraint`, and alembic applied this
+project's `ck_%(table_name)s_%(constraint_name)s` convention to it a second time,
+looking for `ck_requirements_ck_requirements_requirement_subject_kind_valid`. The
+migration takes the bare name.
+
+**Verification**: after the fix the same work ran once, succeeded on the first
+attempt, and persisted. The department's own domain moved with it — the product
+left `without_guidelines` and entered `unreviewed`, which is the state machine
+advancing for the first time.
+
+**Status**: Fixed and deployed 2026-09-15, commits `5fdab67` and the naming
+follow-up.
