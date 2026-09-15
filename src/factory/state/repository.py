@@ -2310,7 +2310,17 @@ async def open_interrupt(
             status="open",
         )
         .on_conflict_do_nothing(
-            index_elements=[Interrupt.reason, Interrupt.subject, Interrupt.status],
+            # Must match `uq_interrupts_open_subject` *exactly*, expression included.
+            # Postgres matches a conflict target to an index structurally, so the
+            # COALESCE added in migration 0042 has to appear here too -- otherwise
+            # every raise fails outright with "no unique or exclusion constraint
+            # matching the ON CONFLICT specification", which is at least loud.
+            index_elements=[
+                Interrupt.reason,
+                func.coalesce(Interrupt.product_id, ""),
+                Interrupt.subject,
+                Interrupt.status,
+            ],
             index_where=text("status = 'open'"),
         )
         .returning(Interrupt.id)

@@ -862,6 +862,67 @@ One department, owning:
   concerns as standing context rather than a discarded count, durable cross-tick
   awareness, and escalation on judgement rather than a fixed enum.
 
+### Development currently marks its own homework
+
+Jesse, on watching two runs end in `rethink`: *"a dev or designer don't say 'nah
+we're not doing this', it goes further than that — a team discusses instead of just
+throwing something out."*
+
+He is right, and the code is explicit about it. `decide_release()` runs with
+`engine=EngineName.DEVELOPMENT`, is called from `development/graph.py`, and can
+return `rethink` or `abandon` — verdicts that halt the product. **Development decides
+whether Development's own work is fundamentally misconceived.**
+
+The verdicts do not deserve the same owner:
+
+- **`ship` / `fix_first`** are legitimately Development's. "Is my work finished, and
+  if not, what is the smallest thing that would finish it" is exactly what a
+  developer decides.
+- **`rethink` / `abandon`** are not. They say the *brief* or the *product* is wrong,
+  which is a judgement about what we are building and for whom.
+
+And the two are currently handled by **one branch**:
+
+```python
+if decision.decision in ("rethink", "abandon"):
+    interrupts.request(...)   # → a human
+    set_product_status(PLANNED)
+```
+
+Four verdicts, a genuine four-way judgement, dispatched through a two-branch table
+where two of them collapse into "ask a person". `rethink` does not escalate because
+escalation is right for it — it escalates because **its recipient does not exist**,
+and it shares an `if` with the one verdict a human genuinely should own.
+
+The tell is in the escalation's own reply hint: *"Reply with guidance to try again,
+or REJECT to retire this product."* It asks the operator for the guidance a product
+owner would give. Which makes the operator the missing department, and that is what
+the operator principle above rules out.
+
+**What it should be.** `rethink` is a department saying *"I cannot proceed because
+something upstream is wrong"* — which is a blocked question with a recipient, a shape
+comms already carries. Once Product exists it becomes a **routed question**: the work
+parks, Product answers with a revised brief, a re-scope, or a decision to stop, and
+the work resumes with that answer. A discussion with a record, rather than one role
+throwing the product out.
+
+`abandon` still escalates — but *from Product*, and only after Product has judged it.
+Retiring a product is spending Jesse's money, which is correctly his call.
+
+Worth being precise about what does **not** need changing: the evidence is already
+multi-party. Bug Council's three reviewers, the gap check, the contract and SEO gates
+all contribute, and one role weighs them. That is the shape of a team and it works.
+The problem is narrower — **who is allowed to conclude the product is wrong.**
+
+One more observation from the same run, and it is an argument for making this an
+agent rather than a one-shot call: the judge flagged that every canonical and API
+reference points at `manifestaudit.com` while the product is branded LedgerLens, and
+called it *"a sign the build does not have a coherent owner"*. Half right — the
+canonical URL genuinely is wrong; the analytics beacon legitimately points home.
+**Nothing tells it which domains are the factory's own infrastructure**, and a
+one-shot `parse()` cannot look it up or ask. It had to guess, and guessed
+confidently.
+
 ### How this would have changed the live run
 
 1. Product sees a new product: one sentence of audience, no guidelines, zero

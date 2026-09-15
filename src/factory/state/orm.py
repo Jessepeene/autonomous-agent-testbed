@@ -771,9 +771,17 @@ class Interrupt(Base):
         # UPDATE crashed on the exact (reason, subject, 'resolved') tuple already
         # sitting there. Found live; see alembic/versions/
         # 0017_interrupt_open_subject_partial.py for the full account.
+        # Scoped by *what it is about*, not only by how it is worded -- see
+        # migration 0042. A product escalation's subject comes from the product's
+        # name, so two products with similar niches otherwise share one notice and
+        # the second is silently swallowed. `COALESCE(product_id, '')` rather than
+        # the bare column: Postgres treats NULLs as distinct in a unique index, so
+        # the plain column would make every product-less escalation unique and undo
+        # the provider-outage dedup entirely (BUG_LOG #20).
         Index(
             "uq_interrupts_open_subject",
             "reason",
+            func.coalesce(product_id, ""),
             "subject",
             "status",
             unique=True,

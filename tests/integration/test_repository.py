@@ -855,3 +855,89 @@ async def test_an_invented_reference_accepts_nothing(session: AsyncSession) -> N
     )
     assert applied == 0
     assert len(await repository.open_issues_for(session, product)) == 1
+
+
+async def test_two_products_with_the_same_name_do_not_share_an_escalation(
+    session: AsyncSession,
+) -> None:
+    """An escalation about one product silently swallowed one about another.
+
+    Open escalations collapsed on `(reason, subject)`, and a product escalation's
+    subject is built from the product's *name* -- which comes from the idea's target
+    niche, so two similar ideas produce two products that look identical to the
+    dedup. Observed while testing: a second run's release diagnosis folded into the
+    first run's still-open notice and was never delivered, and the surviving notice
+    pointed at a product that no longer existed.
+    """
+    first = await repository.open_interrupt(
+        session,
+        reason=InterruptReason.HEAL_EXHAUSTED,
+        subject="Freelance bookkeepers — rethink",
+        detail="The first product's diagnosis.",
+        headline="Release decision",
+        reply_hint="Reply with guidance.",
+        product_id="product-aaaa",
+    )
+    second = await repository.open_interrupt(
+        session,
+        reason=InterruptReason.HEAL_EXHAUSTED,
+        subject="Freelance bookkeepers — rethink",
+        detail="A different product's diagnosis, which must still arrive.",
+        headline="Release decision",
+        reply_hint="Reply with guidance.",
+        product_id="product-bbbb",
+    )
+    assert first is not None
+    assert second is not None, "a different product is a different escalation"
+    assert first != second
+
+
+async def test_the_same_product_still_collapses(session: AsyncSession) -> None:
+    """The property the dedup exists for, which must survive the scoping change."""
+    first = await repository.open_interrupt(
+        session,
+        reason=InterruptReason.HEAL_EXHAUSTED,
+        subject="Shardline — rethink",
+        detail="Raised once.",
+        headline="Release decision",
+        reply_hint="Reply with guidance.",
+        product_id="product-aaaa",
+    )
+    again = await repository.open_interrupt(
+        session,
+        reason=InterruptReason.HEAL_EXHAUSTED,
+        subject="Shardline — rethink",
+        detail="Raised again by the next pass.",
+        headline="Release decision",
+        reply_hint="Reply with guidance.",
+        product_id="product-aaaa",
+    )
+    assert first is not None
+    assert again is None, "one condition, one notice"
+
+
+async def test_escalations_with_no_product_still_collapse(session: AsyncSession) -> None:
+    """The regression the COALESCE exists to prevent.
+
+    Postgres treats NULLs as distinct in a unique index, so scoping on the bare
+    column would make every product-less escalation unique -- reviving the storm of
+    40 identical provider-outage notices that BUG_LOG #20 fixed.
+    """
+    first = await repository.open_interrupt(
+        session,
+        reason=InterruptReason.PROVIDER_OUTAGE,
+        subject="gemini is in a sustained outage",
+        detail="Raised once.",
+        headline="Provider paused",
+        reply_hint="No reply needed.",
+    )
+    again = await repository.open_interrupt(
+        session,
+        reason=InterruptReason.PROVIDER_OUTAGE,
+        subject="gemini is in a sustained outage",
+        detail="Raised again a tick later.",
+        headline="Provider paused",
+        reply_hint="No reply needed.",
+    )
+    assert first is not None
+    assert again is None, "no product means one shared dedup slot, as before"
