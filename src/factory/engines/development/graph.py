@@ -72,7 +72,11 @@ from factory.state.schemas import (
     ValidatedIdea,
     WorkRequirements,
 )
-from factory.supervisor.concurrency import LockUnavailable, product_lock
+from factory.supervisor.concurrency import (
+    LockUnavailable,
+    defer_for_lock,
+    product_lock,
+)
 from factory.supervisor.context import FactoryContext
 
 log = get_logger(__name__)
@@ -270,7 +274,9 @@ async def _build(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
                 task_id=task.id,
             )
     except LockUnavailable:
-        return f"development: product {product_id} is locked by another worker"
+        return await defer_for_lock(
+            session, task_id=task.id, product_id=product_id, engine=EngineName.DEVELOPMENT
+        )
 
 
 _LANDING_PAGE_KEY = "factory.engines.development.scaffold.generator:LANDING_PAGE_SYSTEM"
@@ -363,7 +369,9 @@ async def _build_landing_page(ctx: FactoryContext, session: AsyncSession, task: 
                 task_id=task.id,
             )
     except LockUnavailable:
-        return f"development: product {product_id} is locked by another worker"
+        return await defer_for_lock(
+            session, task_id=task.id, product_id=product_id, engine=EngineName.DEVELOPMENT
+        )
 
 
 async def _evaluate_validation(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
@@ -1215,7 +1223,9 @@ async def _patch(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
                 task_id=task.id,
             )
     except LockUnavailable:
-        return f"development: product {product_id} is locked by another worker"
+        return await defer_for_lock(
+            session, task_id=task.id, product_id=product_id, engine=EngineName.DEVELOPMENT
+        )
 
 
 def _workspace_differs_from_deployment(
@@ -2357,4 +2367,11 @@ async def deploy_accepting_risk(
                 f"known risk to {result.url}"
             )
     except LockUnavailable:
-        return f"development: product {product_id} is locked by another worker"
+        # Deliberately not deferred, unlike the runner paths above: this is reached
+        # from a human's own reply to an escalation, so there is no task to put back
+        # on the queue -- and retrying it silently later would act on a decision the
+        # person made about the workspace as it looked when they replied. Say so.
+        return (
+            f"development: product {product_id} is being worked on by another task "
+            "right now, so it was not force-deployed. Reply again once it settles."
+        )
