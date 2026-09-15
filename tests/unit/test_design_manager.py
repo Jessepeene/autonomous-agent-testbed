@@ -67,6 +67,12 @@ def channel(monkeypatch) -> dict:
     async def no_answers(session, task_id):
         return []
 
+    async def fake_briefs(session, product_ids, **kwargs):
+        seen["briefed"] = list(product_ids)
+        return "- p-1  Shardline\n    for: mobile engineering leads"
+
+    monkeypatch.setattr(manager, "brief_products", fake_briefs)
+
     monkeypatch.setattr(repository, "design_domain", fake_domain)
     monkeypatch.setattr(repository, "ask_question", fake_ask_question)
     monkeypatch.setattr(repository, "enqueue_task", fake_enqueue)
@@ -201,3 +207,30 @@ async def test_an_answer_is_put_back_in_front_of_the_manager(channel, monkeypatc
     )
 
     assert "two paying customers" in prompts[0]
+
+
+async def test_the_manager_is_told_what_is_known_about_its_products(channel) -> None:
+    """The fix for the failure that produced all three live runs.
+
+    Given only ids and names, a manager asked to judge what is worth doing has two
+    moves: guess or ask. It did both -- blocked on "who is this for" and "does
+    anyone want it", and then asserted an answer it had not been given.
+
+    Both are rows. This asserts the briefing reaches the prompt at all, because a
+    brief assembled and not interpolated is the same bug as the answers block that
+    was fetched and never used.
+    """
+    prompts: list[str] = []
+
+    async def parse(*args, **kwargs):
+        prompts.append(kwargs["prompt"])
+        return DesignDecision(assessment="Nothing needs doing here at the moment, all fine.")
+
+    await manager.run_manager_tick(
+        SimpleNamespace(llm=SimpleNamespace(parse=parse)),
+        object(),
+        SimpleNamespace(id="tick-brief", payload={}),
+    )
+
+    assert channel["briefed"] == ["p-1"], "the products it is deciding about"
+    assert "mobile engineering leads" in prompts[0], "the brief has to reach the prompt"

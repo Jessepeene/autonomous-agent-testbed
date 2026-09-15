@@ -1762,6 +1762,23 @@ async def count_outreach_sent(session: AsyncSession, product_id: str) -> int:
     return int((await session.execute(stmt)).scalar_one())
 
 
+async def product_traction(session: AsyncSession, product_id: str) -> tuple[int, int]:
+    """``(confirmed interest signals, outreach emails sent)`` for one product.
+
+    The two numbers that answer "does anyone want this", paired because neither
+    means anything alone: zero interest after a thousand emails and zero interest
+    after none are opposite findings that are identical as a single number.
+
+    Counts only. `ValidationSignal.email` and `Lead.work_email` are real addresses
+    and no caller of this needs them -- a brief that carries PII around the company
+    is a data-minimisation problem rather than a briefing.
+    """
+    return (
+        await tally_validation_signals(session, product_id),
+        await count_outreach_sent(session, product_id),
+    )
+
+
 async def erase_validation_signals(session: AsyncSession, email: str) -> None:
     """GDPR Art. 17 erasure, extended to validation-stage interest submissions --
     a prospect-initiated form fill is still personal data. Called alongside

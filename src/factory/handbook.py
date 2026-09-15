@@ -150,6 +150,27 @@ none of them are yours to override.
 """
 
 
+def _traction_reading(status: str, interest: int, reach: int) -> str:
+    """Say what the two numbers mean, so a reader cannot mistake silence for failure.
+
+    Zero interest after a thousand emails and zero interest after none are opposite
+    findings that look identical as a number, and the wrong reading is the expensive
+    one: it retires a product nobody was ever told about, or keeps one real people
+    have already declined.
+    """
+    if reach == 0 and interest == 0:
+        return (
+            "Nobody has been told about it yet, so zero interest is not evidence "
+            "against it -- it is the absence of evidence either way."
+        )
+    if interest == 0:
+        return (
+            f"It has been put in front of {reach} people and none confirmed "
+            "interest. That is a real signal, not a gap in the record."
+        )
+    return f"Real people want this: {interest} confirmed after {reach} approach(es)."
+
+
 async def product_dossier(session: AsyncSession, product_id: str) -> str:
     """Everything known about one product, assembled from its own rows.
 
@@ -183,6 +204,25 @@ async def product_dossier(session: AsyncSession, product_id: str) -> str:
     ]
     if idea.self_serve_price_usd:
         lines.append(f"Intended price: ${idea.self_serve_price_usd}")
+
+    # Promised by this function's own docstring since it was written, and never
+    # rendered. The gap was not cosmetic: "is anyone actually interested in this?"
+    # is the question every decision about a product turns on, and its absence is
+    # what a department manager blocked on -- it could not establish whether a
+    # product mattered, so it guessed that it did.
+    #
+    # Counts, never rows. `ValidationSignal.email` and `Lead.work_email` are real
+    # addresses; nobody reading a dossier needs them, and a brief that carries PII
+    # around the company is a minimisation problem rather than a briefing.
+    interest, reach = await repository.product_traction(session, product_id)
+    lines += [
+        "",
+        "## Whether anyone actually wants it",
+        f"Confirmed interest: {interest} signal(s) from real visitors who "
+        "clicked through the confirmation email.",
+        f"Reach: {reach} outreach email(s) sent about it.",
+        _traction_reading(product.status, interest, reach),
+    ]
 
     if product.design_brief:
         lines += ["", "## Look and feel", product.design_brief[:800]]
@@ -233,3 +273,57 @@ async def product_dossier(session: AsyncSession, product_id: str) -> str:
         ]
 
     return "\n".join(lines)
+
+
+async def product_brief(session: AsyncSession, product_id: str) -> str:
+    """One product in a few lines: enough to judge whether it deserves attention.
+
+    The scanning counterpart to `product_dossier`, which is the file you open once
+    you have decided a product matters. A manager looking across ten products cannot
+    read ten files, and handing it ten files is how a prompt stops being read at all.
+
+    What goes in is what changes a "is this worth my time" answer: who it is for,
+    whether anyone wants it, whether there is anything to look at, and whether it is
+    already known to be broken. Everything else is a reason to open the dossier.
+    """
+    from factory.state import repository
+
+    pair = await repository.get_product_with_idea(session, product_id)
+    if pair is None:
+        return f"- {product_id}: no such product."
+    product, idea = pair
+
+    interest, reach = await repository.product_traction(session, product_id)
+    open_issues = await repository.open_issues_for(session, product_id)
+
+    return "\n".join(
+        [
+            f"- {product.id}  {product.name}",
+            f"    for: {idea.target_niche}",
+            f"    status: {product.status}, "
+            + (f"deployed at {product.deploy_url}" if product.deploy_url else "nothing deployed"),
+            f"    wanted: {interest} confirmed interest signal(s) after {reach} approach(es)"
+            + (" -- nobody has been told about it yet" if reach == 0 and interest == 0 else ""),
+            f"    known problems: {len(open_issues)} open issue(s)",
+        ]
+    )
+
+
+async def brief_products(session: AsyncSession, product_ids: list[str], *, limit: int = 10) -> str:
+    """Briefs for the products a decision is about. "" when there are none.
+
+    Deliberately here and not in any one department's code. Every manager has the
+    same problem -- it is asked to judge what is worth doing to a set of products and
+    is given only their names -- so the fix belongs where every manager can reach it,
+    not in the first department that needed it.
+
+    Bounded, because a manager's domain can grow without limit and a brief nobody
+    reads is worse than no brief: it displaces the part of the prompt that mattered.
+    """
+    unique = list(dict.fromkeys(pid for pid in product_ids if pid))[:limit]
+    if not unique:
+        return ""
+    briefs = [await product_brief(session, pid) for pid in unique]
+    return "What is actually known about these products, from their own records:\n\n" + "\n".join(
+        briefs
+    )

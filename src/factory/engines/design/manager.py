@@ -40,6 +40,7 @@ from __future__ import annotations
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from factory import comms
+from factory.handbook import brief_products
 from factory.hitl import interrupts
 from factory.logging import get_logger
 from factory.settings import EngineName, TaskType
@@ -152,6 +153,20 @@ async def run_manager_tick(ctx: FactoryContext, session: AsyncSession, task: Tas
     # nothing and it parks again on exactly the question it just had answered.
     answered = await comms.answers_for(session, task.id)
 
+    # What is actually known about these products, not just their names. A manager
+    # asked to judge what is worth doing, and given only a list of ids, has two
+    # moves: guess or ask -- and all three of this department's first live runs did
+    # exactly that, blocking on "who is this for" and "does anyone want it", both of
+    # which are rows.
+    #
+    # `brief_products` is general and lives in the handbook for that reason: every
+    # manager has this problem, so the next one inherits the fix instead of
+    # rediscovering it.
+    briefs = await brief_products(
+        session,
+        [s.id for s in domain.without_guidelines] + [s.id for s in domain.unreviewed],
+    )
+
     try:
         decision = await ctx.llm.parse(
             DesignDecision,
@@ -161,6 +176,7 @@ async def run_manager_tick(ctx: FactoryContext, session: AsyncSession, task: Tas
                 (f"{answered}\n\n" if answered else "")
                 + "This is what your department looks like right now.\n\n"
                 + f"{_render_domain(domain)}\n\n"
+                + (f"{briefs}\n\n" if briefs else "")
                 + "What, if anything, is worth doing?"
             ),
             engine=EngineName.DESIGN,

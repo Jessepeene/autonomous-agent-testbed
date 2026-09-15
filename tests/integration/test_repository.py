@@ -630,3 +630,70 @@ async def test_the_manager_is_told_what_it_can_actually_act_on(
         s for s in (await repository.design_domain(session)).without_guidelines if s.id == product
     )
     assert subject.deployed is True
+
+
+async def test_a_brief_says_who_it_is_for_and_whether_anyone_wants_it(
+    session: AsyncSession,
+) -> None:
+    """The two facts three live manager runs blocked on, both of which are rows.
+
+    The Design manager stopped on "who is this for" and "does anyone want it", then
+    asserted an answer it had never been given. Both were in the database the whole
+    time; nothing assembled them where a decision could see them.
+    """
+    from factory.handbook import brief_products
+
+    idea = await repository.upsert_idea(session, _scored_idea())
+    assert idea is not None
+    product = await repository.create_product(session, name="Shardline", idea_id=idea)
+
+    brief = await brief_products(session, [product])
+
+    assert product in brief
+    assert "for:" in brief
+    # The absence that matters: nobody has been told about it, so zero interest is
+    # not evidence against the product. Stated, not left as a bare zero.
+    assert "nobody has been told about it yet" in brief
+
+
+async def test_zero_interest_reads_differently_before_and_after_outreach(
+    session: AsyncSession,
+) -> None:
+    """Opposite findings that are identical as a single number.
+
+    Zero interest after a thousand emails is a real signal; zero interest after none
+    is the absence of evidence. Collapsing them is how a product nobody was told
+    about gets retired, or one real people declined gets kept.
+    """
+    from factory.handbook import product_dossier
+
+    idea = await repository.upsert_idea(session, _scored_idea())
+    assert idea is not None
+    product = await repository.create_product(session, name="Shardline", idea_id=idea)
+
+    untold = await product_dossier(session, product)
+    assert "not evidence against it" in untold
+
+    interest, reach = await repository.product_traction(session, product)
+    assert (interest, reach) == (0, 0)
+
+
+async def test_a_brief_carries_no_addresses(session: AsyncSession) -> None:
+    """Briefs travel around the company; real emails must not travel with them.
+
+    `ValidationSignal.email` and `Lead.work_email` are real addresses, and the schema
+    already minimises deliberately -- `Customer` carries no email and no name. A
+    briefing that leaks PII is a data-protection problem wearing a helpful hat.
+    """
+    from factory.handbook import brief_products
+
+    idea = await repository.upsert_idea(session, _scored_idea())
+    assert idea is not None
+    product = await repository.create_product(session, name="Shardline", idea_id=idea)
+    await repository.insert_validation_signal(
+        session, product_id=product, email="someone@example.com", submitter_ip_hash="h"
+    )
+
+    brief = await brief_products(session, [product])
+    assert "someone@example.com" not in brief
+    assert "@" not in brief.split("for:")[-1].split("status:")[0]
