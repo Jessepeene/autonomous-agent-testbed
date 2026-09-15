@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from factory.engines.compliance.minimize import ProvenanceMissing
 from factory.settings import EngineName
 from factory.state import repository
-from factory.state.orm import Base
+from factory.state.orm import Base, Task
 from factory.state.schemas import InterruptReason, ProductStatus, TaskKind, TaskStatus
 
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -697,3 +697,72 @@ async def test_a_brief_carries_no_addresses(session: AsyncSession) -> None:
     brief = await brief_products(session, [product])
     assert "someone@example.com" not in brief
     assert "@" not in brief.split("for:")[-1].split("status:")[0]
+
+
+async def test_a_task_that_parked_itself_is_not_then_marked_done(
+    session: AsyncSession,
+) -> None:
+    """The bug that would have silently disabled the whole comms channel.
+
+    `_run_engine` calls `complete_task` unconditionally the moment a runner returns.
+    A runner that parks its own work -- defers itself to PENDING with a future
+    `not_before` because it is waiting on an answer -- also returns normally, so
+    without a guard "the runner returned" and "the work is finished" are one fact.
+
+    They are not, and completing a parked task is worse than a no-op: it never
+    resumes, `answer_question` then declines to release it (releasing only applies to
+    pending or deferred work), and the answer arrives for a task that will never read
+    it.
+
+    Every `defer_task` caller used to live in the supervisor's scheduling path,
+    outside the runner, so the conflict could not arise. `park_until_answered` is the
+    first to defer from inside one.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    task_id = await repository.enqueue_task(
+        session,
+        kind=TaskKind.DESIGN_MANAGE,
+        engine=EngineName.DESIGN,
+        idempotency_key="park-then-complete",
+        payload={},
+    )
+    assert task_id is not None
+    claimed = await repository.claim_next_task(
+        session, worker_id="w1", engines=[EngineName.DESIGN]
+    )
+    assert claimed is not None
+
+    # What a runner does when it asks a question and waits for the answer.
+    await repository.defer_task(
+        session,
+        task_id,
+        not_before=datetime.now(UTC) + timedelta(hours=6),
+        reason="waiting on a question",
+    )
+    # What `_run_engine` does a line later, whatever the runner did.
+    assert await repository.complete_task(session, task_id) is False
+
+    parked = await session.get(Task, task_id)
+    assert parked is not None
+    assert parked.status == TaskStatus.PENDING.value, "the park must survive"
+    assert parked.not_before is not None, "and it must still be waiting"
+
+
+async def test_an_ordinary_task_still_completes(session: AsyncSession) -> None:
+    """The guard must not break the path every task takes."""
+    task_id = await repository.enqueue_task(
+        session,
+        kind=TaskKind.DESIGN_MANAGE,
+        engine=EngineName.DESIGN,
+        idempotency_key="ordinary-completion",
+        payload={},
+    )
+    assert task_id is not None
+    assert await repository.claim_next_task(
+        session, worker_id="w1", engines=[EngineName.DESIGN]
+    )
+
+    assert await repository.complete_task(session, task_id) is True
+    done = await session.get(Task, task_id)
+    assert done is not None and done.status == TaskStatus.DONE.value

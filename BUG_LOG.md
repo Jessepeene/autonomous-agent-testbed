@@ -2060,3 +2060,50 @@ honest state: a maintenance spawn that can *change* things needs somewhere
 specific to change them, and this path gives an agent neither.
 
 **Status**: Retired 2026-09-15.
+
+## 30. Parking a task marked it done a line later, which would have silently disabled the whole comms channel
+
+**Found**: 2026-09-15, while fixing the `LockUnavailable` handlers — and it is a
+defect in work shipped earlier the same day.
+
+`_run_engine` calls `complete_task` unconditionally the moment a runner returns:
+
+```python
+note = await runner(ctx, session, claimed)
+await repository.complete_task(session, task_id)
+```
+
+`complete_task` had no status guard, so it set `DONE` whatever the runner had
+done. A runner that **parks its own work** — defers itself to `PENDING` with a
+future `not_before` because it is waiting on an answer — also returns normally.
+So "the runner returned" and "the work is finished" were one fact. They are not.
+
+**Completing a parked task is worse than a no-op, it is a silent loss.** Three
+things follow, none of them visible:
+
+1. The task is `DONE`, so it never resumes.
+2. `answer_question` then declines to release it — releasing only applies to work
+   that is `pending` or `deferred` — so the release is a no-op too.
+3. The answer somebody was asked for arrives for a task that will never read it.
+
+**Why it had never bitten**: every `defer_task` caller lived in the supervisor's
+*scheduling* path, outside the runner, where the conflict cannot arise.
+`comms.park_until_answered` is the first to defer from **inside** one — so this
+arrived with the comms channel and would have quietly broken both users of it:
+the blocked-repair path and the Design manager's park.
+
+It was never observed live only because no question has yet been asked in
+production (see entry 26 — the manager reasons its way to the question and does
+not populate the field), so nothing has parked yet. A latent bug hidden behind
+another bug, again.
+
+**Fix**: `complete_task` only completes a task still `CLAIMED` or `RUNNING`, and
+returns whether it did. A database-level invariant rather than a rule every
+runner has to remember — the next runner that parks itself inherits it.
+
+**Verification**: `tests/integration/test_repository.py` — a parked task survives
+the completion call with its `not_before` intact, and an ordinary task still
+completes. **Confirmed the test fails with the guard removed** rather than
+assuming it: `assert True is False`.
+
+**Status**: Fixed and deployed 2026-09-15.

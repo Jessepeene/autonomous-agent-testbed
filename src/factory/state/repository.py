@@ -179,10 +179,33 @@ async def reclaim_expired_leases(session: AsyncSession) -> int:
     return int(result.rowcount or 0)
 
 
-async def complete_task(session: AsyncSession, task_id: str) -> None:
-    await session.execute(
+async def complete_task(session: AsyncSession, task_id: str) -> bool:
+    """Mark a claimed task finished. ``False`` when it was no longer ours to finish.
+
+    **Only a task still CLAIMED or RUNNING can be completed**, and that guard is
+    load-bearing rather than defensive. `_run_engine` calls this unconditionally the
+    moment a runner returns, so without it "the runner returned" and "the work is
+    finished" are the same fact -- and they are not.
+
+    A runner that deliberately *parked* its own task returns normally: it defers
+    itself to PENDING with a future `not_before` and reports what it did. Completing
+    that is worse than a no-op, it is a silent loss. The task is marked done, so it
+    never resumes; `answer_question` then declines to release it, because releasing
+    only applies to work that is pending or deferred; and the answer somebody was
+    asked for arrives for a task that will never read it.
+
+    Shipped exactly that way: every `defer_task` caller used to sit in the
+    supervisor's scheduling path, *outside* the runner, so the conflict could not
+    arise. `comms.park_until_answered` is the first to defer from inside one, which
+    put both the blocked-repair channel and the Design manager's park on a path where
+    the park was overwritten a line later.
+    """
+    stmt = (
         update(Task)
-        .where(Task.id == task_id)
+        .where(
+            Task.id == task_id,
+            Task.status.in_((TaskStatus.CLAIMED.value, TaskStatus.RUNNING.value)),
+        )
         .values(
             status=TaskStatus.DONE.value,
             claimed_by=None,
@@ -190,6 +213,11 @@ async def complete_task(session: AsyncSession, task_id: str) -> None:
             last_error=None,
         )
     )
+    result = cast("CursorResult[Any]", await session.execute(stmt))
+    completed = bool(result.rowcount)
+    if not completed:
+        log.info("task.not_completed", task_id=task_id, reason="no longer claimed")
+    return completed
 
 
 async def fail_task(
