@@ -34,7 +34,11 @@ down_revision: str | None = "0040_questions"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
-_NAME = "ck_requirements_requirement_subject_kind_valid"
+#: The bare name, not the one that appears in the database. Alembic applies this
+#: project's `ck_%(table_name)s_%(constraint_name)s` convention itself, so passing
+#: the expanded `ck_requirements_requirement_subject_kind_valid` gets it expanded a
+#: second time and the DROP looks for a constraint that never existed.
+_NAME = "requirement_subject_kind_valid"
 _OLD = "subject_kind IN ('product','task','issue','campaign')"
 _NEW = "subject_kind IN ('product','task','issue','campaign','design')"
 
