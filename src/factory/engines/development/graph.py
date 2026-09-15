@@ -38,6 +38,7 @@ from factory.engines.development.requirements import (
     design_for_product,
     effective_design,
     render_for_prompt,
+    requirements_for_product,
     write_landing_page_requirements,
 )
 from factory.engines.development.scaffold.generator import (
@@ -62,15 +63,13 @@ from factory.sandbox.runner import (
 )
 from factory.settings import EngineName, Settings, TaskType, get_settings
 from factory.state import repository
-from factory.state.orm import ABTest, Idea, Product, Requirement, Task, new_id
+from factory.state.orm import ABTest, Idea, Product, Task, new_id
 from factory.state.schemas import (
-    AcceptanceCriterion,
     CouncilResult,
     InterruptReason,
     ProductStatus,
     TaskKind,
     ValidatedIdea,
-    WorkRequirements,
 )
 from factory.supervisor.concurrency import (
     LockUnavailable,
@@ -233,11 +232,15 @@ async def _build(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
                 ProductStatus.BUILDING,
                 workspace_path=workspace,
             )
+            first_requirements = await requirements_for_product(session, product_id)
             plan = await generate_scaffold(
                 ctx,
                 idea,
                 product_id=product_id,
                 task_id=task.id,
+                requirements=(
+                    render_for_prompt(first_requirements) if first_requirements else None
+                ),
                 design=effective_design(await design_for_product(session, product_id)),
             )
             # A retried build_mvp task (after a crash mid-attempt) reuses this same
@@ -337,8 +340,7 @@ async def _build_landing_page(ctx: FactoryContext, session: AsyncSession, task: 
                 ctx, session, product_id=product_id, idea=idea, task_id=task.id
             )
             if requirements is None:
-                stored = await repository.live_requirements(session, "product", product_id)
-                requirements = _requirements_from_row(stored) if stored else None
+                requirements = await requirements_for_product(session, product_id)
 
             plan = await generate_landing_page(
                 ctx,
@@ -679,23 +681,6 @@ paid for or cannot be used at all.\
 """
 
 
-def _requirements_from_row(row: Requirement) -> WorkRequirements | None:
-    """Rehydrate stored requirements into the shared contract.
-
-    So the builder, the reviewer and a release decision all read one rendering of
-    one standard, whether it was just written or read back from an earlier run.
-    """
-    try:
-        return WorkRequirements(
-            goal=row.goal,
-            must=[AcceptanceCriterion(**c) for c in row.must],
-            should=[AcceptanceCriterion(**c) for c in row.should],
-            out_of_scope=list(row.out_of_scope),
-        )
-    except (TypeError, ValueError):  # pragma: no cover - a row written by an older shape
-        return None
-
-
 async def _record_council_findings(
     session: AsyncSession, product_id: str, council: CouncilResult
 ) -> int:
@@ -835,8 +820,7 @@ async def _review_live_product(ctx: FactoryContext, session: AsyncSession, task:
     # The standard, if anyone wrote one. Without it a reviewer can only judge the
     # product against itself -- which finds things that look wrong but never things
     # that are missing, because it has no idea what was supposed to be there.
-    stored_requirements = await repository.live_requirements(session, "product", product_id)
-    requirements = _requirements_from_row(stored_requirements) if stored_requirements else None
+    requirements = await requirements_for_product(session, product_id)
     if requirements is not None:
         objective += (
             "\n\nThis product was built to meet the criteria below. Check it against "
@@ -1182,16 +1166,54 @@ async def _patch(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
             repairs = f"REQUIRED REPAIRS (from the previous review):\n{healing}"
             if recalled:
                 repairs = f"{repairs}\n\n{recalled}"
-            plan = await generate_scaffold(
-                ctx,
-                idea.model_copy(
-                    update={"problem_statement": f"{idea.problem_statement}\n\n{repairs}"}
-                ),
-                product_id=product_id,
-                task_id=task.id,
-                existing_files=existing,
-                design=effective_design(await design_for_product(session, product_id)),
+            briefed = idea.model_copy(
+                update={"problem_statement": f"{idea.problem_statement}\n\n{repairs}"}
             )
+            design = await design_for_product(session, product_id)
+            requirements = await requirements_for_product(session, product_id)
+
+            # **Regenerate the kind of thing this product actually is.** This branch
+            # called `generate_scaffold` unconditionally, and that prompt mandates a
+            # FastAPI backend, token auth with password hashing, and Stripe Checkout.
+            # So any full repair of a *validation page* -- whose entire job is to
+            # collect one email address -- rebuilt it as a complete SaaS MVP. The
+            # agent's own note on the last one reads "Repaired the landing page and
+            # added the complete FastAPI MVP... token auth with scrypt password
+            # hashing... and Stripe Checkout", and the release judgement then
+            # correctly refused a pitch page carrying an unauthenticated account
+            # system.
+            #
+            # The same bug was already found and fixed once, on the other side: see
+            # `_verify_and_ship`'s `is_validation`, whose comment ends "The product
+            # became an MVP because this gate kept insisting it was one." The *gate*
+            # was taught to read `build_kind`. The *generator* was not, so the bug
+            # survived in its other half and produced exactly the symptom that note
+            # predicted.
+            if await repository.get_build_kind(session, product_id) == "validation":
+                prompt_text, prompt_version = await learning_prompts.get_prompt(
+                    session, key=_LANDING_PAGE_KEY, default=LANDING_PAGE_SYSTEM
+                )
+                plan = await generate_landing_page(
+                    ctx,
+                    briefed,
+                    product_id=product_id,
+                    system=prompt_text,
+                    tunable_parameter_id=prompt_version,
+                    task_id=task.id,
+                    existing_files=existing,
+                    requirements=render_for_prompt(requirements) if requirements else None,
+                    design=design,
+                )
+            else:
+                plan = await generate_scaffold(
+                    ctx,
+                    briefed,
+                    product_id=product_id,
+                    task_id=task.id,
+                    existing_files=existing,
+                    requirements=render_for_prompt(requirements) if requirements else None,
+                    design=effective_design(design),
+                )
             # Clear *after* generating (so the model saw the old files) and *before*
             # writing (so nothing from the previous attempt survives alongside the
             # new plan) -- see clear_workspace's docstring for the failure this
@@ -1766,8 +1788,7 @@ async def _verify_and_ship(
     # judgement below weighs them with everything else. What makes them different is
     # that they are finite: fixing a gap removes it, and when there are none the work
     # is done -- which "no outstanding findings" can never be.
-    stored_requirements = await repository.live_requirements(session, "product", product_id)
-    requirements = _requirements_from_row(stored_requirements) if stored_requirements else None
+    requirements = await requirements_for_product(session, product_id)
     if requirements is not None:
         report = await find_requirement_gaps(
             ctx,

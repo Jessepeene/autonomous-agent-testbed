@@ -28,12 +28,19 @@ where that ends.
 
 from __future__ import annotations
 
+from typing import Any
+
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from factory.logging import get_logger
 from factory.settings import EngineName, TaskType
 from factory.state import repository
-from factory.state.schemas import DesignGuidelines, ValidatedIdea, WorkRequirements
+from factory.state.schemas import (
+    AcceptanceCriterion,
+    DesignGuidelines,
+    ValidatedIdea,
+    WorkRequirements,
+)
 from factory.supervisor.context import FactoryContext
 
 log = get_logger(__name__)
@@ -265,6 +272,50 @@ HOUSE_STYLE = DesignGuidelines(
         "Three feature cards in a row with an icon above each",
     ],
 )
+
+
+def requirements_from_row(row: Any) -> WorkRequirements | None:
+    """Rehydrate stored requirements into the shared contract.
+
+    So the builder, the reviewer and a release decision all read one rendering of one
+    standard, whether it was just written or read back from an earlier run.
+    """
+    try:
+        return WorkRequirements(
+            goal=row.goal,
+            must=[AcceptanceCriterion(**c) for c in row.must],
+            should=[AcceptanceCriterion(**c) for c in row.should],
+            out_of_scope=list(row.out_of_scope),
+        )
+    except (TypeError, ValueError):  # pragma: no cover - a row written by an older shape
+        return None
+
+
+async def requirements_for_product(
+    session: AsyncSession, product_id: str
+) -> WorkRequirements | None:
+    """What this product is held to. ``None`` when nobody has written it down yet.
+
+    The chokepoint the docstring above has always claimed, and did not have. Every
+    caller used to do its own `live_requirements` lookup and then decide for itself
+    whether to pass the result on -- four of them, independently -- and one of the
+    builders simply did not. So a regeneration was judged against criteria it had
+    never been shown, and reported five of six MUSTs unmet for the honest reason that
+    nobody told it what they were.
+
+    Deliberately the same shape as `design_for_product`/`effective_design` beside it:
+    a product's standards are resolved in one place and handed identically to whoever
+    builds and whoever judges. A builder and a reviewer holding different copies of
+    the standard is the failure both of these exist to make impossible.
+
+    Note what this does *not* fix. Requirements are already general -- `product_dossier`
+    renders them and `read_product_dossier` is a tool any agent can call. The
+    generators cannot, because they are one-shot `parse()` calls rather than agent
+    loops, so the only way a standard reaches them is a prompt somebody remembered to
+    fill in. This makes the remembering structural; it does not give them eyes.
+    """
+    stored = await repository.live_requirements(session, "product", product_id)
+    return requirements_from_row(stored) if stored else None
 
 
 async def design_for_product(

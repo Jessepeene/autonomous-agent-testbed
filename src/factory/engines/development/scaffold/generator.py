@@ -323,6 +323,12 @@ async def generate_scaffold(
     #: Design wrote any, the house style when it did not. Defaulted so every
     #: existing caller keeps its previous behaviour exactly.
     design: DesignGuidelines = HOUSE_STYLE,
+    #: The acceptance criteria, rendered by `requirements.py::render_for_prompt`.
+    #: Its sibling `generate_landing_page` has taken these since criteria existed;
+    #: this did not, so a full regeneration was judged against a standard it was
+    #: never shown -- and a release decision duly reported five of six MUSTs unmet,
+    #: for the honest reason that nobody had told it what they were.
+    requirements: str | None = None,
 ) -> ScaffoldPlan:
     """``existing_files`` (from `read_workspace`) turns this into a repair pass:
     the model sees exactly what is already on disk instead of regenerating a whole
@@ -366,6 +372,16 @@ async def generate_scaffold(
         + f'Analytics beacon URL (POST JSON {{"path": ..., "referrer": ...}} here, '
         f"exactly, verbatim): {analytics_url}\n\n"
     )
+    if requirements:
+        # Ahead of the workspace dump for the same reason the landing page builder
+        # puts it ahead of its instruction: this is the standard the result is judged
+        # against, not a hint. A regeneration that cannot see the criteria cannot
+        # meet them, and will be told afterwards that it did not.
+        prompt += (
+            "ACCEPTANCE CRITERIA this product was built to meet -- it will be "
+            "reviewed against exactly these, and anything listed out of scope is "
+            "absent on purpose and must not be built:\n\n" + requirements + "\n\n"
+        )
     if existing_files:
         prompt += (
             "CURRENT CONTENTS of the workspace (this is a repair pass -- see the "

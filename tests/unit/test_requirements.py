@@ -152,3 +152,66 @@ def test_the_landing_page_gets_guidelines_only_when_they_were_decided() -> None:
 
     param = inspect.signature(generator.generate_landing_page).parameters["design"]
     assert param.default is None
+
+
+def test_a_validation_page_is_never_regenerated_as_an_mvp() -> None:
+    """The bug that turned a pitch page into a SaaS backend.
+
+    `_patch`'s full-regeneration branch called `generate_scaffold` unconditionally,
+    and that prompt mandates a FastAPI backend, token auth with password hashing and
+    Stripe Checkout. So any full repair of a *validation* page -- whose whole job is
+    to collect one email address -- rebuilt it as a complete MVP. The agent's own
+    note on the last one reads: "Repaired the landing page and added the complete
+    FastAPI MVP... token auth with scrypt password hashing... and Stripe Checkout."
+
+    The same bug was fixed once already on the other side. `_verify_and_ship`'s
+    `is_validation` comment ends: "The product became an MVP because this gate kept
+    insisting it was one." The gate learned to read `build_kind`; the generator did
+    not, so it survived in its other half.
+    """
+    import inspect
+
+    from factory.engines.development import graph
+
+    source = inspect.getsource(graph._patch)
+    regeneration = source.split("existing = read_workspace")[1]
+
+    assert "get_build_kind" in regeneration, "the regeneration must know what it is rebuilding"
+    assert "generate_landing_page" in regeneration, "a validation page regenerates as one"
+
+
+def test_every_builder_is_shown_the_standard_it_will_be_judged_against() -> None:
+    """A regeneration that cannot see the criteria cannot meet them.
+
+    `generate_landing_page` has taken `requirements` since criteria existed;
+    `generate_scaffold` did not. So a release decision reported "five of the six
+    MUSTs are completely unmet" for the honest reason that nobody had told the
+    builder what they were.
+    """
+    import inspect
+
+    from factory.engines.development.scaffold import generator
+
+    for build in (generator.generate_scaffold, generator.generate_landing_page):
+        assert "requirements" in inspect.signature(build).parameters, (
+            f"{build.__name__} is judged against criteria it cannot see"
+        )
+
+
+async def test_one_place_answers_what_this_product_is_held_to() -> None:
+    """Four callers each did their own lookup and decided whether to pass it on.
+
+    One of them did not, which is how a builder and its reviewer came to hold
+    different copies of the same standard. Resolving in one place is what makes that
+    impossible -- the shape `design_for_product`/`effective_design` already uses.
+    """
+    import inspect
+
+    from factory.engines.development import graph
+    from factory.engines.development.requirements import requirements_for_product
+
+    assert inspect.iscoroutinefunction(requirements_for_product)
+    # No caller reaches around it to the raw row again.
+    assert "live_requirements" not in inspect.getsource(graph), (
+        "requirements are resolved through requirements_for_product, not re-derived"
+    )

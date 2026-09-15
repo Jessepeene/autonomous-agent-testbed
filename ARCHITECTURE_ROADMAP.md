@@ -422,7 +422,31 @@ class of fact. Worse, `answer_question_task` pulls the dossier and the deciding
 manager does not: the agent whose job is to reply gets the file, the agent that has
 to make the call does not.
 
-#### The blocker is not access. It is that a manager is not an agent.
+#### The blocker is not access. It is that a one-shot call cannot look anything up.
+
+Scoped first as a *manager* problem. It is not — it is every `ctx.llm.parse()` call
+site in the system, and managers are only where it was noticed. `generate_scaffold`
+and `generate_landing_page` are one-shot structured calls too, so they cannot read a
+product's acceptance criteria either; `generate_landing_page` carries a `requirements`
+parameter as a workaround for exactly that, and `generate_scaffold` does not even have
+the workaround. Jesse's question is what surfaced it: *"I thought the requirements were
+a general thing for all of the agents."*
+
+They are. `product_dossier` renders them under "What it must do", and
+`read_product_dossier` is a registered tool — so every **agent** can read them, and no
+`parse()` caller can. The dividing line is not department or seniority, it is whether
+the call site is a loop or a single shot.
+
+Two consequences, and they point in different directions:
+
+- **Short term, per standard**: one chokepoint that answers "what is this product held
+  to", resolved once and passed identically to every builder and every reviewer —
+  the shape `design_for_product`/`effective_design` already established for design
+  guidelines. Today `live_requirements` is resolved in four separate places, each
+  deciding for itself whether to pass it on, which is how a regeneration came to be
+  judged against criteria it was never shown.
+- **Long term**: the fix below (make the call agentic) is not a manager feature. Any
+  one-shot call that has to *decide* something against a standard has the same hole.
 
 The read layer exists and works: `read_product_dossier`, `read_doc` and `list_docs`
 are registered tools in `tools/handbook.py`, and repair, review and growth agents
