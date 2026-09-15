@@ -629,3 +629,28 @@ def test_the_install_step_is_not_keyed_on_build_kind() -> None:
     )
     assert "requirements_path.exists()" in code
     assert "build_kind" not in code
+
+
+def test_a_stuck_product_escalation_states_the_record_before_any_retelling() -> None:
+    """A paraphrase of a finding can reverse it. Twice now, it has.
+
+    This escalation used to *be* `plain_language_error(healing)`. It reported "the
+    page is loading an external web font ... it needs to be removed" about a page
+    whose recorded finding was `MUST not met: the page loads at least one webfont`
+    -- exactly inverted, and acting on it would have guaranteed the same failure
+    again. The earlier instance, noted in `plain_language_error`'s own docstring,
+    mischaracterised a wrong-env-var bug as "hardcoded price".
+
+    An issue title is already a sentence written to be read, and it is the record
+    rather than a retelling. Rendering cannot reverse a negation; summarising can.
+    So the findings lead and the paraphrase supports.
+    """
+    import inspect
+
+    source = inspect.getsource(dev_graph._heal)
+    block = source.split("InterruptReason.HEAL_EXHAUSTED")[0]
+    code = "\n".join(line for line in block.splitlines() if not line.strip().startswith("#"))
+
+    assert "open_issues_for" in code, "the escalation reads the record"
+    # The claim comes from rows; the paraphrase is below it, not instead of it.
+    assert code.index("open_issues_for") < code.index("plain_language_error")

@@ -2235,6 +2235,35 @@ async def _heal(
         # own subject-collapse-by-(reason, subject, status) uniqueness otherwise
         # blocks the *second* one from ever reaching 'resolved' -- found live,
         # see DEPLOYMENT_CHECKLIST.md.
+        # **State the findings from the rows, before any retelling of them.**
+        #
+        # This escalation used to *be* a paraphrase of `healing`, and a paraphrase of
+        # a statement about what is wrong can invert it. Observed twice: once
+        # mischaracterising a wrong-env-var bug as "hardcoded price" (which is why
+        # `plain_language_error` appends a raw excerpt at all), and once reporting
+        # "the page is loading an external web font ... it needs to be removed" about
+        # a page whose actual finding was `MUST not met: the page loads at least one
+        # webfont`. Exactly reversed -- and acting on it would have guaranteed the
+        # same failure again.
+        #
+        # An issue title is already a short sentence written to be read, and it is the
+        # record rather than a retelling of it. Rendering cannot reverse a negation;
+        # summarising can. The paraphrase stays below, because it genuinely helps with
+        # the raw technical tail a healing brief sometimes carries (a pip failure, a
+        # pytest dump) -- but it is now the supporting detail, not the claim.
+        blocking_issues = [
+            i
+            for i in await repository.open_issues_for(session, product_id)
+            if i.severity in ("critical", "high")
+        ]
+        findings = (
+            "What is blocking it, exactly as recorded:\n\n"
+            + "\n".join(f"- [{i.severity}] {i.title}" for i in blocking_issues[:12])
+            if blocking_issues
+            else "No blocking issue is recorded against this product, which is itself "
+            "worth a look -- the repair budget ran out without anything holding the "
+            "release."
+        )
         explanation = await interrupts.plain_language_error(
             ctx,
             healing[:2000],
@@ -2246,7 +2275,7 @@ async def _heal(
             session,
             reason=InterruptReason.HEAL_EXHAUSTED,
             subject=f"{display_name[:80]} needs help ({new_id()[:8]})",
-            detail=explanation,
+            detail=f"{findings}\n\n---\n\nWhat the repair loop was working from:\n\n{explanation}",
             headline="\U0001f527 Repair stuck — needs your input",
             reply_hint=(
                 "Reply with guidance for one more attempt, DEFER to deploy as-is and "
