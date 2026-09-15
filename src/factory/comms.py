@@ -109,40 +109,68 @@ ANSWERABLE = {
 _QUESTION_RE = re.compile(r"QUESTION\s*(?:FOR\s+(?P<who>[A-Z_]+))?\s*:\s*(?P<text>.+)", re.I)
 
 
-def parse_blocked_report(detail: str) -> tuple[str, EngineName | None]:
+def parse_blocked_report(detail: str) -> tuple[str, EngineName | None, bool]:
     """Pull the question, and any named recipient, out of a blocked report.
 
-    Returns ``(question, recipient)``. The recipient is ``None`` when the agent did
-    not name one or named something unrecognised -- the caller then routes it, and
-    routing failure means a person, never silence.
+    Returns ``(question, recipient, explicit)``. ``explicit`` is whether the agent
+    actually marked a question with ``QUESTION:`` as its contract requires, or whether
+    this is the generous fallback reading the whole report as one. The caller needs
+    that distinction: a fallback reading is a guess, and a guess should not be spent
+    on a person's attention without something else corroborating it.
+
+    The recipient is ``None`` when the agent did not name one or named something
+    unrecognised -- the caller then routes it.
     """
     text = (detail or "").strip()
     if not text:
-        return "", None
+        return "", None, False
 
     match = _QUESTION_RE.search(text)
     if match is None:
-        # No marker: the whole report is the question. An agent that explained its
-        # problem in prose has still asked something, and discarding that for
-        # failing to use a keyword is how a channel goes unused.
-        return text, None
+        # No marker. The whole report used to become the question, on the reasoning
+        # that an agent explaining its problem in prose has still asked something.
+        # That reasoning was wrong in one direction and it showed live: a repair agent
+        # reported BLOCKED for a *failing test*, and the escalation that reached Jesse
+        # read "development cannot proceed without knowing: `python -m pytest -q`
+        # (exit code 1)". Not a question. A person's attention was spent on it and the
+        # work parked for six hours waiting for an answer to nothing.
+        #
+        # "I failed" and "I need to know something" are different states. The result
+        # contract already has a word for the first -- NOT_FIXED -- and an agent that
+        # says BLOCKED without asking anything has used the wrong one. Treating that
+        # as a question does not recover the mistake; it launders it into a request.
+        #
+        # The fix is not a stricter parser. Demanding a keyword is what made the old
+        # reporting tool go permanently uncalled, and a phrasebook of interrogative
+        # openings would reject "I cannot tell whether this page is meant to mention
+        # the enterprise tier" -- a real question with no question mark in it.
+        #
+        # So this stays generous and the *caller* decides, using information it
+        # already has: see `raise_blocked_question`. What went wrong in run 4 was not
+        # this parse alone, it was two uncertainties compounding into a confident
+        # action -- no marker found, no department matched, and a person escalated
+        # anyway.
+        return text, None, False
 
     question = match.group("text").strip()
     named = (match.group("who") or "").strip().lower()
     for engine in ANSWERABLE:
         if named == engine.value:
-            return question, engine
-    return question, None
+            return question, engine, True
+    return question, None, True
 
 
-def route(question: str, asked_by: EngineName) -> str:
-    """Who should answer this. Falls back to a person rather than guessing.
+def _matching_engines(question: str, asked_by: EngineName) -> list[EngineName]:
+    """Departments whose subject matter appears in this text.
 
-    Deliberately keyword-based and deliberately conservative. A misrouted question
-    is worse than an unrouted one: it gets a confident answer from a department
-    that does not actually know, and the asker cannot tell the difference. When
-    nothing matches, a person sees it -- which is also the honest state of the
-    organisation today, where most departments have no answering role at all.
+    Separate from `route` because the two answer different questions and the
+    difference matters. `route` asks *who should answer*, and deliberately returns a
+    person when nothing matches **or** when several do -- both mean "not confidently
+    routable". But those are opposite evidence about whether the text is a question
+    at all: zero matches means it mentions nothing anyone here owns, while two means
+    it is squarely about this company's work and merely ambiguous about whose desk.
+    Collapsing them cost a real question its delivery -- "are we allowed to email
+    these prospects" matches Marketing on `prospects` and Compliance on `allowed to`.
     """
     lowered = question.lower()
     signals: dict[EngineName, tuple[str, ...]] = {
@@ -160,24 +188,36 @@ def route(question: str, asked_by: EngineName) -> str:
         EngineName.DEVELOPMENT: ("deployed", "the page", "requirement", "criteria", "workspace"),
         EngineName.DESIGN: ("design guideline", "house style", "look like", "visual", "branding"),
     }
-    matched = [
+    return [
         engine
         for engine, keywords in signals.items()
         # A department cannot answer its own question -- if it could, it would not
         # be blocked.
         if engine is not asked_by and any(word in lowered for word in keywords)
     ]
+
+
+def route(question: str, asked_by: EngineName) -> str:
+    """Who should answer this. Falls back to a person rather than guessing.
+
+    Deliberately keyword-based and deliberately conservative. A misrouted question is
+    worse than an unrouted one: it gets a confident answer from a department that does
+    not actually know, and the asker cannot tell the difference. When nothing matches,
+    a person sees it -- which is also the honest state of the organisation today,
+    where most departments have no answering role at all.
+    """
+    matched = _matching_engines(question, asked_by)
     if len(matched) == 1:
         return matched[0].value
-    # Nothing matched, or more than one did. Both mean the same thing: this cannot
-    # be routed confidently, so a person sees it.
+    # Nothing matched, or more than one did. Both mean the same thing *for routing*:
+    # this cannot be sent confidently, so a person sees it. They mean opposite things
+    # for "is this even a question", which is why `_matching_engines` is separate.
     #
-    # Ambiguity is the case worth being careful about. "Are we allowed to email
-    # these prospects?" reads as Marketing on `prospects` and Compliance on
-    # `allowed to`, and picking by dictionary order would send a lawfulness
-    # question to the department with the least standing to answer it -- which
-    # would come back confident and wrong, indistinguishable to the asker from a
-    # real answer.
+    # Ambiguity is the case worth being careful about. "Are we allowed to email these
+    # prospects?" reads as Marketing on `prospects` and Compliance on `allowed to`,
+    # and picking by dictionary order would send a lawfulness question to the
+    # department with the least standing to answer it -- which would come back
+    # confident and wrong, indistinguishable to the asker from a real answer.
     return repository.HUMAN
 
 
@@ -338,10 +378,38 @@ async def raise_blocked_question(
     BLOCKED with no explanation has not asked a question, and inventing one on its
     behalf would put a fabricated request in front of whoever receives it.
     """
-    question_text, named = parse_blocked_report(detail)
+    question_text, named, explicit = parse_blocked_report(detail)
     if not question_text:
         log.info("comms.blocked_without_question", asked_by=asked_by.value)
         return None
+
+    # **Two uncertainties must not compound into a confident action.**
+    #
+    # The agent did not mark a question, so reading one out of its report is a guess.
+    # Routing then found no department that plausibly holds the answer, so naming a
+    # recipient is a second guess. Neither alone is fatal -- a prose question about an
+    # identifiable subject routes fine, and a marked question nobody can answer is
+    # exactly what a person is for. Both together mean we have no evidence this is a
+    # question at all.
+    #
+    # That combination is what reached Jesse in run 4: a repair agent said BLOCKED
+    # about a failing test, and the escalation read "development cannot proceed
+    # without knowing: `python -m pytest -q` (exit code 1)". Six hours of parked work
+    # and a person's attention, spent on a command trace.
+    #
+    # Returning None here sends it back down the ordinary repair path, which is where
+    # a failed repair belongs. It also removes the incentive the contract creates:
+    # BLOCKED is advertised to agents as not counting against the repair budget, so
+    # for an agent that simply could not fix something it is the cheaper word. Now
+    # using it without asking anything buys nothing.
+    if not explicit and named is None:
+        if not _matching_engines(question_text, asked_by):
+            log.info(
+                "comms.blocked_without_a_request",
+                asked_by=asked_by.value,
+                detail=question_text[:200],
+            )
+            return None
 
     return await ask(
         session,

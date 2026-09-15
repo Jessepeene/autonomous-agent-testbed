@@ -1403,7 +1403,7 @@ async def _patch_surgically(
         # not sit somewhere deployable -- but `.factory` is excluded from the
         # rollback by design and is read into the top of every repair prompt, so the
         # findings survive and are the first thing the next attempt sees.
-        question_text, _ = comms.parse_blocked_report(outcome.blocked_detail)
+        question_text, _, _ = comms.parse_blocked_report(outcome.blocked_detail)
         repair.record_blocked_attempt(
             workspace,
             ctx.settings,

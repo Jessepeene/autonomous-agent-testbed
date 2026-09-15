@@ -30,20 +30,24 @@ def test_a_question_is_recognised_in_the_agents_own_words() -> None:
     something, and discarding that for missing a keyword is how a channel goes
     unused.
     """
-    marked, who = comms.parse_blocked_report(
+    marked, who, explicit = comms.parse_blocked_report(
         "Ran the suite, 4 passed.\nQUESTION: is the $199 price final or a placeholder?"
     )
     assert marked == "is the $199 price final or a placeholder?"
     assert who is None
+    assert explicit is True, "the agent marked it, so this is not a guess"
 
-    prose, _ = comms.parse_blocked_report(
+    prose, _, prose_explicit = comms.parse_blocked_report(
         "I cannot tell whether this page is meant to mention the enterprise tier."
     )
     assert "enterprise tier" in prose
+    # Still read as a question -- but flagged as a guess, so `raise_blocked_question`
+    # can decline to spend a person's attention on it unless routing corroborates.
+    assert prose_explicit is False
 
 
 def test_an_agent_can_name_the_department_it_needs() -> None:
-    question, who = comms.parse_blocked_report(
+    question, who, _ = comms.parse_blocked_report(
         "QUESTION FOR MARKETING: which audience segment is this page being sent to?"
     )
     assert who is EngineName.MARKETING
@@ -52,7 +56,7 @@ def test_an_agent_can_name_the_department_it_needs() -> None:
 
 def test_an_unrecognised_department_is_routed_rather_than_dropped() -> None:
     """A question addressed to something that does not exist still gets asked."""
-    question, who = comms.parse_blocked_report("QUESTION FOR LEGAL: is this claim allowed?")
+    question, who = comms.parse_blocked_report("QUESTION FOR LEGAL: is this claim allowed?")[:2]
     assert who is None
     assert question == "is this claim allowed?"
 
@@ -63,8 +67,8 @@ def test_blocked_with_nothing_to_ask_is_not_a_question() -> None:
     Inventing a question on its behalf would put a fabricated request in front of
     whoever receives it, and they would answer it.
     """
-    assert comms.parse_blocked_report("") == ("", None)
-    assert comms.parse_blocked_report("   ") == ("", None)
+    assert comms.parse_blocked_report("") == ("", None, False)
+    assert comms.parse_blocked_report("   ") == ("", None, False)
 
 
 def test_routing_falls_back_to_a_person_rather_than_guessing() -> None:
@@ -285,3 +289,77 @@ def test_the_guidance_names_the_field_and_not_just_the_behaviour() -> None:
     """
     assert "needs_to_know" in comms.ASKING_GUIDANCE
     assert "Explaining your uncertainty is not asking" in comms.ASKING_GUIDANCE
+
+
+async def test_a_failure_report_with_no_request_is_not_a_question(monkeypatch) -> None:
+    """Run 4, exactly. A repair agent reported BLOCKED for a failing test.
+
+    The escalation that reached Jesse read: "development cannot proceed without
+    knowing: `python -m pytest -q` (exit code 1)". A person's attention, and six
+    hours of parked work, spent on a command trace.
+
+    Two uncertainties compounded into a confident action -- no `QUESTION:` marker, so
+    reading one out of the report was a guess; no department matched, so naming a
+    recipient was a second guess. Either alone is survivable. Both together mean
+    there is no evidence a question was asked at all, and the work belongs back on
+    the ordinary repair path.
+
+    It also removes an incentive: the agent contract advertises BLOCKED as not
+    counting against the repair budget, which makes it the cheaper word for an agent
+    that simply could not fix something.
+    """
+
+    async def explode(*args, **kwargs):
+        raise AssertionError("a failure report must not become a question")
+
+    monkeypatch.setattr(repository, "ask_question", explode)
+
+    raised = await comms.raise_blocked_question(
+        object(),
+        asked_by=EngineName.DEVELOPMENT,
+        detail="The test suite failed.\n-- `python -m pytest -q` (exit code 1)",
+        blocking_task_id="t-1",
+    )
+    assert raised is None
+
+
+async def test_an_unmarked_question_about_something_routable_still_asks(monkeypatch) -> None:
+    """Only the *combination* is disqualifying.
+
+    An agent that explained its problem in prose has still asked something, and
+    discarding that for missing a keyword is how a channel goes unused -- the failure
+    that made the old reporting tool useless. If routing can name a department that
+    plausibly holds the answer, that corroborates the reading.
+    """
+    recorded: dict[str, object] = {}
+
+    async def fake_ask_question(session, **kwargs):
+        from factory.state.orm import Question
+
+        recorded.update(kwargs)
+        return Question(id="q-1", **{
+            k: v for k, v in kwargs.items()
+            if k in {"asked_by_engine", "asked_of", "question", "context"}
+        })
+
+    async def fake_enqueue(session, **kwargs):
+        return "t-9"
+
+    monkeypatch.setattr(repository, "ask_question", fake_ask_question)
+    monkeypatch.setattr(repository, "enqueue_task", fake_enqueue)
+
+    raised = await comms.raise_blocked_question(
+        object(),
+        asked_by=EngineName.DEVELOPMENT,
+        detail="I cannot tell which audience segment this outreach is meant for.",
+        blocking_task_id="t-2",
+    )
+    assert raised is not None
+    assert recorded["asked_of"] == EngineName.MARKETING.value
+
+    # And an *ambiguous* question is still corroborated -- two departments matching
+    # is evidence it is a real question, even though routing still sends it to a
+    # person. Collapsing "two matched" into "none matched" is what rejected it.
+    assert len(comms._matching_engines(
+        "are we allowed to email these prospects", EngineName.DEVELOPMENT
+    )) == 2

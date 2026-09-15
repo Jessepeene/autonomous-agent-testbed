@@ -114,16 +114,27 @@ def _render_domain(domain: repository.DesignDomain) -> str:
     """The department's state as the manager sees it: rows, never recollection."""
     lines: list[str] = []
 
+    # An empty set has two opposite readings: every product is covered, or there are
+    # no products. Rendering both as "Every product has design guidelines" hands the
+    # manager three green lights for a department that may not contain a single
+    # product -- vacuously true, and indistinguishable from good health. Say which.
+    nothing_in_scope = not domain.without_guidelines and not domain.unreviewed
+
     if domain.without_guidelines:
         lines.append("Products with no design guidelines written for them:")
         lines += [_subject_line(s) for s in domain.without_guidelines[:10]]
+    elif nothing_in_scope:
+        lines.append(
+            "There are no products in your scope at all -- not 'all covered', but "
+            "nothing to cover. Either every product is retired, or none exists yet."
+        )
     else:
         lines.append("Every product has design guidelines.")
 
     if domain.unreviewed:
         lines.append("\nHave guidelines, never reviewed against what actually shipped:")
         lines += [_subject_line(s) for s in domain.unreviewed[:10]]
-    else:
+    elif not nothing_in_scope:
         lines.append("\nEvery product with guidelines has been reviewed at least once.")
 
     if domain.open_findings:

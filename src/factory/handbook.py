@@ -241,7 +241,19 @@ async def product_dossier(session: AsyncSession, product_id: str) -> str:
     # was never meant to exist -- and can tell "done" from "perfect", which the
     # must/should split is there to make sayable.
     requirements = await repository.live_requirements(session, "product", product_id)
-    if requirements is not None:
+    if requirements is None:
+        # Stated, not omitted. `decide_release` already tells its judge this exact
+        # fact outright ("No acceptance criteria were written for this product, so
+        # there is no stated standard to judge it against"); an agent reading the
+        # dossier used to get silence, and silence reads as "nothing to see".
+        lines += [
+            "",
+            "## What it must do",
+            "**Nobody has written this down.** There is no stated standard for this "
+            "product, so nothing here can tell you whether it is finished. Treat any "
+            "judgement about 'done' as your own, and say that you made it.",
+        ]
+    else:
         lines += ["", "## What it must do (the standard it is judged against)", requirements.goal]
         lines += [f"- MUST: {c.get('criterion', '')}" for c in requirements.must]
         lines += [f"- SHOULD: {c.get('criterion', '')}" for c in requirements.should]
@@ -255,7 +267,18 @@ async def product_dossier(session: AsyncSession, product_id: str) -> str:
     # now is more useful to an employee about to touch it than what was tried
     # before, and `times_seen` is the line that says "this one keeps coming back".
     open_issues = await repository.open_issues_for(session, product_id)
-    if open_issues:
+    if not open_issues:
+        # "Nothing is wrong with it" and "nobody has looked" are different facts, and
+        # an absent section is how they became one.
+        reviewed = any(e.event.startswith(("council", "release", "gaps")) for e in history)
+        lines += [
+            "",
+            "## Known open issues",
+            "None recorded."
+            + ("" if reviewed else " Nothing has ever reviewed this product, so read "
+               "that as 'unexamined' rather than 'clean'."),
+        ]
+    else:
         lines += ["", "## Known open issues"]
         lines += [
             f"- [{i.severity}] {i.title}"
@@ -296,6 +319,26 @@ async def product_brief(session: AsyncSession, product_id: str) -> str:
     interest, reach = await repository.product_traction(session, product_id)
     open_issues = await repository.open_issues_for(session, product_id)
 
+    # **What is not known, stated as plainly as what is.**
+    #
+    # A brief that lists only what exists cannot distinguish "nobody has researched
+    # this audience" from "this audience is thoroughly understood" -- both produce a
+    # brief with no audience section, and a decider reading it has no way to tell.
+    # Every one of the gaps found across four live runs had this shape: a silent
+    # default reaching a decision as though it were a finding.
+    #
+    # Derived from rows like everything else here, so it cannot claim an absence that
+    # is not real.
+    unknowns: list[str] = []
+    if await repository.live_requirements(session, "product", product_id) is None:
+        unknowns.append("nobody has written what this product must do")
+    if await repository.live_design_guidelines(session, product_id) is None:
+        unknowns.append("nobody has written how it should look")
+    if not product.deploy_url:
+        unknowns.append("it has never been deployed, so nobody has looked at it")
+    if reach == 0:
+        unknowns.append("nobody outside the company has seen it")
+
     return "\n".join(
         [
             f"- {product.id}  {product.name}",
@@ -306,6 +349,7 @@ async def product_brief(session: AsyncSession, product_id: str) -> str:
             + (" -- nobody has been told about it yet" if reach == 0 and interest == 0 else ""),
             f"    known problems: {len(open_issues)} open issue(s)",
         ]
+        + ([f"    NOT known: {'; '.join(unknowns)}"] if unknowns else [])
     )
 
 
