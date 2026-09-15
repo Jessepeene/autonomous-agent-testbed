@@ -241,6 +241,62 @@ Do this audit **before** building each manager, not after:
 | 4 — General manager | cross-department trend, what changed, what's stuck | Mostly exists and is **thrown away**: `check_business_health` computes real concerns and `engines/maintenance.py` discards them; memory has no cross-product scope (gaps 3–4 above) |
 | Discovery (if ever) | whether a signal is real and not already mined | Weak — live logs show repeated `discovery.signal_not_grounded`, i.e. it cannot reliably verify its own sources |
 
+## A value must say how it is known (applies to every phase)
+
+The third companion. Instruments let an agent *see the present*; a living record lets
+it know *what has already been learned*; this one is about the third state, which the
+system had no way to express at all: **what is not known.**
+
+**Every value here is asserted, and none of them is qualified.** A house style
+returned because Design wrote one and a house style returned because nobody has looks
+identical. A task marked done because it finished and one marked done because it was
+skipped look identical. A provider reported recovered because it answered and one
+reported recovered because it went quiet look identical. In each case a default
+impersonates a finding, and the consumer cannot tell.
+
+This is not a new idea in this codebase -- it is a principle already stated here, and
+applied in four places out of dozens:
+
+- `DepartmentAnswer.confidence` is `established | inferred | unknown`, with the reason
+  written on it: *"an answer that sounds confident and is invented is worse than no
+  answer, because the asker cannot tell the difference."* **That sentence describes
+  most of the defects found on 2026-09-15.**
+- `repair.py` refuses an agent's claim and diffs the file tree instead: *"recording at
+  the point the agent merely claimed success would fill this file with confident
+  accounts of fixes that never worked."*
+- `render_sources` names every file a truncated review did not see, and tells the
+  reviewer to *"withhold approval rather than reasoning about code you never saw."*
+- `decide_release` tells its judge outright when no acceptance criteria exist, rather
+  than omitting the section.
+
+Every one of those was written by someone reasoning about **an incident they had
+seen**. Every gap found in the audit was a case **nobody had imagined yet** -- an
+empty department, a report with no question, a dossier missing a section. So the
+principle is not missing from this system; it is applied reactively, one incident at
+a time, which is the spot-fixing this file exists to replace.
+
+### The reviewable question
+
+> **What does this return when it has nothing to say?**
+
+Run it down any handoff and the wrong answers are all *plausible*, which is exactly
+why nothing caught them: the house style, an empty directory, `{}` read as health,
+`done`, the whole report read as a question, a brief listing only what is known.
+
+It is worth stating what this does **not** mean. Not every empty return is a defect:
+`ProductProgress.converging` returns `None` rather than `False` when there is no prior
+attempt, and that is correct because `None` is a distinct value the consumer can act
+on. The test is not "does it return empty" but **"can the consumer tell the difference,
+and does the difference change what it should do?"**
+
+### Where it binds
+
+At **boundaries**. Inside one function a default is fine. Across a handoff -- a value
+another department consumes, a row another role reads, a prompt another agent acts on
+-- an unqualified default is a lie the consumer has no way to detect. Notably, not one
+defect found on 2026-09-15 was a component computing the wrong answer internally.
+Every single one sat at a joint.
+
 ## Phase 1.5 — the record (prerequisite for Phase 2 and Phase 3)
 
 Not originally a phase, and it should have been. Phases 2 and 4 both reduce to
@@ -813,8 +869,19 @@ hardcoded gate ("no build without guidelines") that would otherwise creep in.
 
 ## Phase 2.7 — make absence visible
 
-**Status**: identified 2026-09-15, not built. Small, and it serves four of the five
-gaps above on its own.
+**Status**: first pass shipped 2026-09-15. This is the applied form of *"a value must
+say how it is known"* above -- read that for the general rule and the reviewable
+question; this section is what it means for the five gaps the live runs exposed.
+
+Shipped: `product_brief` states what is not known about a product (no stated standard,
+no design guidelines, never deployed, never shown to anyone); `product_dossier` says
+the same where it used to omit a section, and separates "no open issues" from "nothing
+has ever reviewed this"; `_render_domain` distinguishes an empty department from a
+covered one; and a blocked report with no request no longer becomes a question.
+
+Still open: `effective_design` returning the house style is now *stated* in the brief
+but not at the point of use, and audience remains inferred everywhere with nothing
+marking it as inferred.
 
 Every one of those gaps is currently a **silent default**. `effective_design(None)`
 returns the house style and says nothing. `product_brief` states what is known and
