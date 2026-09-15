@@ -391,3 +391,53 @@ async def test_the_first_reviewer_is_awaited_before_the_other_two_are_sent(
 
     first_category = next(iter(bug_council.REVIEWER_PROMPTS))
     assert anthropic_fake.calls[0]["system"] == bug_council.REVIEWER_PROMPTS[first_category]
+
+
+def test_reviewers_are_told_what_they_are_reviewing() -> None:
+    """Three of the four carry a stance calibrated for shipping something real.
+
+    "Would you hesitate to hit publish", "set approved=false for an unnecessary
+    dependency", "anything that would fall over under modest concurrent load" -- all
+    correct for a product people pay for, and all applied unchanged to a throwaway
+    validation page because nothing told them the difference. That produced findings
+    that are true and irrelevant: a pitch page whose only job is to collect one email
+    address was faulted for serving three static files through FastAPI.
+
+    Stated as a fact they weigh, not a rule that skips any of them.
+    """
+    validation = bug_council.review_corpus("FILES", build_kind="validation")
+    product = bug_council.review_corpus("FILES", build_kind="mvp")
+
+    assert "validation page" in validation
+    assert "discarded if nobody responds" in validation
+    assert "real product" in product
+    # Unchanged when nobody says -- every existing caller keeps its behaviour.
+    assert bug_council.review_corpus("FILES").startswith("The complete codebase")
+
+
+def test_every_reviewer_can_say_it_found_nothing() -> None:
+    """All four defined rejection and left approval undefined.
+
+    Each was "Look for: [defects] ... Set approved=false if/for ...", with no
+    statement anywhere that a clean pass is a legitimate result -- so the only
+    instruction was the conditions for rejecting. 124 findings across 24 reviews.
+
+    AUDITOR, doing the same kind of job in the same codebase, already had the answer:
+    "Finding nothing wrong is a complete, legitimate outcome and most products most
+    weeks should produce exactly that." This applies it rather than inventing one.
+    """
+    for category, prompt in bug_council.REVIEWER_PROMPTS.items():
+        assert "Finding nothing in your category" in prompt, category
+        assert "legitimate result" in prompt, category
+
+
+def test_security_keeps_its_stance() -> None:
+    """The one polarisation that is justified, and deliberately untouched.
+
+    The cost of shipping a hole does not fall because the page is cheap, so security
+    is asymmetric toward caution in both contexts. Being able to say "I found
+    nothing" is not the same as relaxing the bar.
+    """
+    security = bug_council.REVIEWER_PROMPTS[ReviewCategory.SECURITY]
+    assert "Approve only if you would put this code on the public internet" in security
+    assert "medium severity or above" in security

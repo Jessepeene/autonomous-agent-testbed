@@ -71,7 +71,12 @@ no maximum attempts, polling with no backoff, sleeps longer than five seconds, a
 unbounded queue or list growth. Treat these as high severity — they cost real money \
 every second they run.
 
-Set approved=false if you find anything of medium severity or above.""",
+Set approved=false if you find anything of medium severity or above.
+
+Finding nothing in your category is a complete, legitimate result and should be \
+common. Approve and say so plainly rather than reaching for something to report -- a \
+finding you had to look hard to justify costs a real repair cycle and teaches the \
+next build nothing. Report what you would genuinely act on.""",
     ReviewCategory.PERFORMANCE: """\
 You are the performance reviewer on a deploy gate.
 
@@ -80,7 +85,12 @@ synchronous blocking calls inside async handlers, unbounded result sets returned
 clients, missing pagination, work that belongs in a background task sitting in a \
 request handler, and per-request construction of expensive clients.
 
-Set approved=false for anything that would fall over under modest concurrent load.""",
+Set approved=false for anything that would fall over under modest concurrent load.
+
+Finding nothing in your category is a complete, legitimate result and should be \
+common. Approve and say so plainly rather than reaching for something to report -- a \
+finding you had to look hard to justify costs a real repair cycle and teaches the \
+next build nothing. Report what you would genuinely act on.""",
     ReviewCategory.DEPENDENCIES: """\
 You are the dependency reviewer on a deploy gate.
 
@@ -89,7 +99,12 @@ typosquat a popular name, dependencies pulled in for a single trivial function, 
 licences incompatible with commercial use (AGPL, SSPL), and any dependency that is \
 not actually imported anywhere.
 
-Set approved=false for an unvetted or unnecessary dependency.""",
+Set approved=false for an unvetted or unnecessary dependency.
+
+Finding nothing in your category is a complete, legitimate result and should be \
+common. Approve and say so plainly rather than reaching for something to report -- a \
+finding you had to look hard to justify costs a real repair cycle and teaches the \
+next build nothing. Report what you would genuinely act on.""",
     ReviewCategory.QUALITY: """\
 You are the quality reviewer on a deploy gate -- the only one of five reviewers \
 whose question is not "is this correct, safe, or fast" but "you are the business \
@@ -118,7 +133,12 @@ Do not flag: the specific choice of design, wording style, or copy you would hav
 written differently -- only concrete, checkable defects a careful business owner \
 would actually stop and fix before publishing, not matters of taste.
 
-Set approved=false for any defect you would genuinely hesitate to publish over.""",
+Set approved=false for any defect you would genuinely hesitate to publish over.
+
+Finding nothing in your category is a complete, legitimate result and should be \
+common. Approve and say so plainly rather than reaching for something to report -- a \
+finding you had to look hard to justify costs a real repair cycle and teaches the \
+next build nothing. Report what you would genuinely act on.""",
 }
 
 # --- deterministic scanners -------------------------------------------------
@@ -293,14 +313,50 @@ def render_sources(sources: dict[str, str], limit: int | None = None) -> tuple[s
     return "".join(parts), truncated
 
 
-def review_corpus(rendered: str, *, truncated: bool = False) -> str:
+def review_corpus(rendered: str, *, truncated: bool = False, build_kind: str = "") -> str:
     """Byte-identical across all three model reviewers — any variation here defeats
     the cache, so `convene` computes this once and passes the same string to each.
     Document-then-instruction is also the better prompt order for long context, which
-    is what moving the corpus ahead of the per-reviewer mandate does anyway."""
+    is what moving the corpus ahead of the per-reviewer mandate does anyway.
+
+    `build_kind` is stated here rather than in the reviewer prompts for two reasons:
+    it belongs to the product rather than to the reviewer, and the system prompts are
+    a cached prefix shared across every product, so varying them per build kind would
+    split that cache for no benefit.
+
+    **Why it is stated at all.** Three of the four reviewers carry a stance
+    calibrated for shipping something real -- "would you hesitate to hit publish",
+    "set approved=false for an unnecessary dependency", "anything that would fall
+    over under modest concurrent load" -- and until now they were handed a throwaway
+    validation page with no way to know the difference. That produced findings that
+    are *true and irrelevant*: a pitch page whose only job is to collect one email
+    address was faulted for serving three static files through FastAPI, and a landing
+    page accumulated eighteen issues in under an hour.
+
+    This is a fact, not an instruction to relax. Security's mandate is deliberately
+    unchanged by it: the cost of shipping a hole does not fall because the page is
+    cheap."""
+    kind = (
+        (
+            "What you are reviewing is a **validation page**: a single cheap page whose "
+            "only job is to find out whether anyone wants an idea that has not been "
+            "built. It has no users, no accounts, no payment and no data worth taking, "
+            "it is expected to be discarded if nobody responds, and a page that never "
+            "goes live answers nothing. Weigh what you find against that -- a real "
+            "defect is still a real defect, but the cost of holding this back is high "
+            "and the cost of it being imperfect is low.\n\n"
+        )
+        if build_kind == "validation"
+        else (
+            "What you are reviewing is a **real product**: people will use it, trust "
+            "it with their data, and pay for it. Hold it to that.\n\n"
+        )
+        if build_kind
+        else ""
+    )
     if truncated:
         return (
-            "The codebase under review follows. IMPORTANT: it was too large to show "
+            kind + "The codebase under review follows. IMPORTANT: it was too large to show "
             "in full -- see the [TRUNCATED] marker near the end for exactly what you "
             "were not shown. Do not assume anything you cannot see is safe; if a file "
             "or region relevant to your mandate was omitted, say so explicitly and "
@@ -310,7 +366,7 @@ def review_corpus(rendered: str, *, truncated: bool = False) -> str:
             "specific review mandate follows."
         )
     return (
-        "The complete codebase under review follows.\n\n"
+        kind + "The complete codebase under review follows.\n\n"
         f"{rendered}"
         "\n\nEnd of codebase. Your specific review mandate follows."
     )
@@ -365,7 +421,13 @@ async def review_live_content(
 
 
 async def convene(
-    ctx: FactoryContext, sources: dict[str, str], *, task_id: str | None = None
+    ctx: FactoryContext,
+    sources: dict[str, str],
+    *,
+    task_id: str | None = None,
+    #: What kind of thing this is. Stated to the reviewers as a fact they weigh,
+    #: not a rule that skips any of them -- see `review_corpus`.
+    build_kind: str = "",
 ) -> CouncilResult:
     """Run all five reviewers. Deploy requires unanimous approval."""
     if not sources:
@@ -379,7 +441,7 @@ async def convene(
         )
 
     rendered, truncated = render_sources(sources)
-    corpus = review_corpus(rendered, truncated=truncated)
+    corpus = review_corpus(rendered, truncated=truncated, build_kind=build_kind)
     if truncated:
         log.warning("council.corpus_truncated", files=len(sources), limit=_MAX_REVIEW_CHARS)
     categories = list(REVIEWER_PROMPTS)

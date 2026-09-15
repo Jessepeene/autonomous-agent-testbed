@@ -1788,7 +1788,16 @@ async def _verify_and_ship(
         )
 
     try:
-        council = await bug_council.convene(ctx, sources, task_id=task_id)
+        # The reviewers are told what they are reviewing. Three of the four carry a
+        # stance calibrated for a real product, and until now a throwaway validation
+        # page got the same one -- which is where "FastAPI is pulled in solely to
+        # serve three static files" came from, on a page whose job is one email box.
+        council = await bug_council.convene(
+            ctx,
+            sources,
+            task_id=task_id,
+            build_kind="validation" if is_validation else "mvp",
+        )
     except bug_council.CouncilUnavailable as exc:
         # A reviewer that could not run rendered no verdict on the code at all --
         # never route this into a heal cycle, which would spend an LLM call
