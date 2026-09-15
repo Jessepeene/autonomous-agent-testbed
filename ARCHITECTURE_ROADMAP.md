@@ -622,6 +622,67 @@ would own none of them well.
 - Routing: anything actionable becomes an ordinary task or a routed question through
   `comms`, so the reply reaches whoever it actually concerns.
 
+### What is already configured, verified 2026-09-15
+
+- **MX already points at Mailgun EU.** `mail.manifestaudit.com` resolves to
+  `mxa/mxb.eu.mailgun.org`, so the DNS half of receiving is done.
+- **EU region**, which is the right side of the GDPR question for data residency.
+- **Zero inbound routes exist** — checked against both the US and EU API endpoints.
+  Sending is fully configured; receiving has nowhere to go. One route needs creating
+  (match the recipient, forward to the new endpoint). That is an account write to a
+  live mail domain, so it is Jesse's to make or to explicitly authorise.
+
+### What "GDPR compliant" means concretely here
+
+Decided, not left to the implementer — this is the one part where getting it wrong
+is a legal problem rather than a quality one.
+
+- **Minimise at the door.** Store the classification, `replied_at`, and the
+  correlation. The body is the only part that is unavoidably personal data, and it
+  is kept only as long as it is needed to act on.
+- **Retention**: reply bodies purged after 90 days. The classification and timestamp
+  survive as the business record, because neither identifies anybody once the body
+  is gone.
+- **Erasure must reach it.** `erase_lead()` currently deletes the `Lead` and
+  tombstones the address; it must also purge reply bodies, exactly as
+  `erase_validation_signals()` already does for interest submissions. An erasure that
+  misses a store is not an erasure.
+- **A reply body reaching a model is a transfer to a third-party processor.** Classify
+  from as little as possible, and never put a raw body into a prompt that did not need
+  it. The briefing rule — counts, never addresses — binds harder here, not softer.
+- **Right of access**: whatever is stored must be retrievable by address, or the
+  erasure path cannot be honestly claimed to be complete either.
+
+### What a reply may trigger: the human answer
+
+Jesse's steer was to look at how a human system handles this, and it gives a sharper
+rail than the blanket one first written here.
+
+**In a real company, support triages and never decides.** The person reading the
+inbox does not choose what gets built; the person with budget authority does. But
+support *does* act immediately on one class of thing, and the line it draws is not
+"how important" — it is **maintenance versus investment**:
+
+| What arrives | What a human does | Where it goes here |
+|---|---|---|
+| "It's broken" | Files it. Dev fixes it. **No approval** — fixing what you already sold is not new spend. | An `Issue`, into the existing repair path |
+| "How do I…?" | Answers from what is known. | The answering machinery already built |
+| "Take me off this list" | Does it immediately, no judgement. | `erase_lead()`, fail-closed |
+| "Can you add X?" | Logs it. **Never builds it alone.** One request is a data point; five is a product signal. | Demand evidence, Discovery's domain |
+| "We'd pay for X" | Strongest signal, still evidence. Qualifies it, passes it to whoever owns the roadmap. | Demand evidence, flagged |
+
+So the rail is **maintenance is autonomous, new capability is not**. A bug report on a
+live product flows straight into `patch_product` — that is repairing what was already
+promised, and it is what the department exists to do. A feature request accumulates as
+evidence and waits for the effort-to-traction judgement, which is the general
+manager's and does not exist yet.
+
+**No new mechanism is needed for any of the four.** Issues already dedup on
+`times_seen`, so "one bug reported by four customers" is already the right shape and
+was already solved (BUG_LOG 23). Demand evidence already has a home. Questions already
+have a channel. Erasure already has a path. Day 2 is a classifier and four existing
+doors.
+
 ### Rails, and they are not optional
 
 - **An unsubscribe request arriving by reply must reach the blacklist through
@@ -633,10 +694,10 @@ would own none of them well.
   the briefing rule (counts, never addresses) applies with more force here, not less.
 - **A reply is untrusted input.** It is written by someone outside the company and
   will at some point contain text that reads like an instruction. It is data.
-- **What a reply may trigger is a judgement with a spend attached.** "We'd pay for Y"
-  autonomously commissioning a build is the GM-shaped decision (effort scaled to
-  traction) arriving early. Until that exists, the rail is that a reply can raise
-  evidence and can ask, but cannot itself commission paid work.
+- **Maintenance is autonomous; new capability is not.** See the triage table above.
+  A bug report on a product already sold is not new spend and goes straight into the
+  repair path; anything that would build something new accumulates as evidence and
+  waits for the effort-to-traction judgement that does not exist yet.
 
 ### Why it comes before Phase 3
 
