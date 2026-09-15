@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from factory.engines.development import bug_council
+from factory.engines.development import bug_council, dependencies
 from factory.engines.development import deploy as deploy_module
 from factory.engines.development import graph as dev_graph
 from factory.sandbox.runner import DevOpsError, SandboxResult, is_devops_error
@@ -144,7 +144,14 @@ def _workspace_exists(settings: Settings) -> None:
     created it before `_verify_and_ship` runs, and a name nobody created is now an
     error rather than a silently empty directory.
     """
-    (settings.workspace_root / "product-1").mkdir(parents=True, exist_ok=True)
+    root = settings.workspace_root / "product-1"
+    root.mkdir(parents=True, exist_ok=True)
+    # These tests are about how a *Python product's* install and test runs are
+    # routed, so the workspace has to look like one. The install step now prepares
+    # what the workspace declares rather than assuming every product is Python, so a
+    # workspace with no manifest correctly has nothing to install -- which would skip
+    # the very step these tests exercise.
+    (root / "requirements.txt").write_text("pytest\n", encoding="utf-8")
 
 
 @pytest.fixture(autouse=True)
@@ -231,6 +238,14 @@ def _no_real_db(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(repository, "get_build_kind", fake_get_build_kind)
     monkeypatch.setattr(repository, "get_product", fake_get_product)
     monkeypatch.setattr(repository, "live_requirements", fake_live_requirements)
+
+    # The workspace now declares dependencies (see `_workspace_exists`), so the PyPI
+    # pre-check ahead of the install actually runs. It is a real network/DB lookup
+    # and is not what these tests are about.
+    async def fake_unresolvable(session: object, text: str, settings: object) -> list[str]:
+        return []
+
+    monkeypatch.setattr(dependencies, "unresolvable_requirements", fake_unresolvable)
     monkeypatch.setattr(repository, "open_issues_for", fake_open_issues_for)
     monkeypatch.setattr(repository, "record_task_event", fake_record_task_event)
     monkeypatch.setattr(repository, "get_idea", fake_get_idea)
@@ -542,3 +557,75 @@ async def test_non_infra_deploy_failure_still_heals_as_before(
 
     assert result == "healed"
     assert healed_with["category"] == "deploy_failure"
+
+
+async def test_a_workspace_with_nothing_to_install_is_not_a_failure(
+    ctx: FactoryContext, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pipeline prepares what the workspace declares, not what it assumes.
+
+    The install step ran unconditionally, so every product was treated as a Python
+    project. A validation page is static HTML with nothing to install, and pip
+    answered the only way it can -- `Could not open requirements file` -- which became
+    `category="dependency_failure"`. That is not a surgical category, so it triggered
+    a full regeneration, which rebuilt the pitch page as a complete SaaS MVP.
+
+    A workspace that declares no dependencies has nothing to prepare, and that is a
+    fact about the product rather than a fault in it.
+    """
+    root = settings.workspace_root / "product-1"
+    (root / "requirements.txt").unlink()
+
+    healed: list[str] = []
+
+    async def fake_heal(ctx, session, product_id, healing, idea_id, *, category):
+        healed.append(category)
+        return "healed"
+
+    monkeypatch.setattr(dev_graph, "_heal", fake_heal)
+
+    sandbox = _ScriptedSandbox(
+        results=[SandboxResult(exit_code=0, stdout="1 passed", stderr="")]
+    )
+    ctx.sandbox = sandbox
+
+    try:
+        await dev_graph._verify_and_ship(
+            ctx,
+            None,  # type: ignore[arg-type]
+            product_id="prod-1",
+            product_name="Test Product",
+            workspace="product-1",
+            test_command="pytest -q",
+            idea_id="idea-1",
+        )
+    except Exception as exc:
+        # Later stages need machinery these tests do not stand up. What matters is
+        # what happened at the install step, asserted below. Bound rather than
+        # swallowed so a failure here is readable if these assertions ever change.
+        assert exc is not None
+
+    assert "dependency_failure" not in healed, "nothing to install is not a defect"
+    commands = [str(c["command"]) for c in sandbox.calls]
+    assert not any("pip install" in c for c in commands), "no manifest, no install"
+
+
+def test_the_install_step_is_not_keyed_on_build_kind() -> None:
+    """Two different facts that happen to agree today.
+
+    "Is this a business validation or a real product" and "does this need Python
+    dependencies" are separate questions. Keying the install on `build_kind` would
+    hold them as one -- the failure this codebase keeps paying for -- and would break
+    the day a validation page needs a dependency or an MVP ships static.
+    """
+    import inspect
+
+    source = inspect.getsource(dev_graph._verify_and_ship)
+    block = source.split("clear_installed_deps")[1].split("if install.timed_out")[0]
+    # Code only. The comment here discusses `build_kind` at length precisely to say
+    # why it is not used, and a test that reads prose would fail on the explanation.
+    code = "\n".join(
+        line for line in block.splitlines() if not line.strip().startswith("#")
+    )
+    assert "requirements_path.exists()" in code
+    assert "build_kind" not in code

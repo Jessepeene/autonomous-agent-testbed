@@ -57,6 +57,7 @@ from factory.memory import store as memory_store
 from factory.observability import costs
 from factory.sandbox.runner import (
     DevOpsError,
+    SandboxResult,
     SandboxUnavailable,
     is_devops_error,
     resolve_workspace,
@@ -1605,11 +1606,37 @@ async def _verify_and_ship(
     # and doing it earlier left the repair agent with no toolchain -- see
     # `_ensure_deps_for_repair`.
     repair.clear_installed_deps(workspace, ctx.settings)
-    install = await ctx.sandbox.execute(
-        "python -m pip install --quiet --no-input --target=/workspace/.deps -r requirements.txt",
-        workspace=workspace,
-        network=True,
-    )
+    # **Prepare what this workspace declares, not what the pipeline assumes.**
+    #
+    # This ran unconditionally, so every product was treated as a Python project.
+    # A validation page is static HTML with nothing to install, and pip answered the
+    # only way it can: `Could not open requirements file`. That became
+    # `category="dependency_failure"`, which is not surgical, so it triggered a full
+    # regeneration -- which (until this file's `_patch` learned to read `build_kind`)
+    # rebuilt the pitch page as a full SaaS MVP. A stack assumption four lines below
+    # a guard that already knew better is what started that.
+    #
+    # Because the guard *was* already here: the PyPI pre-check above is wrapped in
+    # `if requirements_path.exists()`. The code knew the file was optional and then
+    # installed as though it were not.
+    #
+    # Deliberately keyed on the workspace's own contents rather than on `build_kind`.
+    # "Is this a business validation or a real product" and "does this need Python
+    # dependencies" are two different facts that happen to agree today, and holding
+    # two facts as one is the failure this codebase keeps paying for. A workspace
+    # that later declares a `package.json` slots in here by the same rule; one that
+    # declares nothing has nothing to prepare, and that is a fact about the product
+    # rather than a fault in it.
+    if not requirements_path.exists():
+        log.info("development.nothing_to_install", product_id=product_id, workspace=workspace)
+        install = SandboxResult(exit_code=0, stdout="", stderr="", timed_out=False)
+    else:
+        install = await ctx.sandbox.execute(
+            "python -m pip install --quiet --no-input "
+            "--target=/workspace/.deps -r requirements.txt",
+            workspace=workspace,
+            network=True,
+        )
     if install.timed_out:
         return await _heal(
             ctx,
