@@ -384,8 +384,7 @@ token and wall-clock waste actually lives — not in the channel's shape.
 ### The four fixes, in order of waste removed
 
 **1. Look before asking.** There is no "find the answer on its own" step anywhere.
-A manager tick is one stateless `parse()` with a narrow pre-built snapshot, no
-tools, no retrieval. Its only two moves are guess or ask — which is why it guessed.
+Most of these should never become questions at all — they are lookups.
 
 And the answers are *already in rows*. `product_dossier()` renders **"Who it is
 for"** directly from `Idea.target_niche`; the live runs blocked on precisely that
@@ -393,11 +392,59 @@ class of fact. Worse, `answer_question_task` pulls the dossier and the deciding
 manager does not: the agent whose job is to reply gets the file, the agent that has
 to make the call does not.
 
-Most of these should never become questions at all. They are lookups.
+#### The blocker is not access. It is that a manager is not an agent.
+
+The read layer exists and works: `read_product_dossier`, `read_doc` and `list_docs`
+are registered tools in `tools/handbook.py`, and repair, review and growth agents
+all hold DB-backed reads today.
+
+A manager cannot use any of them, and not because it is forbidden.
+`run_manager_tick` is a single `ctx.llm.parse()` — **one-shot structured output**.
+It must produce its entire decision in one breath, so there is no step in which it
+*could* look something up, even handed every tool in the registry. Deciding and
+looking happen in the same instant, which makes looking impossible.
+
+That is the sharp version of this finding: **the role that most needs to
+investigate is the one architecturally incapable of taking an action before
+answering.** Its only two moves are guess or ask, which is exactly what the three
+live runs did.
+
+#### Three steps, cheapest first
+
+**(a) Dossier into the manager's prompt.** Nearly free, no new machinery: render
+`product_dossier()` for the products in the manager's domain. Would have answered
+"who is this for" outright. Still a pre-built snapshot — a bigger guess rather than
+no guess — but it removes the concrete blocker today.
+
+**(b) Manager tick becomes an agent loop that ends in a structured decision.** Look,
+*then* decide, instead of deciding in one breath. At a daily cadence for one
+department, 1 call → 4 is negligible against the cost of a wrong or absent decision.
+This is the real fix, and it is what makes fix 2 (assume-and-flag) meaningful —
+an assumption is only defensible if looking was tried first.
+
+**(c) Broad reads, typed shape.** Jesse's point, and it stands: *"the agents should
+at least have full read access to the db"* — a curated view is a guess about what
+they will need, and a narrow guess is what caused this. So do **not** restrict which
+facts are reachable. Do restrict the form they come back in.
+
+Broad coverage, typed interface, PII redacted by default — not raw SQL, for three
+reasons:
+
+- **PII.** `ValidationSignal.email` and `Lead.work_email` are real addresses. The
+  schema already embodies minimisation deliberately: `Customer` carries
+  "deliberately no email, no name". Unrestricted lead reads cut against the
+  Compliance engine's premise and the `erase_lead`/blacklist path.
+- **Correctness.** Half these tables mean nothing without their filters —
+  `superseded_at IS NULL`, status filters, dedup. `live_requirements` and
+  `live_design_guidelines` exist to encode exactly that. An agent writing raw SQL
+  reads superseded rows and never knows: the same class as tonight's bugs, where two
+  different facts were held as one.
+- **Tokens.** An agent that can `SELECT *` will.
 
 *(Adjacent real bug: `product_dossier`'s docstring claims it assembles "real
 interest in `validation_signals`, and reach in `outreach_log`" — it renders
-neither.)*
+neither. That is the gap that would answer the traffic question, so (a) is
+incomplete until it is fixed.)*
 
 **2. Assume and flag, instead of blocking.** Today's guidance ends *"the one thing
 you must never do is invent the answer and act on it."* That is too strict, and it
