@@ -1363,6 +1363,20 @@ async def _patch_surgically(
         # four words, and the routing happens here. The work parks rather than
         # failing, so this costs no heal budget -- being blocked on someone else is
         # not the same as failing.
+        # Keep what it worked out before rolling back what it wrote. Parking used to
+        # mean abandoning: the edits went, and so did the investigation that produced
+        # them, so the resumed attempt re-read the codebase and re-derived the same
+        # diagnosis at full price. The edits still go -- a half-finished repair must
+        # not sit somewhere deployable -- but `.factory` is excluded from the
+        # rollback by design and is read into the top of every repair prompt, so the
+        # findings survive and are the first thing the next attempt sees.
+        question_text, _ = comms.parse_blocked_report(outcome.blocked_detail)
+        repair.record_blocked_attempt(
+            workspace,
+            ctx.settings,
+            question=question_text or outcome.blocked_detail,
+            found=outcome.answer or outcome.blocked_detail,
+        )
         repair.restore_snapshot(workspace, ctx.settings)
         question = await comms.raise_blocked_question(
             session,

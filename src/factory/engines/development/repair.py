@@ -400,6 +400,56 @@ def record_verified_repair(
     )
 
 
+#: Where a parked attempt's findings go. Deliberately *not* the repair history: that
+#: section is written only after a fix is verified, precisely so a later agent can
+#: read it as established fact. A blocked attempt proved nothing, and filing it as
+#: though it had is how a confident wrong note gets inherited.
+_BLOCKED_HEADING = "## Investigated but unresolved"
+
+
+def record_blocked_attempt(
+    workspace: str, settings: Settings, *, question: str, found: str
+) -> None:
+    """Keep what a blocked agent learned, so the next one does not re-derive it.
+
+    Parking used to mean abandoning. On `RESULT: BLOCKED` the workspace is rolled
+    back -- correctly, since a half-finished repair must not sit somewhere
+    deployable -- and everything the agent had worked out went with it. On resume it
+    re-read the codebase, re-ran the suite, and rediscovered the same thing, paying
+    for all of it again. "Ask a question" and "throw away your work" were one
+    operation, priced that way for the agent most likely to need to ask.
+
+    The edits are still rolled back; the *findings* are not. That is the expensive
+    half. `.factory` is excluded from the rollback by design and its contents are
+    read into the top of every repair prompt, so this survives and is the first thing
+    the next attempt sees -- next to the answer that unblocked it.
+
+    Recorded as a question with what was learned, never as a fix, and capped like the
+    history it sits beside so a product that blocks repeatedly cannot grow a file
+    that crowds out the prompt it is injected into.
+    """
+    path = _knowledge_file(workspace, settings)
+    if not path.is_file():
+        return
+    try:
+        existing = path.read_text(encoding="utf-8")
+    except OSError:
+        return
+
+    entry = f"- Blocked on: {question.strip()[:200]}\n  What was found first: {found.strip()[:400]}"
+    head, marker, rest = existing.partition(_BLOCKED_HEADING)
+    if marker:
+        entries = [line for line in rest.splitlines() if line.startswith("- Blocked on: ")]
+        # Only the summary lines survive a re-read, so the paired detail line is
+        # rebuilt from this entry alone -- keeping the newest, which is the one the
+        # pending answer will be about.
+        kept = (entries[-(MAX_HISTORY_ENTRIES - 1) :] if entries else []) + [entry]
+        path.write_text(f"{head}{_BLOCKED_HEADING}\n\n" + "\n".join(kept) + "\n", encoding="utf-8")
+    else:
+        path.write_text(f"{existing.rstrip()}\n\n{_BLOCKED_HEADING}\n\n{entry}\n", encoding="utf-8")
+    log.info("repair.blocked_attempt_recorded", workspace=workspace)
+
+
 def clear_installed_deps(workspace: str, settings: Settings) -> None:
     """Remove the installed-dependency tree so the next install is fresh.
 

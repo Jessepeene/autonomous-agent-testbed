@@ -675,3 +675,88 @@ def test_truncation_marks_the_gap_it_created() -> None:
 
 def test_short_results_are_returned_untouched() -> None:
     assert _truncate_middle("all 5 tests passed", 500) == "all 5 tests passed"
+
+
+# --- parking without abandoning -------------------------------------------------
+
+
+def test_what_a_blocked_agent_learned_survives_the_rollback(
+    settings: Settings, workspace: str
+) -> None:
+    """Parking used to mean abandoning.
+
+    On `RESULT: BLOCKED` the workspace is rolled back -- correctly, since a
+    half-finished repair must not sit somewhere deployable -- and until now
+    everything the agent had worked out went with it. The resumed attempt re-read the
+    codebase, re-ran the suite and re-derived the same diagnosis at full price:
+    "ask a question" and "throw away your work" were one operation, priced that way
+    for the agent most likely to need to ask.
+
+    The edits still go. The findings do not.
+    """
+    repair.write_initial_knowledge(
+        workspace, settings, product_name="Shardline", summary="A thing.", paths=["app/main.py"]
+    )
+    repair.take_snapshot(workspace, settings)
+    (settings.workspace_root / workspace / "app" / "main.py").write_text(
+        "half a fix", encoding="utf-8"
+    )
+
+    repair.record_blocked_attempt(
+        workspace,
+        settings,
+        question="Is the $199 price final or a placeholder?",
+        found="The checkout reads PRODUCT_PRICE_CENTS, but the page hard-codes $199.",
+    )
+    repair.restore_snapshot(workspace, settings)
+
+    # The edit is gone, as it must be.
+    assert "half a fix" not in _tree(settings, workspace)["app/main.py"]
+    # What it worked out is not, and is what the next attempt reads first.
+    knowledge = repair.read_knowledge(workspace, settings)
+    assert "price final or a placeholder" in knowledge
+    assert "hard-codes $199" in knowledge
+
+
+def test_a_blocked_attempt_is_never_filed_as_a_fix(settings: Settings, workspace: str) -> None:
+    """The distinction that keeps the knowledge file trustworthy.
+
+    `record_verified_repair` writes only after the suite *and* the Bug Council have
+    passed, precisely so a later agent can read that section as established fact. A
+    blocked attempt proved nothing. Filing it alongside verified fixes is how a
+    confident wrong note gets inherited by every future repair.
+    """
+    repair.write_initial_knowledge(
+        workspace, settings, product_name="Shardline", summary="A thing.", paths=["app/main.py"]
+    )
+    repair.record_blocked_attempt(
+        workspace, settings, question="Which segment is this for?", found="Nothing conclusive."
+    )
+
+    knowledge = repair.read_knowledge(workspace, settings)
+    history = knowledge.partition("## Repair history")[2].partition("##")[0]
+    assert "Which segment" not in history, "a blocked attempt is not a repair"
+    assert "Investigated but unresolved" in knowledge
+
+
+def test_repeated_blocking_cannot_crowd_out_the_prompt(
+    settings: Settings, workspace: str
+) -> None:
+    """This file is injected into every repair prompt, so it has to stay bounded.
+
+    A product that blocks on the same thing daily would otherwise grow a note that
+    displaces the context it was meant to preserve.
+    """
+    repair.write_initial_knowledge(
+        workspace, settings, product_name="Shardline", summary="A thing.", paths=["app/main.py"]
+    )
+    for i in range(repair.MAX_HISTORY_ENTRIES * 3):
+        repair.record_blocked_attempt(
+            workspace, settings, question=f"Question {i}?", found=f"Finding {i}."
+        )
+
+    knowledge = repair.read_knowledge(workspace, settings)
+    blocked = [line for line in knowledge.splitlines() if line.startswith("- Blocked on: ")]
+    assert len(blocked) <= repair.MAX_HISTORY_ENTRIES
+    # The newest survives: it is the one the pending answer will be about.
+    assert f"Question {repair.MAX_HISTORY_ENTRIES * 3 - 1}?" in knowledge
