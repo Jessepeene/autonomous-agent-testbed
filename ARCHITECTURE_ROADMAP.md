@@ -358,6 +358,83 @@ Still worth doing, now as a consequence rather than the headline: feed the manag
 `build_snapshot()`'s data plus per-product history, and let it choose *which*
 product to look at rather than round-robin.
 
+## Phase 2.5 — comms as a thread, not a blocking call
+
+**Status**: identified 2026-09-15 from the Design department's first live runs.
+Scoped here, not built.
+
+The channel shipped and works end to end — routed, delivered, parked, resumed —
+and the first three live runs showed it is not a *conversation*. It is a blocking
+RPC with a six-hour timeout wearing a conversation's vocabulary. `Question` has one
+`question` column, one `answer` column, one recipient, no parent link, and answers
+are retrieved by `blocking_task_id`.
+
+Jesse's framing, and it is the right target: *"why doesn't it work like a sort of
+WhatsApp for AI agents?"*
+
+**Four properties it lacks.**
+
+1. **No thread.** One question, one answer, closed. An answer that is inadequate,
+   or is itself a clarifying question, has nowhere to go. The asker blocks again
+   and files a brand-new question with no link to the first, so the exchange
+   structurally cannot have a second turn.
+2. **Asking costs the asker everything.** `park_until_answered` defers the whole
+   task. One open question freezes a department for six hours — a real tax on
+   exactly the behaviour we want to be cheap. Park the *decision* that needs the
+   fact, not the entire tick.
+3. **An answer is a one-time unblock, not knowledge.** Scoped to
+   `blocking_task_id`, so once that task finishes the answer is unreachable.
+   Tomorrow's tick asks the identical question and pays for the identical answer.
+   Scope answers to their subject so they are readable later.
+4. **Point-to-point and invisible.** One `asked_of`, no group, no visibility. Half
+   the value of asking in a channel is that somebody who was *not* asked knows the
+   answer, or simply learns that a department is stuck.
+
+**Two properties it must NOT copy, and this is the load-bearing half.**
+
+- **No inbox anybody has to check.** The whole reason comms is not a tool is that
+  agents do not reliably choose to check or send — `report_product_issue` shipped
+  as a tool and both live runs spent their entire step budget investigating without
+  ever calling it. A question *becoming work* in the recipient's queue is the good
+  part and stays. Nobody opts in; nothing goes unread.
+- **No free-form chat.** Every message is a paid model call. Agents talking freely
+  manufacture expensive consensus.
+
+**So: keep the transport, make the record a thread.**
+
+### The prerequisite, and it is not the channel
+
+Do not build this expecting it to fix the live failure. Across three runs the Design
+manager never populated `needs_to_know` at all — no channel shape helps when nothing
+is ever handed to it. That is a *decision-schema* problem (below), and it is
+confounded by every `ANALYSIS` call being served by the Anthropic fallback model
+while Gemini's credits are depleted.
+
+Order: get a manager to actually ask, on a capable model, before widening what
+asking can express.
+
+### The decision schema: optional fields lose to prose
+
+`ManagerDecision` is `assessment` (free prose) + `needs_to_know` (optional list) +
+`actions` (optional list). Only the two lists are wired to anything; `assessment` is
+recorded and read by nothing.
+
+Observed three times: the model put its question in `assessment` — clearly, and by
+the right test, *"that distinction determines the decision entirely"* — and left
+`needs_to_know` empty. A free prose field adjacent to structured fields absorbs the
+content that belongs in them, and an optional list defaults to empty for free.
+
+Naming the field in the prompt was not enough (commit `cc38622`); the next run
+invented the missing fact instead, which is worse.
+
+**The structural candidate**: replace the flat shape with three mutually exclusive
+outcomes — `commission(actions)`, `nothing_worth_doing(reason)`, `blocked(questions)`
+— so the manager must classify its own state rather than leave a field empty.
+"Nothing to do *because* I do not know" then becomes inexpressible: it is a visible
+contradiction the model has to commit to, instead of an absence nobody can see.
+
+This is the more promising fix, and it is untested. Try it on a capable model first.
+
 ## Phase 3 — a second department manager
 
 Most likely Marketing (thin lead flow and stalled validations are a live symptom),
