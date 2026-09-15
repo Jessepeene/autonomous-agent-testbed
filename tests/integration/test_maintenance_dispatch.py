@@ -72,9 +72,11 @@ async def test_every_enqueued_maintenance_task_is_dispatched_to_supervisor(
 async def test_previously_misrouted_slugs_are_now_tagged_supervisor(
     session: AsyncSession,
 ) -> None:
+    # "improve-test-coverage" was a third slug here and has been retired -- it asked
+    # an agent to test the factory's own guardrails with no codebase and no workspace
+    # to do it in, and every run ended at the step limit. See `supervisor/backlog.py`.
     previously_broken = {
         "audit-live-products",
-        "improve-test-coverage",
         "reconcile-outreach-conversions",
     }
     await enqueue_maintenance(session, enabled_engines=set(EngineName))

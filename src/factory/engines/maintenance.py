@@ -34,7 +34,11 @@ log = get_logger(__name__)
 ROLE_BY_SLUG: dict[str, RoleName] = {
     "triage-escalated-tasks": RoleName.ANALYST,
     "reduce-llm-cost": RoleName.ANALYST,
-    "improve-test-coverage": RoleName.REPAIR_ENGINEER,
+    # "improve-test-coverage" was the only REPAIR_ENGINEER here and is retired --
+    # see `supervisor/backlog.py` for why, and for what reviving it would require.
+    # Note what its absence leaves: every remaining item is read-only. A maintenance
+    # spawn that can *change* things needs somewhere specific to change them, and
+    # this path gives an agent no product and no workspace.
     "refine-agent-prompts": RoleName.ANALYST,
     "refresh-market-signals": RoleName.RESEARCHER,
 }

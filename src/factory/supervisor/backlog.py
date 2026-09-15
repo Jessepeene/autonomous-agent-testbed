@@ -52,15 +52,27 @@ CATALOGUE: tuple[MaintenanceItem, ...] = (
         engine=EngineName.SUPERVISOR,
         cadence_hours=24,
     ),
-    MaintenanceItem(
-        slug="improve-test-coverage",
-        objective=(
-            "Find guardrails in the codebase that lack a direct regression test and write "
-            "one. Prioritise the compliance, sandbox, budget and blacklist paths."
-        ),
-        engine=EngineName.DEVELOPMENT,
-        cadence_hours=24,
-    ),
+    # `improve-test-coverage` was here and is retired, deliberately -- do not re-add
+    # it without first solving the problem below.
+    #
+    # It asked a REPAIR_ENGINEER to write regression tests for "the compliance,
+    # sandbox, budget and blacklist paths". Those are *this factory's own* guardrails,
+    # and the factory's source is deliberately unreachable from a sandboxed agent. The
+    # spawn also carries no product and no workspace at all (see
+    # `maintenance.py`'s `SpawnRequest`), so the agent had nowhere to work even in
+    # principle.
+    #
+    # It could not succeed, and did not: every recorded run ended
+    # `stopped: step_limit`, having spent its whole budget hunting for a codebase it
+    # was never given -- including `find / -maxdepth 3 -type d -name '*workspace*'`
+    # -- and it is what produced fourteen invented, empty workspace directories in
+    # production. Daily, at real cost, with a 0% success rate by construction.
+    #
+    # Reviving it needs a decision this item cannot make for itself: *which* codebase.
+    # Pointed at a product it would be a real job, but choosing which product deserves
+    # the spend is a judgement nothing here owns yet. Pointed at the factory it is a
+    # request for self-modification, which is a much larger decision than a backlog
+    # slot.
     MaintenanceItem(
         slug="refine-agent-prompts",
         objective=(

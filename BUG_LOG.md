@@ -1989,3 +1989,74 @@ advancing for the first time.
 
 **Status**: Fixed and deployed 2026-09-15, commits `5fdab67` and the naming
 follow-up.
+
+## 28. A workspace name an agent invented became a real directory, so guessing worked
+
+**Found**: 2026-09-15, listing production workspaces — 17 directories for 2
+products.
+
+`resolve_workspace()` ended with `path.mkdir(parents=True, exist_ok=True)` on
+*every* call. So a workspace name an agent made up became a real empty directory
+the moment it was mentioned: the command ran, succeeded, returned nothing useful,
+and taught the agent nothing — so it guessed again.
+
+Fourteen of those directories were empty and were never anything: `api`, `app`,
+`asf`, `autonomous-saas-factory`, `autonomous_software_factory`, `default`,
+`factory`, `live`, `main`, `product`, `repair`, `repo`, `saas-factory`,
+`workspace` — plus one named **`nonexistent-xyz-123`**, which is a probe the
+system answered by creating it.
+
+**Fix**: creating is explicit and the default is not to. The two places that
+genuinely bring a workspace into existence — `clear_workspace` and `write_plan`,
+both on a first build — pass `create=True`. Everywhere else a missing workspace
+raises `UnknownWorkspace`, which says the useful thing: *there is no workspace by
+that name, use the one you were given, do not guess.* An error is actionable; an
+empty directory is a plausible lie.
+
+`UnknownWorkspace` is deliberately distinct from `UnsafeWorkspace`. They mean
+opposite things — one is an attempt to leave the sandbox, the other is a guess —
+and conflating them would report an invented name as a security event while
+burying the thing worth saying.
+
+**Three silent degradations became honest failures** as a side effect: a repair
+against a workspace that no longer exists used to read an empty dict and "repair"
+nothing; a deploy could ship an empty site; a test run could pass against nothing.
+
+**Verification**: `tests/unit/test_router_and_sandbox.py` — an unknown name
+raises, a traversal attempt still raises the *other* error, and an explicitly
+created workspace resolves normally afterwards.
+
+**Status**: Fixed and deployed 2026-09-15.
+
+## 29. A daily maintenance task that could not succeed by construction
+
+**Found**: 2026-09-15, while tracing the source of entry 28.
+
+`improve-test-coverage` asked a REPAIR_ENGINEER to *"find guardrails in the
+codebase that lack a direct regression test and write one. Prioritise the
+compliance, sandbox, budget and blacklist paths."*
+
+Those are **this factory's own** guardrails. The factory's source is deliberately
+unreachable from a sandboxed agent — and the maintenance spawn carries no
+`product_id` and no workspace at all (`SpawnRequest` in `engines/maintenance.py`),
+so the agent had nowhere to work even in principle.
+
+It ran daily and **every recorded run ended `stopped: step_limit`** — the full
+step budget spent hunting for a codebase it was never given, including
+`find / -maxdepth 3 -type d -name '*workspace*'`. It is also what produced the
+fourteen invented directories in entry 28. Real cost, daily, 0% success rate, by
+construction.
+
+**Fix**: retired, with the reasoning left at the site so it is not re-added.
+
+**Reviving it needs a decision the item cannot make for itself: which codebase.**
+Pointed at a product it would be a real job — but choosing *which* product
+deserves the spend is a judgement nothing in the system owns yet. Pointed at the
+factory it is a request for self-modification, which is a far larger decision
+than a backlog slot.
+
+Its removal also leaves every remaining maintenance item read-only, which is the
+honest state: a maintenance spawn that can *change* things needs somewhere
+specific to change them, and this path gives an agent neither.
+
+**Status**: Retired 2026-09-15.
