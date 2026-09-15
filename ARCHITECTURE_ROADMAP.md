@@ -358,10 +358,86 @@ Still worth doing, now as a consequence rather than the headline: feed the manag
 `build_snapshot()`'s data plus per-product history, and let it choose *which*
 product to look at rather than round-robin.
 
-## Phase 2.5 — comms as a thread, not a blocking call
+## Phase 2.5 — what it costs to be blocked
 
 **Status**: identified 2026-09-15 from the Design department's first live runs.
 Scoped here, not built.
+
+### Start from how a human team does this
+
+A developer mid-feature hits a question — 404 or 403 for this case? Four things
+happen, and **none of them is "stop and wait"**:
+
+1. **The work in progress is not destroyed.** It sits on a branch. Isolation, not
+   deletion — the problem of "a half-finished change must not reach production" was
+   solved with branches, not with `rm -rf`.
+2. **They leave a note.** A TODO, a draft PR description, a line in a scratch file.
+   Resuming is *read your own note*, not *redo the investigation*.
+3. **Mostly they do not block at all.** They pick the likely answer, mark it
+   visibly as an assumption, and carry on. Being wrong costs one small edit later;
+   stopping costs the entire context.
+4. **They batch.** Nobody taps a colleague six separate times in an afternoon.
+
+Measured against that, this system does the opposite of all four. That is where the
+token and wall-clock waste actually lives — not in the channel's shape.
+
+### The four fixes, in order of waste removed
+
+**1. Look before asking.** There is no "find the answer on its own" step anywhere.
+A manager tick is one stateless `parse()` with a narrow pre-built snapshot, no
+tools, no retrieval. Its only two moves are guess or ask — which is why it guessed.
+
+And the answers are *already in rows*. `product_dossier()` renders **"Who it is
+for"** directly from `Idea.target_niche`; the live runs blocked on precisely that
+class of fact. Worse, `answer_question_task` pulls the dossier and the deciding
+manager does not: the agent whose job is to reply gets the file, the agent that has
+to make the call does not.
+
+Most of these should never become questions at all. They are lookups.
+
+*(Adjacent real bug: `product_dossier`'s docstring claims it assembles "real
+interest in `validation_signals`, and reach in `outreach_log`" — it renders
+neither.)*
+
+**2. Assume and flag, instead of blocking.** Today's guidance ends *"the one thing
+you must never do is invent the answer and act on it."* That is too strict, and it
+is expensive. The real distinction is not assume-versus-ask, it is **visible versus
+silent**:
+
+- Run 2's failure was not that it assumed. It asserted "the product is live with
+  real users" — contradicted by its own input, which said `planned` — told nobody,
+  and asked nobody. Silent.
+- A human who says "assuming this is a core product, flagged, carrying on" is being
+  productive, and is corrected cheaply when the answer lands.
+
+So the default should be: proceed under a **recorded** assumption, *and still ask*,
+and let the answer correct it. Blocking is for the case where proceeding would
+destroy something.
+
+**3. Park without abandoning.** Today, parking *is* abandoning. On BLOCKED,
+`_patch_surgically` calls `repair.restore_snapshot()` — which deletes every edit the
+agent made and rolls the workspace back — and only then parks. On resume the agent
+re-reads the codebase, re-runs the suite, and redoes the whole investigation, paying
+for all of it again.
+
+"Ask a question" and "throw away your work" are the same operation, and it is priced
+that way for exactly the agent most likely to need to ask.
+
+The snapshot restore exists for a real reason: a half-finished repair must not sit
+in a deployable workspace. That is the branch problem, and the answer is isolation:
+
+- Workspaces are **not** git repos today (`.git` is in `WORKSPACE_SKIP_DIRS`
+  defensively, and no workspace in production has one). `git init` per workspace
+  makes park-on-a-branch nearly free.
+- A parking agent should write its handoff note — what it was doing, what it found,
+  what it was about to try. **The mechanism already exists**: `.factory/
+  ARCHITECTURE.md` is a durable per-product knowledge file that every repair agent
+  reads before starting and that `restore_snapshot` deliberately preserves. Nothing
+  writes a park note to it.
+
+**4. Then, and only then, the channel.** Below.
+
+### Comms as a thread, not a blocking call
 
 The channel shipped and works end to end — routed, delivered, parked, resumed —
 and the first three live runs showed it is not a *conversation*. It is a blocking
@@ -378,10 +454,16 @@ WhatsApp for AI agents?"*
    or is itself a clarifying question, has nowhere to go. The asker blocks again
    and files a brand-new question with no link to the first, so the exchange
    structurally cannot have a second turn.
-2. **Asking costs the asker everything.** `park_until_answered` defers the whole
-   task. One open question freezes a department for six hours — a real tax on
-   exactly the behaviour we want to be cheap. Park the *decision* that needs the
-   fact, not the entire tick.
+2. **Asking costs the asker its work, not its time.** Correcting an earlier note
+   here: the round trip is *fast* by design — the supervisor ticks every 15s, an
+   `ANSWER_QUESTION` task lands at priority 110, and `answer_question` sets
+   `not_before = now()` and releases the asker immediately. Roughly 30–90 seconds,
+   not hours; `BLOCKED_RETRY_HOURS` is the fallback for a question nobody ever
+   answers, not the wait.
+
+   **No question has ever traversed this channel in production**, so that is the
+   designed latency and not a measured one. The real cost is fix 3 above: what the
+   asker loses is its work, not its afternoon.
 3. **An answer is a one-time unblock, not knowledge.** Scoped to
    `blocking_task_id`, so once that task finishes the answer is unreachable.
    Tomorrow's tick asks the identical question and pays for the identical answer.
@@ -410,8 +492,12 @@ is ever handed to it. That is a *decision-schema* problem (below), and it is
 confounded by every `ANALYSIS` call being served by the Anthropic fallback model
 while Gemini's credits are depleted.
 
-Order: get a manager to actually ask, on a capable model, before widening what
-asking can express.
+Order: give deciders eyes (fix 1), let them proceed under a flagged assumption
+(fix 2), stop charging them their work to wait (fix 3) — then widen what asking can
+express. A better phone does not help someone who cannot look anything up and loses
+their desk every time they use it.
+
+Get a manager actually asking, on a capable model, before building any of 4.
 
 ### The decision schema: optional fields lose to prose
 
