@@ -1351,7 +1351,12 @@ class Requirement(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "subject_kind IN ('product','task','issue','campaign')",
+            # 'design' is a real subject kind, not a special case: design guidelines
+            # are a standard written before the work, which is what this table is
+            # for. Omitting it here meant every guideline the Design department
+            # produced was rejected by the database after being generated -- see
+            # migration 0041.
+            "subject_kind IN ('product','task','issue','campaign','design')",
             name="requirement_subject_kind_valid",
         ),
     )
