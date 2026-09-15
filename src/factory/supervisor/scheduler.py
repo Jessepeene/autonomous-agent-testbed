@@ -110,7 +110,32 @@ class Scheduler:
                 reply_hint="No reply needed — it resumes by itself once the provider works.",
                 needs_reply=False,
             )
-        for provider in sorted(previous - set(tripped)):
+        # Two different questions, and holding them as one ran in production for
+        # three days.
+        #
+        # *Should routing avoid this provider right now?* -- answered by `tripped`
+        # above, and deliberately left alone. Evidence ageing out of the window is
+        # what lets a provider back in to be re-judged by real traffic; requiring
+        # proof of recovery here would strand it, because a tripped provider is
+        # filtered out of the candidate list and so can never produce the successes
+        # that would clear it.
+        #
+        # *Is it fixed?* -- needs positive evidence, and `previous - tripped` is not
+        # evidence. A provider below MIN_CALLS in the window is correctly absent from
+        # `tripped`, and subtraction cannot tell that absence from a recovery.
+        #
+        # Gemini: credits depleted 2026-09-12, **zero successful calls ever**, and
+        # 2-11 calls an hour against a 30-minute window, so it kept dropping out.
+        # Eight escalations raised, seven auto-closed telling the operator "gemini is
+        # answering again" about a provider that had never once answered -- and each
+        # closure wiped the evidence, so a total three-day outage read as a series of
+        # brief blips that all fixed themselves.
+        #
+        # Leaving the notice open also ends the duplicate storm on its own:
+        # `open_interrupt` dedups on (reason, subject, status), so a re-trip folds
+        # into the notice already standing instead of raising a fresh one.
+        recovered = await llm_health.recovered_providers(session, previous)
+        for provider in sorted(recovered):
             log.info("provider_health.recovered", provider=provider.value)
             # Close the notice raised when it tripped. Without this the breaker
             # self-heals in seconds while its escalation sits open indefinitely,

@@ -134,5 +134,58 @@ async def tripped_providers(
     return tripped
 
 
+async def recovered_providers(
+    session: AsyncSession,
+    previously_tripped: set[Provider],
+    *,
+    window_minutes: int = WINDOW_MINUTES,
+    min_recovery_successes: int = MIN_RECOVERY_SUCCESSES,
+) -> set[Provider]:
+    """Of the providers that were tripped, which have actually answered since.
+
+    **Recovery needs positive evidence, and "no longer tripped" is not evidence.**
+    That distinction is the whole function, and its absence ran in production for
+    three days: the caller used to compute recovery as `previous - tripped`, plain
+    set subtraction.
+
+    `tripped_providers` returns nothing for a provider with fewer than `MIN_CALLS`
+    in the window -- correctly, since a handful of failures on a quiet provider
+    proves nothing. But subtraction cannot tell *that* absence from a real recovery,
+    so a dead provider that simply went quiet dropped out of the tripped set and was
+    announced to the operator as "answering again".
+
+    Gemini did exactly this. Depleted credits from 2026-09-12, **zero successful
+    calls ever**, 2-11 calls per hour against a 30-minute window -- so it fell out of
+    the tripped set constantly. Eight separate outage escalations were raised and
+    seven auto-resolved with the message "gemini is answering again", about a
+    provider that had never once answered. Each closure wiped the evidence, so three
+    days of total outage read as a series of brief blips that all fixed themselves.
+
+    Quiet is not healthy. A provider genuinely back up produces successes easily.
+    """
+    if not previously_tripped:
+        return set()
+
+    since = datetime.now(UTC) - timedelta(minutes=window_minutes)
+    stmt = (
+        select(LLMCall.provider, func.count().label("succeeded"))
+        .where(
+            LLMCall.created_at >= since,
+            LLMCall.outcome == "ok",
+            LLMCall.provider.in_([p.value for p in previously_tripped]),
+        )
+        .group_by(LLMCall.provider)
+    )
+    recovered: set[Provider] = set()
+    for provider_name, succeeded in (await session.execute(stmt)).all():
+        if succeeded < min_recovery_successes:
+            continue
+        try:
+            recovered.add(Provider(provider_name))
+        except ValueError:  # pragma: no cover - a provider no longer in the enum
+            continue
+    return recovered
+
+
 def describe(tripped: dict[Provider, str]) -> str:
     return ", ".join(f"{p.value} ({reason})" for p, reason in sorted(tripped.items()))
