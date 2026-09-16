@@ -191,6 +191,56 @@ async def test_ordering_is_not_written_down_anywhere(session: AsyncSession, tmp_
     assert len(await _tasks_of(session, TaskKind.DESIGN_MANAGE)) == 1
 
 
+def test_the_menu_matches_what_can_actually_be_commissioned() -> None:
+    """Every need the decider is offered must be one the code can carry out.
+
+    These were two derivations of one question and they disagreed: the menu came from
+    OWNER, which has no entry for DEPLOYMENT because Development has no manager, while
+    `_commission` starts a build directly. So a decider was shown "nobody owns
+    deployment", correctly concluded it could pursue nothing, and the product stalled
+    with a build one function call away.
+    """
+    from factory.supervisor.product_decision import _pursuable
+
+    # Anything _commission can act on must be offered, and nothing else may be.
+    assert _pursuable(Unmet.DEPLOYMENT) is True, "_commission starts builds; the menu must say so"
+    assert _pursuable(Unmet.DESIGN_GUIDELINES) is True
+    assert _pursuable(Unmet.AUDIENCE) is False, "genuinely unowned; must not be offered"
+
+
+async def test_a_product_with_only_a_build_left_still_gets_built(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """The state run 7 stalled in: guidelines written, build not yet started."""
+    from factory.state.schemas import DesignGuidelines
+
+    product_id = await _product(session)
+    await repository.record_design_guidelines(
+        session,
+        product_id=product_id,
+        guidelines=DesignGuidelines(
+            direction="Borrow the language of a bakery's morning production sheet.",
+            palette=["#2b1a12 crust", "#f5ead6 flour", "#c2703d bake"],
+            typography="A warm grotesque for headings, tabular figures for counts.",
+            must_hold=["The page loads at least one webfont"],
+        ),
+    )
+    await session.flush()
+
+    ctx, _ = _ctx(
+        tmp_path,
+        ProductNext(
+            assessment="The standard exists now, so a builder has something to aim at "
+            "and the page is the only way to find out whether anyone wants this.",
+            pursue=[Unmet.DEPLOYMENT.value],
+        ),
+    )
+    await decide_next(ctx, session, _task(product_id))
+    await session.flush()
+
+    assert len(await _tasks_of(session, TaskKind.BUILD_LANDING_PAGE)) == 1
+
+
 async def test_an_unowned_need_cannot_be_pursued(session: AsyncSession, tmp_path: Path) -> None:
     """Naming it is how the company finds out it needs somebody to own it. Acting on
     it would require inventing a department, which is how an unowned question starts

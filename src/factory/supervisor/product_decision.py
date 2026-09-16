@@ -66,6 +66,23 @@ Finding that nothing new is worth starting is a complete answer when work is alr
 in flight. Say so plainly rather than manufacturing a job to look decisive."""
 
 
+def _pursuable(need: Unmet) -> bool:
+    """Whether this company can actually act on a need, by any route.
+
+    The single answer to that question, because holding two of them cost a run.
+    `_render_options` used to build the menu from `OWNER` alone while `_commission`
+    separately knew how to start a build, so `DEPLOYMENT` was absent from the map and
+    the decider was told nobody could deploy -- while the code would have done it
+    happily if asked. On 2026-09-16 it read that menu, concluded *"three missing
+    prerequisites that have nobody accountable for them"*, and pursued nothing.
+
+    Not a reasoning failure: the decision was correct given what it was shown, and
+    what it was shown was wrong. Two derivations of one question, which is the defect
+    shape this codebase keeps finding in itself.
+    """
+    return need in OWNER or need is Unmet.DEPLOYMENT
+
+
 def _render_options(facts: ProductFacts) -> str:
     """What this product is missing, split by whether anyone can actually do it.
 
@@ -75,8 +92,8 @@ def _render_options(facts: ProductFacts) -> str:
     decision can say somebody should own it.
     """
     lines: list[str] = []
-    ownable = [n for n in facts.unmet if n in OWNER]
-    unowned = [n for n in facts.unmet if n not in OWNER]
+    ownable = [n for n in facts.unmet if _pursuable(n)]
+    unowned = [n for n in facts.unmet if not _pursuable(n)]
 
     if ownable:
         lines.append("Missing, and this company has somebody who can establish it:")
