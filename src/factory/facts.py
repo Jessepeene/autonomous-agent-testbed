@@ -71,6 +71,19 @@ OWNER: dict[Unmet, tuple[EngineName, TaskKind]] = {
     Unmet.DESIGN_GUIDELINES: (EngineName.DESIGN, TaskKind.DESIGN_MANAGE),
 }
 
+#: Needs that are **ends**, not means: the reason work happens rather than work to be
+#: done. They belong in a statement of what a product is for, never in a list of gaps
+#: to close.
+#:
+#: Mixing the two cost four live runs. `unmet` is a good diagnostic and a terrible
+#: plan, because a flat list makes the objective indistinguishable from an obstacle --
+#: run 10's decider read "nobody outside the company has seen it" and concluded *"the
+#: more urgent blocker is that nobody outside the company has encountered this product
+#: yet"*, which is a sentence no employee of a real company could utter. Nobody is
+#: blocked on having customers; you are blocked on what stands between you and
+#: customers. See ARCHITECTURE_ROADMAP.md, Phase 2.8's 2026-09-17 correction.
+ENDS: frozenset[Unmet] = frozenset({Unmet.REACH})
+
 
 @dataclass(frozen=True)
 class ProductFacts:

@@ -191,6 +191,48 @@ async def test_ordering_is_not_written_down_anywhere(session: AsyncSession, tmp_
     assert len(await _tasks_of(session, TaskKind.DESIGN_MANAGE)) == 1
 
 
+async def test_the_goal_is_stated_as_the_goal_not_listed_as_a_gap(
+    session: AsyncSession,
+) -> None:
+    """Run 10: "the more urgent blocker is that nobody outside the company has
+    encountered this product yet." It read the objective as an obstacle, which is a
+    sentence no employee of a real company could say -- nobody is blocked on having
+    customers. `reach` belongs in the statement of what the product is for."""
+    from factory.supervisor.product_decision import _render_options
+
+    product_id = await _product(session)
+    facts = await product_facts(session, product_id)
+    assert facts is not None
+    assert Unmet.REACH in facts.unmet  # still a true fact, still a good diagnostic
+
+    rendered = _render_options(facts)
+    assert "What this product is for" in rendered
+    assert "will pay for it" in rendered
+    # ...and it is not offered as a thing to go and start.
+    startable = rendered.split("What can be started right now:")[-1]
+    assert "- reach:" not in startable
+
+
+async def test_a_need_nobody_owns_never_reaches_the_decider(session: AsyncSession) -> None:
+    """It is a staffing fact, not a product one. Shown as something it could not
+    pursue, a reasonable decider concludes the product is stuck -- runs 8 and 10."""
+    from factory.state.orm import Interrupt
+    from factory.supervisor.product_decision import _raise_staffing_gap, _render_options
+
+    product_id = await _product(session)
+    facts = await product_facts(session, product_id)
+    assert facts is not None
+
+    assert "audience" not in _render_options(facts)
+
+    # It goes to a person instead, once, however many products hit it.
+    await _raise_staffing_gap(session, facts)
+    await _raise_staffing_gap(session, facts)
+    await session.flush()
+    raised = list((await session.execute(select(Interrupt))).scalars().all())
+    assert [i.subject for i in raised] == ["Nobody owns audience"]
+
+
 async def test_requirements_read_as_pending_work_not_as_a_wall(session: AsyncSession) -> None:
     """Requirements are written by the builder as its first step.
 
@@ -212,9 +254,12 @@ async def test_requirements_read_as_pending_work_not_as_a_wall(session: AsyncSes
         line for line in rendered.splitlines() if line.strip().startswith("- requirements:")
     )
     assert "commission the build" in requirements_line
-    # And it must not appear under the heading that says nobody can act on it.
-    nobody_owns = rendered.split("nobody owns it")[-1]
-    assert "- requirements:" not in nobody_owns
+    # It is not offered as something to go and start on its own...
+    startable = rendered.split("What can be started right now:")[-1].split("Comes with")[0]
+    assert "- requirements:" not in startable
+    # ...and there is no longer any section telling the decider what it cannot do.
+    assert "nobody owns" not in rendered.lower()
+    assert "cannot pursue" not in rendered.lower()
 
 
 def test_the_menu_matches_what_can_actually_be_commissioned() -> None:

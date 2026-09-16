@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from factory.facts import OWNER, ProductFacts, Unmet, product_facts
+from factory.facts import ENDS, OWNER, ProductFacts, Unmet, product_facts
 from factory.handbook import product_brief
 from factory.logging import get_logger
 from factory.settings import EngineName, TaskType
@@ -39,11 +39,15 @@ from factory.supervisor.context import FactoryContext
 log = get_logger(__name__)
 
 SYSTEM = """\
-You decide what one product is owed next. You are the only part of this company that \
+You decide what one product does next. You are the only part of this company that \
 looks at a product as a whole rather than at its own department's slice of it.
 
-You do not do the work and you do not say how it should be done. You decide which of \
-the things this product is missing are worth pursuing *now*, and the rest wait.
+You are given the product's goal, what it has so far, and what can actually be \
+started right now. **Your question is "what is the next thing worth doing to move \
+this toward its goal?"** -- not "what is this product missing?". Those are different \
+questions and the second one has no answer: a product in progress is missing most of \
+what it will eventually have, and a list of absences tells you nothing about which \
+way is forward.
 
 Do not weigh what work costs. There is a hard spending limit enforced elsewhere that \
 nothing you decide can exceed, so the money question is already answered and running \
@@ -51,16 +55,19 @@ a second copy of it here only makes you timid.
 
 Two failures to avoid, and the second is by far the more common:
 
-- Starting everything at once. A product missing five things does not need five jobs \
-opened this minute, because work done before its inputs exist gets done twice.
+- Starting everything at once. Work started before its inputs exist gets done twice.
 - Starting nothing because starting something feels premature. A product sitting with \
-nothing in flight is not being careful, it is stalled -- and nobody else is coming to \
+nothing in flight is not being careful, it is stalled -- and nobody is coming to \
 notice.
 
 Think about what consumes what. Some work takes another piece of work as its input, \
-and starting it first means doing it blind and then doing it again. That is a \
+and starting that first means doing it blind and then doing it again. That is a \
 judgement about this product, not a rule: sometimes the generic answer really is good \
 enough and waiting buys nothing. Say which case this is.
+
+The goal is never an obstacle. If the product's purpose is to find out whether people \
+want it, then not yet knowing is the reason to act, not a reason to wait -- you cannot \
+learn it by waiting, only by putting something in front of somebody.
 
 Finding that nothing new is worth starting is a complete answer when work is already \
 in flight. Say so plainly rather than manufacturing a job to look decisive."""
@@ -84,46 +91,68 @@ def _pursuable(need: Unmet) -> bool:
 
 
 def _render_options(facts: ProductFacts) -> str:
-    """What this product is missing, split by whether anyone can actually do it.
+    """The goal, then what can actually be started toward it.
 
-    An unowned need is shown rather than hidden. A decider that cannot see "nobody
-    owns knowing who this is for" will quietly reason as though somebody does, which
-    is the failure this whole line of work exists to stop -- and naming it is how the
-    decision can say somebody should own it.
+    This used to be a list of everything the product lacked, split by who owned what,
+    and it stalled four runs. A flat list of absences has no direction in it: the
+    decider has to reconstruct which entries are prerequisites, which are byproducts
+    of other work, and which are the objective -- and it got that wrong differently
+    every run, reaching three different orderings from near-identical facts.
+
+    Jesse's question is what named it: *how would a human team solve this, or how
+    would it not come up?* A human team never asks "what is missing". They start from
+    the goal, step back once, and do the first thing. So this says what the product is
+    for, and then what is startable now -- ends in the goal, not the gap list, and
+    nothing here that nobody can act on.
     """
-    lines: list[str] = []
-    ownable = [n for n in facts.unmet if _pursuable(n)]
+    startable = [n for n in facts.unmet if _pursuable(n) and n not in ENDS]
     byproduct = [n for n in facts.unmet if n in _PRODUCED_BY]
-    unowned = [n for n in facts.unmet if not _pursuable(n) and n not in _PRODUCED_BY]
 
-    if ownable:
-        lines.append("Missing, and this company has somebody who can establish it:")
-        lines.extend(f"  - {n.value}: {_WHAT[n]}" for n in ownable)
+    lines = [_goal(facts), ""]
+    if startable:
+        lines.append("What can be started right now:")
+        lines.extend(f"  - {n.value}: {_WHAT[n]}" for n in startable)
     else:
-        lines.append("Nothing this product is missing has an owner who could act on it.")
+        lines.append(
+            "Nothing new can be started right now; whatever is already in flight is "
+            "what moves this forward."
+        )
 
-    # The category that did not exist, and its absence stalled two runs. Requirements
-    # are written by the builder as the first step of a build, so "no requirements" is
-    # not a reason to hold the build -- it is a description of what the build has not
-    # done yet. Listed among the unowned, it read as a blocker nobody could clear, and
-    # deciders concluded the product could not start. Stated plainly it is the
-    # opposite: the way to get these is to commission the work that produces them.
+    # Requirements are written by the builder as the first step of a build, so "no
+    # requirements" is not a reason to hold the build -- it is a description of what
+    # the build has not done yet. Listed as a gap, it read as a blocker nobody could
+    # clear, and two runs concluded the product could not start.
     if byproduct:
         lines.append("")
-        lines.append(
-            "Missing, and **not separately commissionable** -- these get written as "
-            "part of other work, so they are never a reason to hold that work back:"
-        )
+        lines.append("Comes with other work rather than being started on its own:")
         lines.extend(f"  - {n.value}: {_PRODUCED_BY[n]}" for n in byproduct)
 
-    if unowned:
-        lines.append("")
-        lines.append(
-            "Missing, and **nobody owns it** -- you cannot pursue these, and saying so "
-            "is how this company finds out it needs somebody to:"
-        )
-        lines.extend(f"  - {n.value}: {_WHAT[n]}" for n in unowned)
+    # Needs nobody owns are deliberately absent from this prompt. They are a fact about
+    # the company's staffing, not about this product, and a decider shown "you cannot
+    # pursue these" reasonably concludes the product is stuck -- which is what happened
+    # on runs 8 and 10. They are raised to a human instead, once, by `_raise_staffing_gap`.
     return "\n".join(lines)
+
+
+def _goal(facts: ProductFacts) -> str:
+    """What this product exists to find out, stated as the objective it is.
+
+    `reach` and `interest` used to appear in the gap list, which made the point of the
+    exercise look like an obstacle to it. Stated here instead: not yet knowing whether
+    anyone wants this is the *reason* to act.
+    """
+    measured = (
+        f"So far {facts.interest} of them have said yes, out of {facts.reach} approached."
+        if facts.reach
+        else "Nobody has been approached yet, so there is no answer either way -- and "
+        "there cannot be one until something exists to put in front of them."
+    )
+    return (
+        f"**What this product is for.** It exists to find out whether "
+        f"{facts.audience_sentence} will pay for it. That question is the goal; "
+        f"everything below is only useful insofar as it gets the company an answer.\n"
+        f"{measured}"
+    )
 
 
 #: Needs that no department is commissioned for because another piece of work produces
@@ -152,6 +181,47 @@ _WHAT: dict[Unmet, str] = {
     Unmet.DEPLOYMENT: "nothing has been built or deployed, so there is nothing to look at",
     Unmet.REACH: "nobody outside the company has seen it",
 }
+
+
+async def _raise_staffing_gap(session: AsyncSession, facts: ProductFacts) -> list[Unmet]:
+    """A need no department can establish is a staffing question, not a product one.
+
+    In a company, "nobody owns this" goes to whoever does the hiring; it does not stop
+    today's work. Putting it in front of the decider as something it could not pursue
+    is what produced *"the product is blocked on work that nobody in this company
+    currently owns"* -- true, and the wrong conclusion, because a designer does not
+    down tools over the lack of a data analyst.
+
+    Deduplicated by subject, so a capability the company lacks produces one open
+    escalation however many products run into it. Returns what was raised, for the
+    decision record.
+    """
+    from factory.hitl import interrupts
+    from factory.state.schemas import InterruptReason
+
+    # `ENDS` excluded, and the first version of this function forgot to: it would have
+    # escalated "nobody owns reach", which is the same category error one layer along.
+    # Reach is what the company is trying to achieve, so nobody owning it is not a
+    # staffing hole -- it is the definition of the objective.
+    gaps = [n for n in facts.unmet if not _pursuable(n) and n not in _PRODUCED_BY and n not in ENDS]
+    for need in gaps:
+        await interrupts.request(
+            session,
+            reason=InterruptReason.DATA_INTEGRITY,
+            subject=f"Nobody owns {need.value}",
+            detail=(
+                f"Products keep needing this and no department can establish it: "
+                f"{_WHAT[need]}.\n\n"
+                "This is not blocking any one product -- work continues on everything "
+                "that can be started -- but every product reaching this point is built "
+                "without it, and nothing in the company is accountable for changing "
+                "that. Deciding who owns it is a staffing question, which is yours."
+            ),
+            headline="🪑 A question nobody here owns",
+            reply_hint="No reply needed — this is about who works here, not about one product.",
+            needs_reply=False,
+        )
+    return gaps
 
 
 async def _commission(
@@ -209,7 +279,7 @@ async def decide_next(ctx: FactoryContext, session: AsyncSession, task: Task) ->
             prompt=(
                 f"{await product_brief(session, product_id)}\n\n"
                 f"{_render_options(facts)}\n\n"
-                "What is this product owed next?"
+                "What is the next thing worth doing to move this toward its goal?"
             ),
             engine=EngineName.SUPERVISOR,
             task_id=task.id,
@@ -236,6 +306,9 @@ async def decide_next(ctx: FactoryContext, session: AsyncSession, task: Task) ->
             log.warning("supervisor.unknown_need", product_id=product_id, named=raw[:60])
 
     routed = await _commission(session, facts, wanted)
+    # Raised after the decision, never before it: what the company is not staffed for
+    # must not reach the decider as something it failed to pursue.
+    staffing = await _raise_staffing_gap(session, facts)
     await repository.record_task_event(
         session,
         event="supervisor.product_decided",
@@ -247,6 +320,7 @@ async def decide_next(ctx: FactoryContext, session: AsyncSession, task: Task) ->
             "pursue": [n.value for n in wanted],
             "routed": [n.value for n in routed],
             "holding": decision.holding[:500],
+            "staffing_gaps": [n.value for n in staffing],
             "unmet": [n.value for n in facts.unmet],
         },
     )
