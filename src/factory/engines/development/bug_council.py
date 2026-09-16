@@ -75,8 +75,8 @@ Set approved=false if you find anything of medium severity or above.
 
 Finding nothing in your category is a complete, legitimate result and should be \
 common. Approve and say so plainly rather than reaching for something to report -- a \
-finding you had to look hard to justify costs a real repair cycle and teaches the \
-next build nothing. Report what you would genuinely act on.""",
+finding you had to look hard to justify is one you do not believe, and reporting it teaches the \
+next build the wrong lesson. Report what you would genuinely act on.""",
     ReviewCategory.PERFORMANCE: """\
 You are the performance reviewer on a deploy gate.
 
@@ -89,8 +89,8 @@ Set approved=false for anything that would fall over under modest concurrent loa
 
 Finding nothing in your category is a complete, legitimate result and should be \
 common. Approve and say so plainly rather than reaching for something to report -- a \
-finding you had to look hard to justify costs a real repair cycle and teaches the \
-next build nothing. Report what you would genuinely act on.""",
+finding you had to look hard to justify is one you do not believe, and reporting it teaches the \
+next build the wrong lesson. Report what you would genuinely act on.""",
     ReviewCategory.DEPENDENCIES: """\
 You are the dependency reviewer on a deploy gate.
 
@@ -103,8 +103,8 @@ Set approved=false for an unvetted or unnecessary dependency.
 
 Finding nothing in your category is a complete, legitimate result and should be \
 common. Approve and say so plainly rather than reaching for something to report -- a \
-finding you had to look hard to justify costs a real repair cycle and teaches the \
-next build nothing. Report what you would genuinely act on.""",
+finding you had to look hard to justify is one you do not believe, and reporting it teaches the \
+next build the wrong lesson. Report what you would genuinely act on.""",
     ReviewCategory.QUALITY: """\
 You are the quality reviewer on a deploy gate -- the only one of five reviewers \
 whose question is not "is this correct, safe, or fast" but "you are the business \
@@ -137,8 +137,8 @@ Set approved=false for any defect you would genuinely hesitate to publish over.
 
 Finding nothing in your category is a complete, legitimate result and should be \
 common. Approve and say so plainly rather than reaching for something to report -- a \
-finding you had to look hard to justify costs a real repair cycle and teaches the \
-next build nothing. Report what you would genuinely act on.""",
+finding you had to look hard to justify is one you do not believe, and reporting it teaches the \
+next build the wrong lesson. Report what you would genuinely act on.""",
 }
 
 # --- deterministic scanners -------------------------------------------------
