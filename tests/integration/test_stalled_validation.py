@@ -96,7 +96,20 @@ def _ctx(*, enabled: set[EngineName], workspace_root: Path) -> FactoryContext:
     settings = Settings(
         database_url=DATABASE_URL, gemini_api_key="test-key", workspace_root=workspace_root
     )
-    llm = LLMClient(ProviderRegistry({Provider.GEMINI: FakeProvider()}), settings=settings)
+    # DEEPSEEK as well as GEMINI: LANDING_PAGE routes to DeepSeek and is on the
+    # NO_FAILOVER list, so a registry without it raises NoProviderAvailable from any
+    # build -- which then matches no assertion in this file and masks whatever the
+    # test was actually checking. The fixture has to register whoever the router
+    # actually calls, not whoever it called when the fixture was written.
+    llm = LLMClient(
+        ProviderRegistry(
+            {
+                Provider.GEMINI: FakeProvider(),
+                Provider.DEEPSEEK: FakeProvider(name=Provider.DEEPSEEK),
+            }
+        ),
+        settings=settings,
+    )
     return FactoryContext(
         settings=settings,
         llm=llm,

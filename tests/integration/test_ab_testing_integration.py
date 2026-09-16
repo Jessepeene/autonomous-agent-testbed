@@ -26,10 +26,10 @@ from factory.hitl.telegram import NullNotifier
 from factory.llm.client import LLMClient
 from factory.llm.providers.base import Provider
 from factory.llm.providers.fake import FakeProvider
-from factory.llm.router import ProviderRegistry
+from factory.llm.router import ProviderRegistry, provider_for
 from factory.sandbox.disabled import DisabledSandbox
 from factory.sandbox.runner import SandboxResult
-from factory.settings import EngineName, Settings
+from factory.settings import EngineName, Settings, TaskType
 from factory.state import repository
 from factory.state.orm import ABTest, Base, Task, new_id
 from factory.state.schemas import ProductStatus, ScoredIdea, TaskKind, TaskStatus
@@ -64,7 +64,7 @@ async def _reset_global_engine() -> AsyncIterator[None]:
 
 
 def _ctx(
-    *, workspace_root: Path, anthropic: FakeProvider | None = None, **overrides: object
+    *, workspace_root: Path, builder: FakeProvider | None = None, **overrides: object
 ) -> FactoryContext:
     settings = Settings(
         database_url=DATABASE_URL,
@@ -72,9 +72,19 @@ def _ctx(
         workspace_root=workspace_root,
         **overrides,
     )
-    providers: dict[Provider, FakeProvider] = {Provider.GEMINI: FakeProvider(name=Provider.GEMINI)}
-    if anthropic is not None:
-        providers[Provider.ANTHROPIC] = anthropic
+    # Registered against whoever the router *currently* sends LANDING_PAGE to, rather
+    # than a vendor named here. This test asserts on the builder's prompt, and it was
+    # silently asserting on nobody's: it registered an Anthropic fake back when
+    # LANDING_PAGE routed to Anthropic, the routing moved to DeepSeek, and the
+    # assertion kept passing over a provider that was never called until the missing
+    # registration finally surfaced it. Asking the router closes that loop -- a future
+    # routing change moves the fake with it instead of quietly un-testing this.
+    providers: dict[Provider, FakeProvider] = {
+        Provider.GEMINI: FakeProvider(name=Provider.GEMINI),
+        Provider.DEEPSEEK: FakeProvider(name=Provider.DEEPSEEK),
+    }
+    if builder is not None:
+        providers[provider_for(TaskType.LANDING_PAGE, settings)] = builder
     llm = LLMClient(ProviderRegistry(providers), settings=settings)
     return FactoryContext(
         settings=settings,
@@ -275,7 +285,7 @@ async def test_build_landing_page_generates_both_variants_when_a_test_is_running
     )
     await session.flush()
 
-    provider = FakeProvider(name=Provider.ANTHROPIC)
+    provider = FakeProvider(name=provider_for(TaskType.LANDING_PAGE))
     provider.register(
         ScaffoldPlan,
         ScaffoldPlan(
@@ -285,7 +295,7 @@ async def test_build_landing_page_generates_both_variants_when_a_test_is_running
             test_command="pytest",
         ),
     )
-    ctx = _ctx(workspace_root=tmp_path, anthropic=provider)
+    ctx = _ctx(workspace_root=tmp_path, builder=provider)
     ctx.sandbox = _AlwaysFailingSandbox()  # type: ignore[assignment]
 
     task = Task(
