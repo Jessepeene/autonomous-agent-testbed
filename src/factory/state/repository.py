@@ -89,6 +89,52 @@ def fingerprint(*parts: str) -> str:
 # ------------------------------------------------------------------------- tasks
 
 
+async def wake_manager(
+    session: AsyncSession,
+    *,
+    engine: EngineName,
+    kind: TaskKind,
+    product_id: str,
+    asked_by: str,
+    because: str,
+) -> bool:
+    """Ask a department's manager to look at one product. Returns whether it was woken.
+
+    A department's inbox, and the reason it is addressed to the *manager* rather than
+    to its workers: you can ask a department to look at something, and you cannot tell
+    it what to do. `enqueue_task(WRITE_DESIGN_GUIDELINES, ...)` from outside Design
+    would be a command, and a company where any department can hand another one its
+    work is a pipeline whose edges happen to be spelled as function calls. Waking the
+    manager leaves the judgement where it belongs -- including the judgement that
+    nothing is owed.
+
+    Woken once per product per reason, ever. A manager that considered a subject and
+    declined has *decided*, and asking again tomorrow would be nagging rather than
+    routing; its own periodic tick already sees the whole domain, so a changed
+    situation still gets a second look through the door it always had.
+    """
+    return (
+        await enqueue_task(
+            session,
+            kind=kind,
+            engine=engine,
+            # Deliberately not time-bucketed, unlike the periodic manager tick this
+            # shares a task kind with: that one is "it is a new day", this one is
+            # "here is a specific thing", and collapsing them would mean the first
+            # wake of the day silently swallowed every subject raised after it.
+            idempotency_key=f"{engine.value}:asked:{product_id}:{because[:60]}",
+            payload={"product_id": product_id, "asked_by": asked_by, "because": because},
+            product_id=product_id,
+            # Ahead of a landing-page build (50) on purpose. Not a dependency and not
+            # a gate -- if this manager fails or declines, the build still happens --
+            # only an ordering preference, and scaffolding until something decides what
+            # a product is owed before anything is commissioned at all.
+            priority=40,
+        )
+        is not None
+    )
+
+
 async def enqueue_task(
     session: AsyncSession,
     *,

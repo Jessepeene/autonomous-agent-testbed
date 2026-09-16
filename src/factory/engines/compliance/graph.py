@@ -24,6 +24,7 @@ from factory.state.schemas import (
     TaskKind,
     ValidatedIdea,
 )
+from factory.supervisor.attention import route_attention
 from factory.supervisor.context import FactoryContext
 
 log = get_logger(__name__)
@@ -232,4 +233,14 @@ async def _create_validation(session: AsyncSession, ctx: FactoryContext, idea_ro
         product_id=product_id,
         priority=50,
     )
+    # A new product exists and nothing about it has been decided yet. This names no
+    # department: `route_attention` reads the product's own unmet facts and wakes
+    # whoever owns them, so Compliance does not know Design exists and a sixth
+    # department would not touch this line.
+    #
+    # Still a race with the build queued just above, which this cannot fix -- the
+    # build is commissioned here, in the same transaction, before anyone has judged
+    # what the product is owed. Moving that judgement upstream is Phase 3; until then
+    # this narrows the window from a day to seconds. See `supervisor/attention.py`.
+    await route_attention(session, product_id, asked_by="compliance")
     return f"compliance: idea {idea_row.id} approved and queued for validation"

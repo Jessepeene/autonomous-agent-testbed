@@ -155,6 +155,29 @@ def _render_domain(domain: repository.DesignDomain) -> str:
     return "\n".join(lines)
 
 
+def _subject(task: Task) -> str:
+    """Why this tick is running, when something specific prompted it.
+
+    An empty string for the periodic tick, which is running because it is a new day
+    and has no subject. When this department is woken through its inbox
+    (`supervisor/attention.py`) the subject says what was noticed and who noticed it,
+    and deliberately stops there: the observation is stated, the decision is not made.
+    A manager handed "write guidelines for this product" has been given an instruction
+    rather than a subject, and the judgement this department exists for is gone.
+    """
+    payload = task.payload or {}
+    product_id = payload.get("product_id")
+    because = payload.get("because")
+    if not product_id or not because:
+        return ""
+    asked_by = payload.get("asked_by") or "another department"
+    return (
+        f"You were asked to look at product {product_id} by {asked_by}, because "
+        f"{because}. That is an observation, not an instruction -- decide for yourself "
+        "whether anything is owed here, and say so plainly if nothing is.\n\n"
+    )
+
+
 async def run_manager_tick(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
     """Look at the department, decide what matters, commission it."""
     domain = await repository.design_domain(session)
@@ -185,6 +208,7 @@ async def run_manager_tick(ctx: FactoryContext, session: AsyncSession, task: Tas
             system=MANAGER_SYSTEM,
             prompt=(
                 (f"{answered}\n\n" if answered else "")
+                + _subject(task)
                 + "This is what your department looks like right now.\n\n"
                 + f"{_render_domain(domain)}\n\n"
                 + (f"{briefs}\n\n" if briefs else "")

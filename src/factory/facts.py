@@ -29,6 +29,9 @@ from enum import StrEnum
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from factory.settings import EngineName
+from factory.state.schemas import TaskKind
+
 
 class Unmet(StrEnum):
     """Something a product does not have. A name, deliberately, and not a sentence:
@@ -47,6 +50,25 @@ class Unmet(StrEnum):
     #: Never shown to anyone outside. Zero interest here is the absence of evidence,
     #: not evidence of absence.
     REACH = "reach"
+
+
+#: Which department can establish each fact, and how its manager is reached.
+#:
+#: **Structure, not sequence.** "Design decides how a product should look" is a fact
+#: about this company and belongs in code. "Design runs after Compliance and before
+#: Development" is the conveyor and belongs nowhere -- so this map says who owns a
+#: question and never when they answer it. Adding a need should cost one entry here
+#: and one predicate above; if it ever costs an edit to an ordering, the thing being
+#: built is a pipeline again (ARCHITECTURE_ROADMAP.md, Phase 2.8).
+#:
+#: A need with no owner is left out deliberately rather than pointed at the nearest
+#: department that could plausibly absorb it. `AUDIENCE` is the live case: nobody owns
+#: "who is this for" today, Product/Management is where the roadmap puts it, and
+#: assigning it to Design in the meantime would make an unowned question look answered
+#: -- the exact failure this whole line of work exists to stop.
+OWNER: dict[Unmet, tuple[EngineName, TaskKind]] = {
+    Unmet.DESIGN_GUIDELINES: (EngineName.DESIGN, TaskKind.DESIGN_MANAGE),
+}
 
 
 @dataclass(frozen=True)
