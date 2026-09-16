@@ -75,7 +75,9 @@ async def _manager_tasks(session: AsyncSession) -> list[Task]:
 async def test_an_unmet_need_wakes_the_department_that_owns_it(session: AsyncSession) -> None:
     product_id = await _product(session)
 
-    routed = await route_attention(session, product_id, asked_by="compliance")
+    routed = await route_attention(
+        session, product_id, needs=[Unmet.DESIGN_GUIDELINES], asked_by="supervisor"
+    )
     await session.flush()
 
     assert Unmet.DESIGN_GUIDELINES in routed
@@ -83,7 +85,7 @@ async def test_an_unmet_need_wakes_the_department_that_owns_it(session: AsyncSes
     assert len(tasks) == 1
     assert tasks[0].engine == EngineName.DESIGN.value
     assert tasks[0].product_id == product_id
-    assert tasks[0].payload["asked_by"] == "compliance"
+    assert tasks[0].payload["asked_by"] == "supervisor"
     # The observation, not an instruction. A manager told to write guidelines has had
     # the decision made for it, which is the judgement this department exists for.
     assert "nobody has decided how this product should look" in tasks[0].payload["because"]
@@ -97,12 +99,14 @@ async def test_a_need_nobody_owns_is_left_unrouted_rather_than_reassigned(
     plausibly absorb it would make an unowned question look answered."""
     product_id = await _product(session)
 
-    routed = await route_attention(session, product_id, asked_by="compliance")
+    routed = await route_attention(
+        session, product_id, needs=[Unmet.AUDIENCE], asked_by="supervisor"
+    )
 
-    assert Unmet.AUDIENCE not in routed
+    assert routed == []
     assert Unmet.AUDIENCE not in OWNER
-    # Exactly one department was woken, not one per unmet need.
-    assert len(await _manager_tasks(session)) == 1
+    # Nobody was woken, and in particular Design was not handed somebody else's job.
+    assert await _manager_tasks(session) == []
 
 
 async def test_a_met_need_wakes_nobody(session: AsyncSession) -> None:
@@ -119,7 +123,9 @@ async def test_a_met_need_wakes_nobody(session: AsyncSession) -> None:
     )
     await session.flush()
 
-    routed = await route_attention(session, product_id, asked_by="compliance")
+    routed = await route_attention(
+        session, product_id, needs=[Unmet.DESIGN_GUIDELINES], asked_by="supervisor"
+    )
 
     assert Unmet.DESIGN_GUIDELINES not in routed
     assert await _manager_tasks(session) == []
@@ -130,9 +136,13 @@ async def test_asking_twice_about_the_same_thing_wakes_once(session: AsyncSessio
     tomorrow is nagging, not routing -- its own periodic tick still sees the domain."""
     product_id = await _product(session)
 
-    first = await route_attention(session, product_id, asked_by="compliance")
+    first = await route_attention(
+        session, product_id, needs=[Unmet.DESIGN_GUIDELINES], asked_by="supervisor"
+    )
     await session.flush()
-    second = await route_attention(session, product_id, asked_by="compliance")
+    second = await route_attention(
+        session, product_id, needs=[Unmet.DESIGN_GUIDELINES], asked_by="supervisor"
+    )
     await session.flush()
 
     assert Unmet.DESIGN_GUIDELINES in first
@@ -140,16 +150,34 @@ async def test_asking_twice_about_the_same_thing_wakes_once(session: AsyncSessio
     assert len(await _manager_tasks(session)) == 1
 
 
-async def test_the_inbox_wake_outranks_a_landing_page_build(session: AsyncSession) -> None:
-    """Ordering preference, not a dependency: if the manager declines or fails, the
-    build still happens. Lower priority runs first."""
-    product_id = await _product(session)
+async def test_a_need_already_met_since_the_decision_wakes_nobody(
+    session: AsyncSession,
+) -> None:
+    """Guidelines can land between a decision being taken and it being carried out.
 
-    await route_attention(session, product_id, asked_by="compliance")
+    Waking a manager to look at something that is no longer missing is how a
+    department learns to ignore its own inbox.
+    """
+    product_id = await _product(session)
+    await repository.record_design_guidelines(
+        session,
+        product_id=product_id,
+        guidelines=DesignGuidelines(
+            direction="Borrow the language of ledgers: ruled columns, tabular figures.",
+            palette=["#0b3d2e rule", "#f4f1ea paper", "#b8860b accent"],
+            typography="IBM Plex Sans, with a monospace face for figures.",
+            must_hold=["The page loads at least one webfont"],
+        ),
+    )
     await session.flush()
 
-    tasks = await _manager_tasks(session)
-    assert tasks[0].priority < 50
+    # The decision named it; the world moved on before it was carried out.
+    routed = await route_attention(
+        session, product_id, needs=[Unmet.DESIGN_GUIDELINES], asked_by="supervisor"
+    )
+
+    assert routed == []
+    assert await _manager_tasks(session) == []
 
 
 async def test_the_manager_is_woken_never_its_workers(session: AsyncSession) -> None:
@@ -160,7 +188,9 @@ async def test_the_manager_is_woken_never_its_workers(session: AsyncSession) -> 
     """
     product_id = await _product(session)
 
-    await route_attention(session, product_id, asked_by="compliance")
+    await route_attention(
+        session, product_id, needs=[Unmet.DESIGN_GUIDELINES], asked_by="supervisor"
+    )
     await session.flush()
 
     rows = await session.execute(select(Task).where(Task.engine == EngineName.DESIGN.value))
@@ -170,4 +200,9 @@ async def test_the_manager_is_woken_never_its_workers(session: AsyncSession) -> 
 
 
 async def test_a_product_that_does_not_exist_routes_nothing(session: AsyncSession) -> None:
-    assert await route_attention(session, "0" * 32, asked_by="compliance") == []
+    assert (
+        await route_attention(
+            session, "0" * 32, needs=[Unmet.DESIGN_GUIDELINES], asked_by="supervisor"
+        )
+        == []
+    )

@@ -125,10 +125,11 @@ async def wake_manager(
             idempotency_key=f"{engine.value}:asked:{product_id}:{because[:60]}",
             payload={"product_id": product_id, "asked_by": asked_by, "because": because},
             product_id=product_id,
-            # Ahead of a landing-page build (50) on purpose. Not a dependency and not
-            # a gate -- if this manager fails or declines, the build still happens --
-            # only an ordering preference, and scaffolding until something decides what
-            # a product is owed before anything is commissioned at all.
+            # A manager tick is one cheap call whose answer can change what else is
+            # worth doing, so it goes ahead of the work it might redirect. This is not
+            # where ordering between departments lives -- nothing is commissioned
+            # until `supervisor/product_decision.py` judges it should be, and that
+            # decision is where "not yet" gets made.
             priority=40,
         )
         is not None

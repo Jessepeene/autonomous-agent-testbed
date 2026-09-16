@@ -123,6 +123,11 @@ class TaskKind(StrEnum):
     #: is invisible to every check that never presses the button. See
     #: development/graph.py::_review_live_product.
     REVIEW_LIVE_PRODUCT = "review_live_product"
+    #: What is this product owed next? The judgement that used to be a transaction:
+    #: Compliance approved an idea and commissioned a build in the same breath, so
+    #: nothing ever asked whether the product was ready to be built. Ordering falls
+    #: out of this decision rather than out of any rule -- see `ProductNext`.
+    DECIDE_PRODUCT_NEXT = "decide_product_next"
 
 
 class TaskStatus(StrEnum):
@@ -1028,6 +1033,38 @@ class DesignDecision(ManagerDecision):
     #: with nothing worth doing that says so is working correctly; one that always
     #: finds work is manufacturing it, and every item here costs real money.
     actions: list[DesignAction] = Field(default_factory=list, max_length=6)
+
+
+class ProductNext(ManagerDecision):
+    """What a product is owed next, and what can wait.
+
+    The judgement that did not exist. Compliance approved an idea and commissioned a
+    landing-page build in the same transaction, so there was never a moment at which
+    anyone asked whether the product was ready to be built -- and a page was built for
+    an audience nobody had established, to a standard nobody had written, and then
+    failed for not meeting that standard.
+
+    **Ordering is a conclusion here, not a rule.** Nothing in this codebase says design
+    precedes development. What a decider can see is that the builder consumes design
+    guidelines and none exist, so building now means building blind and paying for it
+    twice. A different product, with a house style that genuinely suits it, deserves
+    the opposite answer. That is why this is a judgement and not a dependency graph:
+    the same facts do not always imply the same order.
+
+    `pursue` is deliberately allowed to be empty, and that is a real answer -- a
+    product waiting on work already in flight is owed nothing new this minute.
+    """
+
+    #: Which unmet needs to commission now, by `factory.facts.Unmet` value. The rail
+    #: is that these must be things the company knows how to do: a need with no owner
+    #: cannot be pursued, however much it deserves to be, and naming one is how this
+    #: decision says "somebody should own this" without pretending somebody does.
+    pursue: list[str] = Field(default_factory=list, max_length=5)
+    #: Why the rest can wait, in a sentence. Required whenever something is left
+    #: unpursued, because "not yet" is the half of this decision that gets made by
+    #: accident -- a step nobody ran and a step somebody decided to defer look
+    #: identical afterwards unless the reason was written down.
+    holding: str = Field(default="")
 
 
 class VisualFinding(Contract):

@@ -24,7 +24,6 @@ from factory.state.schemas import (
     TaskKind,
     ValidatedIdea,
 )
-from factory.supervisor.attention import route_attention
 from factory.supervisor.context import FactoryContext
 
 log = get_logger(__name__)
@@ -223,24 +222,18 @@ async def _create_validation(session: AsyncSession, ctx: FactoryContext, idea_ro
         session, name=idea_row.target_niche[:80], idea_id=idea_row.id
     )
     await repository.set_product_status(session, product_id, ProductStatus.VALIDATING)
-    await repository.enqueue_task(
-        session,
-        kind=TaskKind.BUILD_LANDING_PAGE,
-        engine=EngineName.DEVELOPMENT,
-        idempotency_key=f"validate:{idea_row.id}",
-        payload={"idea_id": idea_row.id, "product_id": product_id},
-        idea_id=idea_row.id,
-        product_id=product_id,
-        priority=50,
-    )
-    # A new product exists and nothing about it has been decided yet. This names no
-    # department: `route_attention` reads the product's own unmet facts and wakes
-    # whoever owns them, so Compliance does not know Design exists and a sixth
-    # department would not touch this line.
+    # Compliance's job ends at "this may be pursued", and now it actually does.
     #
-    # Still a race with the build queued just above, which this cannot fix -- the
-    # build is commissioned here, in the same transaction, before anyone has judged
-    # what the product is owed. Moving that judgement upstream is Phase 3; until then
-    # this narrows the window from a day to seconds. See `supervisor/attention.py`.
-    await route_attention(session, product_id, asked_by="compliance")
-    return f"compliance: idea {idea_row.id} approved and queued for validation"
+    # `enqueue_task(BUILD_LANDING_PAGE)` used to sit here, in this transaction, one
+    # line after the product was created -- so a build was commissioned before anyone
+    # had looked at the product, and every page this factory has ever built was
+    # started that way. Whether a product is ready to be built is not a compliance
+    # question, and answering it here was not a decision anybody made; it was the
+    # shape of the code.
+    #
+    # Nothing replaces it, deliberately. This function now hands off to nobody: the
+    # supervisor notices a product with unmet needs and decides what it is owed
+    # (`supervisor/product_decision.py`). Compliance does not know that Development
+    # exists, does not know an order, and would not change if a sixth department
+    # appeared -- which is the difference between an organisation and a pipeline.
+    return f"compliance: idea {idea_row.id} approved; what it needs next is not ours to decide"

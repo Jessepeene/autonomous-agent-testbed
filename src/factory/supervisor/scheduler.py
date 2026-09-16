@@ -25,6 +25,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from factory.engines.marketing import campaign, channel, deliverability
+from factory.facts import product_facts_for_open_products
 from factory.hitl import interrupts
 from factory.llm import health as llm_health
 from factory.logging import get_logger
@@ -207,6 +208,30 @@ class Scheduler:
                 idempotency_key=f"reconcile:{_bucket(now, 3600)}",
                 payload={},
                 priority=10,  # money first
+            )
+
+        # What is each product owed? Nothing else asks. Compliance used to answer it
+        # by accident -- it created a product and commissioned a build in the same
+        # transaction -- and the answer was always "a landing page, immediately",
+        # whether or not anyone had decided who the product was for or how it should
+        # look.
+        #
+        # Keyed on the product's own unmet set rather than on a clock: a decision is
+        # taken once per state of the product, so nothing re-decides while the world
+        # is unchanged, and a state that *does* change (guidelines land, a deploy
+        # happens) is a new question and gets asked again. No interval to tune, and a
+        # product whose situation never changes is not nagged about.
+        for facts in await product_facts_for_open_products(session):
+            if not facts.unmet:
+                continue
+            await repository.enqueue_task(
+                session,
+                kind=TaskKind.DECIDE_PRODUCT_NEXT,
+                engine=EngineName.SUPERVISOR,
+                idempotency_key=f"decide:{facts.product_id}:{facts.unmet_signature}",
+                payload={"product_id": facts.product_id},
+                product_id=facts.product_id,
+                priority=40,
             )
 
         if ctx.is_enabled(EngineName.DESIGN):

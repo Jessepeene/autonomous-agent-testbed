@@ -47,6 +47,14 @@ _HEALTH_CHECK_TIMEOUT = httpx.Timeout(10.0, connect=5.0)
 
 
 async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
+    # Its own kind rather than a maintenance slug: this is a judgement about one
+    # product, carries a product_id, and shows up in a trace as a decision rather
+    # than as housekeeping.
+    if task.kind == TaskKind.DECIDE_PRODUCT_NEXT.value:
+        from factory.supervisor.product_decision import decide_next
+
+        return await decide_next(ctx, session, task)
+
     slug = str(task.payload.get("slug", "maintenance"))
 
     # These four are either fully deterministic or need the two-step structured

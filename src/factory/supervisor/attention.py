@@ -9,29 +9,24 @@ and guidelines written for a shipped page are documentation, not direction. Its
 judgement was right and its position in time was wrong, which is the one failure mode
 that cannot be fixed by making the department better at its job.
 
-**Routing attention is mechanical; deciding what to do is judgement.** That line is the
-whole design, and it is what keeps this from being a resolver. An unmet fact wakes the
-manager that owns it, with the subject named -- and that is the end of this module's
-authority. The manager then sees the product like any other, and may decide nothing is
-owed; "the house style is right for this one" is a legitimate and expected answer. What
-this module must never do is commission the work itself, because a mapping from unmet
-fact straight to work is the conveyor rebuilt with the ordering hidden in a dependency
-graph instead of written down.
+**This module is mechanism, and deliberately holds no judgement at all.** It is handed
+a list of needs and wakes whoever owns them. The first version derived that list itself
+from the product's unmet facts, which made it a resolver: every absence became work,
+and the ordering between departments was implied by a dependency graph instead of
+decided by anyone. `supervisor/product_decision.py` makes the decision; this carries it.
 
-The same property makes the caller side safe: `route_attention` takes a product and
-names no department. `OWNER` in `factory.facts` names them. So Compliance calling this
-after an approval is not a Compliance-to-Design edge -- Compliance does not know Design
-exists, and adding a sixth department would not touch it.
+The caller side stays clean either way: `route_attention` names no department. `OWNER`
+in `factory.facts` names them, so a decision to pursue a need reaches its owner without
+the decider knowing who that is, and a sixth department would not touch this file.
 
-**What this does not solve, stated plainly.** A build is still commissioned by
-Compliance in the same transaction that creates the product, so waking Design at the
-same moment is a race rather than an order. Until something judges what a product is
-owed *before* anything is commissioned -- Phase 3 -- this narrows the window from a day
-to seconds without closing it. The honest measure of this module is whether Design
-starts producing guidelines at all, not whether they always arrive first.
+Addressed to a department's **manager**, never its workers. You can ask a department to
+look at something; you cannot hand it its work. That is the difference between an
+organisation and a pipeline whose edges happen to be spelled as function calls.
 """
 
 from __future__ import annotations
+
+from collections.abc import Sequence
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,12 +37,21 @@ from factory.state import repository
 log = get_logger(__name__)
 
 
-async def route_attention(session: AsyncSession, product_id: str, *, asked_by: str) -> list[Unmet]:
-    """Wake the manager of every unmet need this product has an owner for.
+async def route_attention(
+    session: AsyncSession, product_id: str, *, needs: Sequence[Unmet], asked_by: str
+) -> list[Unmet]:
+    """Wake the manager that owns each of these needs. Pure mechanism, no judgement.
 
-    Returns the needs actually routed, so a caller can log what it set in motion
-    without re-deriving it. Needs with no owner are returned by neither path and are
-    not an error: `Unmet.AUDIENCE` has no department today, and inventing one to
+    ``needs`` is passed in rather than derived here, and that changed after Jesse read
+    the first version: *"the system should be smart enough to know design needs to
+    finish before dev without us needing to hard code it."* Deriving the list here made
+    this a resolver -- every unmet fact became work, which is the conveyor with the
+    ordering hidden in a dependency graph. Something has to *decide* which needs are
+    worth pursuing now, and that decision is `supervisor/product_decision.py`. This
+    function only carries the result.
+
+    Returns the needs actually routed. A need with no owner is silently not routed and
+    is not an error: `Unmet.AUDIENCE` has no department today, and inventing one to
     receive it would make an unowned question look answered.
     """
     facts = await product_facts(session, product_id)
@@ -55,7 +59,13 @@ async def route_attention(session: AsyncSession, product_id: str, *, asked_by: s
         return []
 
     routed: list[Unmet] = []
-    for need in facts.unmet:
+    for need in needs:
+        if need not in facts.unmet:
+            # Already established since the decision was taken -- a guidelines task
+            # that landed while this one queued. Waking a manager to look at something
+            # that is no longer missing is how a department learns to ignore its inbox.
+            log.info("attention.already_met", product_id=product_id, need=need.value)
+            continue
         owner = OWNER.get(need)
         if owner is None:
             continue
@@ -71,7 +81,7 @@ async def route_attention(session: AsyncSession, product_id: str, *, asked_by: s
         if woken:
             routed.append(need)
 
-    unowned = [n for n in facts.unmet if n not in OWNER]
+    unowned = [n for n in needs if n not in OWNER]
     log.info(
         "attention.routed",
         product_id=product_id,

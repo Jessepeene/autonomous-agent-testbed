@@ -142,7 +142,7 @@ def _compliance_task(idea_id: str) -> Task:
 # --- compliance: validation redirect ------------------------------------------
 
 
-async def test_approved_idea_creates_a_validating_product_not_a_build(
+async def test_approved_idea_creates_a_validating_product_and_commissions_nothing(
     session: AsyncSession, tmp_path: Path
 ) -> None:
     idea_id = await _make_idea(session, "approved-redirect")
@@ -165,9 +165,15 @@ async def test_approved_idea_creates_a_validating_product_not_a_build(
     assert len(products) == 1
     assert products[0].status == ProductStatus.VALIDATING.value
 
+    # Compliance commissions nothing at all, which is what its own name promises.
+    # It used to queue a landing-page build here, in this transaction -- so a build
+    # was started before anyone had judged whether the product was ready for one, and
+    # every page this factory built began that way. What a product is owed is decided
+    # in `supervisor/product_decision.py`; a compliance verdict is "this may be
+    # pursued", not "start work".
     tasks = (await session.execute(select(Task).where(Task.idea_id == idea_id))).scalars().all()
     kinds = {t.kind for t in tasks}
-    assert TaskKind.BUILD_LANDING_PAGE.value in kinds
+    assert TaskKind.BUILD_LANDING_PAGE.value not in kinds
     assert TaskKind.BUILD_MVP.value not in kinds
 
 

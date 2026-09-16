@@ -27,6 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from factory.settings import EngineName
@@ -81,6 +82,7 @@ class ProductFacts:
     """
 
     product_id: str
+    idea_id: str
     name: str
     status: str
 
@@ -123,6 +125,19 @@ class ProductFacts:
         return self.claimed_evidence_count == self.audience_evidence
 
     @property
+    def unmet_signature(self) -> str:
+        """A stable name for *this* configuration of absences.
+
+        What makes a decision worth taking again. Keying the question on a clock means
+        choosing an interval -- too short and a product is nagged about a situation
+        nobody has changed, too long and work that finished hours ago goes unnoticed --
+        and any interval chosen would be a number standing in for a judgement. Keyed on
+        the absences instead, a decision is taken once per state of the product: the
+        world changing *is* the trigger, and a world that has not changed asks nothing.
+        """
+        return "-".join(n.value for n in self.unmet) or "none"
+
+    @property
     def unmet(self) -> tuple[Unmet, ...]:
         """What this product does not have, in the order the gaps compound.
 
@@ -144,6 +159,32 @@ class ProductFacts:
         return tuple(missing)
 
 
+async def product_facts_for_open_products(
+    session: AsyncSession, *, limit: int = 20
+) -> list[ProductFacts]:
+    """Facts for every product still in play, newest first.
+
+    Retired is the one exclusion and it needs no judgement: nobody will look at it
+    again. Bounded because a decision is taken per product per tick and an unbounded
+    sweep is how a cheap check becomes the most expensive thing in the loop.
+    """
+    from factory.state.orm import Product
+    from factory.state.schemas import ProductStatus
+
+    rows = await session.execute(
+        select(Product.id)
+        .where(Product.status != ProductStatus.RETIRED.value)
+        .order_by(Product.created_at.desc())
+        .limit(limit)
+    )
+    out: list[ProductFacts] = []
+    for product_id in rows.scalars().all():
+        facts = await product_facts(session, product_id)
+        if facts is not None:
+            out.append(facts)
+    return out
+
+
 async def product_facts(session: AsyncSession, product_id: str) -> ProductFacts | None:
     """Read every fact about a product. ``None`` when there is no such product.
 
@@ -161,6 +202,7 @@ async def product_facts(session: AsyncSession, product_id: str) -> ProductFacts 
     interest, reach = await repository.product_traction(session, product_id)
     return ProductFacts(
         product_id=product.id,
+        idea_id=idea.id,
         name=product.name,
         status=str(product.status),
         audience_sentence=idea.target_niche,
