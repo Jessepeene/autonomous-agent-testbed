@@ -52,10 +52,26 @@ This page exists for one purpose: to find out whether real people want a product
 that has not been built yet. It is not the product.
 
 **Write criteria about THIS product only.** A standing policy already covers what \
-every page must and must not do -- present-tense product framing, no invented \
-evidence, nothing implying the visitor can buy today, and nothing internal to this \
-factory appearing on the page. It is attached to every build and every review \
-automatically, so you neither need to restate it nor may contradict it.
+every page must and must not do -- present-tense product framing that sells, no \
+invented evidence, nothing internal to this factory on the page, and what the \
+canonical URL may be before a domain is attached. It is attached to every build and \
+every review automatically, so you neither need to restate it nor may contradict it.
+
+Two kinds of criterion are always wrong here, and both have failed real builds:
+
+- Anything about how this company builds, deploys, hosts or reviews a page. \
+Canonical URLs, domains, placeholder hostnames, the deployment target, test \
+coverage, the review process. A build was blocked for three repair cycles by \
+"the canonical URL should point to the real deployed domain" -- which the page \
+cannot possibly satisfy, because the domain is attached after deployment by a \
+person. None of that is a fact about this product and none of it is yours.
+- Anything restating or reversing the standing policy. Another build failed on \
+"the page contains no claim that the product exists", which contradicts the policy \
+requiring exactly that claim. You were given the policy so you would not have to \
+guess at it; guessing produced the opposite of it.
+
+If a rule would be true of every page this factory ever builds, it is policy and \
+not yours to write.
 
 What belongs here is everything specific to this idea: the problem this page has to \
 name, who it must speak to, the actual price, and what a visitor has to be able to \
@@ -184,8 +200,10 @@ async def write_landing_page_requirements(
 #: effect on the next build with nothing to regenerate.
 PAGE_POLICY = """\
 STANDING POLICY. These apply to every page this factory builds and override any \
-criterion below that disagrees with them -- a criterion asking for something \
-forbidden here is a mistake in the criterion, and the policy wins.
+criterion below that disagrees with them. A criterion asking for something this \
+policy forbids, or forbidding something it requires, is a mistake in the criterion: \
+the policy wins, the page is not failing, and **you must not report it as unmet**. \
+Say the criterion contradicts policy instead.
 
 - Nothing internal to this factory appears on the page. Not where the idea came \
 from, not the research or discussion it was drawn from, not links to issue \
@@ -194,11 +212,21 @@ describing its product, with no trace of how the page came to exist.
 - No invented evidence. No testimonials, customer names or logos, user or customer \
 counts, case studies, review scores, awards or press mentions -- each is a \
 fabricated claim about real people.
-- Nothing implies the visitor can buy today. State the price plainly as what it \
-will cost; the page only ever collects an email address.
-- The product is described in the present tense, the way any company describes what \
-it sells. The page never tells the visitor the product does not exist yet, and \
-never describes itself as a test.\
+- **This page sells the product.** Describe it in the present tense the way any \
+company describes what it sells, make the case for it properly, and state the price \
+plainly. Never hedge its existence, never tell the visitor it is not built yet, and \
+never describe the page as a test or an experiment. A page that argues for the \
+product and a page that measures demand are the same page: hedged copy does not \
+produce an honest result, it produces a weak one that nobody responds to.
+- The one thing a visitor can actually do is leave an email address, so that is what \
+the call to action asks for. There is no checkout behind it, and a Buy button that \
+cannot complete a purchase is the single claim here that would be dishonest rather \
+than merely confident.
+- The page does not know its own final address. It is deployed to a Vercel \
+subdomain first and a custom domain is attached afterwards, by a person, so a \
+canonical URL or og:url that is not the eventual public domain is expected and \
+correct at build time. It is never a defect in the page and never something to \
+repair.\
 """
 
 
@@ -256,8 +284,7 @@ HOUSE_STYLE = DesignGuidelines(
     must_hold=[
         "The page loads at least one webfont; a system-font-only stack is not a "
         "typographic choice",
-        "The palette is specific to this product rather than a framework's default "
-        "ramp",
+        "The palette is specific to this product rather than a framework's default " "ramp",
         "Real, specific copy throughout -- never lorem-ipsum or placeholder text",
         "Legible on a phone: no horizontal scrolling, tap targets a thumb can hit",
     ],
@@ -318,9 +345,7 @@ async def requirements_for_product(
     return requirements_from_row(stored) if stored else None
 
 
-async def design_for_product(
-    session: AsyncSession, product_id: str
-) -> DesignGuidelines | None:
+async def design_for_product(session: AsyncSession, product_id: str) -> DesignGuidelines | None:
     """What the Design department decided for this product. ``None`` if nobody wrote it.
 
     The missing half of a loop that was otherwise complete. Design could write

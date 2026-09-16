@@ -65,7 +65,7 @@ def test_policy_states_that_it_overrides_a_criterion() -> None:
     assert "the policy wins" in PAGE_POLICY.lower()
 
 
-def test_the_four_standing_rules_are_all_present() -> None:
+def test_the_standing_rules_are_all_present() -> None:
     """Each of these was a real defect on a real deployed page, not a hypothetical."""
     lowered = PAGE_POLICY.lower()
 
@@ -75,10 +75,26 @@ def test_the_four_standing_rules_are_all_present() -> None:
     # Never shipped, and must not be: the conventional-smoke-test framing Jesse
     # chose makes fabricated social proof the obvious next step, and it is the line.
     assert "testimonial" in lowered
-    # The page collects an email and nothing else.
-    assert "buy today" in lowered
     # Jesse's original finding: "ShardRunner is not available yet."
     assert "present tense" in lowered
+
+    # The page sells. This replaced "nothing implies the visitor can buy today",
+    # which read as a licence to hedge -- Jesse, 2026-09-17: "a validation page
+    # should also kind of function as a sales page". Hedged copy does not produce an
+    # honest measurement, only a weak one nobody responds to.
+    assert "sells the product" in lowered
+    assert "never hedge" in lowered
+
+    # What survives from the old rule, and the only genuinely dishonest claim
+    # available: there is no checkout, so nothing may offer one.
+    assert "email address" in lowered
+    assert "checkout" in lowered
+
+    # A page cannot know the domain it will eventually be served from, because a
+    # person attaches it after deployment. A generated criterion demanding the real
+    # domain burned three repair cycles on run 9 before this was written down.
+    assert "custom domain" in lowered
+    assert "canonical" in lowered
 
 
 def test_a_criterion_contradicting_policy_is_still_visible_to_the_reader() -> None:
