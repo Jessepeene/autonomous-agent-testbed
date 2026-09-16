@@ -191,6 +191,32 @@ async def test_ordering_is_not_written_down_anywhere(session: AsyncSession, tmp_
     assert len(await _tasks_of(session, TaskKind.DESIGN_MANAGE)) == 1
 
 
+async def test_requirements_read_as_pending_work_not_as_a_wall(session: AsyncSession) -> None:
+    """Requirements are written by the builder as its first step.
+
+    Listed among the needs nobody owns, that read as an unclearable blocker: run 8's
+    decider concluded "the product needs a requirements specification... nobody is
+    currently responsible for" it and commissioned nothing. The menu has to say how
+    they actually come to exist, or a decider reasoning "requirements first" -- which
+    is a perfectly sensible order -- stalls the product every time it thinks of it.
+    """
+    from factory.supervisor.product_decision import _render_options
+
+    product_id = await _product(session)
+    facts = await product_facts(session, product_id)
+    assert facts is not None
+    assert Unmet.REQUIREMENTS in facts.unmet
+
+    rendered = _render_options(facts)
+    requirements_line = next(
+        line for line in rendered.splitlines() if line.strip().startswith("- requirements:")
+    )
+    assert "commission the build" in requirements_line
+    # And it must not appear under the heading that says nobody can act on it.
+    nobody_owns = rendered.split("nobody owns it")[-1]
+    assert "- requirements:" not in nobody_owns
+
+
 def test_the_menu_matches_what_can_actually_be_commissioned() -> None:
     """Every need the decider is offered must be one the code can carry out.
 

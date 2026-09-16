@@ -93,13 +93,28 @@ def _render_options(facts: ProductFacts) -> str:
     """
     lines: list[str] = []
     ownable = [n for n in facts.unmet if _pursuable(n)]
-    unowned = [n for n in facts.unmet if not _pursuable(n)]
+    byproduct = [n for n in facts.unmet if n in _PRODUCED_BY]
+    unowned = [n for n in facts.unmet if not _pursuable(n) and n not in _PRODUCED_BY]
 
     if ownable:
         lines.append("Missing, and this company has somebody who can establish it:")
         lines.extend(f"  - {n.value}: {_WHAT[n]}" for n in ownable)
     else:
         lines.append("Nothing this product is missing has an owner who could act on it.")
+
+    # The category that did not exist, and its absence stalled two runs. Requirements
+    # are written by the builder as the first step of a build, so "no requirements" is
+    # not a reason to hold the build -- it is a description of what the build has not
+    # done yet. Listed among the unowned, it read as a blocker nobody could clear, and
+    # deciders concluded the product could not start. Stated plainly it is the
+    # opposite: the way to get these is to commission the work that produces them.
+    if byproduct:
+        lines.append("")
+        lines.append(
+            "Missing, and **not separately commissionable** -- these get written as "
+            "part of other work, so they are never a reason to hold that work back:"
+        )
+        lines.extend(f"  - {n.value}: {_PRODUCED_BY[n]}" for n in byproduct)
 
     if unowned:
         lines.append("")
@@ -109,6 +124,18 @@ def _render_options(facts: ProductFacts) -> str:
         )
         lines.extend(f"  - {n.value}: {_WHAT[n]}" for n in unowned)
     return "\n".join(lines)
+
+
+#: Needs that no department is commissioned for because another piece of work produces
+#: them. Stated in terms of what establishes them, so a decider reads them as progress
+#: pending rather than as a wall.
+_PRODUCED_BY: dict[Unmet, str] = {
+    Unmet.REQUIREMENTS: (
+        "written by the builder as the very first step of a build, from the idea and "
+        "the design standard -- so the way to get acceptance criteria is to commission "
+        "the build, not to wait for them before commissioning it"
+    ),
+}
 
 
 #: What each need actually means, in the decider's terms rather than the schema's.
