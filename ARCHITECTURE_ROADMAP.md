@@ -881,7 +881,9 @@ covered one; and a blocked report with no request no longer becomes a question.
 
 Still open: `effective_design` returning the house style is now *stated* in the brief
 but not at the point of use, and audience remains inferred everywhere with nothing
-marking it as inferred.
+marking it as inferred. Both are taken up by Phase 2.8 below, which is where "stated"
+becomes "usable by something other than a prompt" — the 2026-09-16 investigation found
+that stating an absence in prose had not been enough to make anything act on it.
 
 Every one of those gaps is currently a **silent default**. `effective_design(None)`
 returns the house style and says nothing. `product_brief` states what is known and
@@ -904,6 +906,141 @@ full department and spent its entire life reporting "nothing worth doing" — fi
 because it could not ask, then because it could not see its own products, then
 because its output could not be stored. **Standing up another department before the
 plumbing works repeats that exactly.**
+
+## Phase 2.8 — facts, not stages (added 2026-09-16)
+
+**Status**: proposed. This is what has to be true for Phase 3 to be an architecture
+rather than a longer pipeline.
+
+Jesse, shown a proposal to add a Compliance → Design handoff with a build-side gate:
+*"I feel like we're building a pipeline again instead of an architecture."*
+
+The roadmap had already ruled that out, one section above: *"Development should not
+have to realise it lacks guidance ... that framing avoids the hardcoded gate ('no
+build without guidelines') that would otherwise creep in."* It crept in anyway, one
+day later, proposed by someone who had read that line. Writing the principle down did
+not prevent it, because **nothing in the code makes adding an edge harder than
+declaring a fact**, and an edge is the shorter diff every time.
+
+### The pipeline is in the type system
+
+```python
+class ProductStatus(StrEnum):
+    VALIDATING → PLANNED → BUILDING → REVIEWING → PATCHING → LIVE / RETIRED
+```
+
+A status is a **position on a conveyor**. It cannot express what a product *has*. Two
+products in `VALIDATING` — one with design guidelines, one without — are the same
+state to this model, and that is precisely why nothing noticed the missing ones. Every
+question worth asking about a product ("is it ready to build?", "does anyone know who
+it is for?") is a question about its *contents*, and the state model has no vocabulary
+for contents at all.
+
+This is why the fix keeps coming out as an edge. If the only thing you can say about a
+product is where it sits in the line, then the only thing you can change is the order
+of the line.
+
+### The needs list already exists, and is flattened into prose
+
+`handbook.product_brief` derives exactly the list this phase needs, from rows:
+
+```
+nobody has written what this product must do
+nobody has written how it should look
+it has never been deployed, so nobody has looked at it
+nobody outside the company has seen it
+```
+
+with a comment stating the property that matters — *"derived from rows like everything
+else here, so it cannot claim an absence that is not real."* Then the next line joins
+them into an English sentence for a prompt.
+
+Phase 2.7 made absence visible. It is visible **as prose, to a language model**.
+Nothing else can act on it, wait on it, count it, or report it — the same shape as
+`check_business_health` computing real concerns and stringifying their count.
+
+So this phase is not a new subsystem. The predicates exist and are already correct.
+They need names and a reader that is not a prompt.
+
+### What tracing the 2026-09-15 run showed (traced 2026-09-16)
+
+- **Three cross-engine handoffs exist in the entire company**: Compliance →
+  Development, Development → Marketing, Supervisor → Development. Every single one of
+  Design's task enqueues is Design → Design. **Design has no inbox. It has a
+  calendar.**
+- `WRITE_DESIGN_GUIDELINES` exists, works, and can only ever be commissioned by
+  Design's own 24-hour tick deciding to commission it.
+- The Design manager **did** run, at 00:00:07, and `design_domain` already computes
+  which products lack guidelines — so it could see the gap. It commissioned nothing,
+  and **that was the correct call**: the page had been built, reviewed, repaired and
+  closed 1h34m earlier. Guidelines written for a shipped page are documentation, not
+  direction. *Design's judgement was right; its position in time was wrong.* That is a
+  fourth reason this department has never produced anything, and unlike the first
+  three it cannot be fixed by making Design better at its job.
+- The page was generated **once** and repaired **eight times**. Reading this run as
+  "the page keeps being regenerated" was wrong, and it sent the first day of
+  investigation at the generator instead of the repair loop.
+- The only artefact in Development actually named a *design brief*
+  (`development/design_brief.py`) is generated **from the deployed page, after it
+  ships**, for the dashboard. The company writes its design brief by looking at what
+  it already built.
+
+### The shape
+
+- **Facts are first-class.** Has requirements, has design guidelines, has an audience,
+  is deployed, has reach, has open issues. Already derived — stop flattening them.
+- **Owners are structure; sequence is not.** "Design writes guidelines" is a fact about
+  the org and belongs in code. "Design runs after Compliance and before Development" is
+  the conveyor and belongs nowhere.
+- **A manager decides; a resolver does not fire.** The load-bearing rule. If unmet
+  facts mechanically trigger work, the conveyor has been rebuilt in a new notation with
+  extra steps. It must stay a judgement — *including* the judgement that house style is
+  right for this product, which then becomes a recorded decision and makes the
+  builder's "decided by the design department for this specific product" label true
+  for the first time.
+- **Status becomes derived, not assigned.** `LIVE` is a summary of facts, not a step
+  someone set. Honest caveat: status is written throughout the codebase, so this is the
+  large half. Facts can land alongside status first and status can stay authoritative
+  until they have proven themselves.
+- **A need must be satisfiable by deciding not to meet it**, or the system deadlocks
+  the first time something is genuinely not worth doing.
+
+### The test that tells the two apart
+
+Jesse's own example is the acceptance criterion. Audience understanding does not exist
+today — `design/work.py` reads `audience = idea.target_niche if idea else "unknown"`,
+one sentence carried from Discovery.
+
+**Adding "we need to know our audience" should cost one fact and one owner. If it costs
+an edit to a sequence, this phase was not built.**
+
+### Which of the four 2026-09-16 findings this subsumes
+
+| Finding | Subsumed? |
+|---|---|
+| The served landing-page prompt was four weeks stale | **No.** Independent infrastructure defect — a bootstrap copy served forever while the code moved on. Fixed at the read (`get_prompt` resolves by provenance); see BUG_LOG. Nothing organisational about it. |
+| Design is not in the build chain | **Yes** — and correctly, via Phase 3 judging the product not ready rather than via a gate. This phase is what lets that judgement be expressed without an edge. |
+| The house-style fallback is labelled as a decision | **Yes**, and cleanly: once house style only ever reaches a builder through an explicit decision, the label stops being a lie. One change closes two findings. |
+| The repair loop cannot verify what it was sent to fix | **No.** See below. |
+
+### What this does not fix, and must be fixed separately
+
+Every branch of the repair objective in `development/repair.py` ends *"Verify your
+change with exactly this command"* — the test suite. A missing webfont and a framework
+default palette are invisible to it. The suite passed before the eight repair attempts
+and after them, so the loop produced eight confirmations of success against a defect it
+could not measure. `repair.py` contains no reference to design guidelines at all.
+
+Phase 3 makes this matter *less*, by getting the page built to a real standard the
+first time. It does not fix it: any design defect found after a build hits the same
+wall, and the loop will keep reporting success. **A repair loop whose finish line
+cannot see the defect is its own bug**, in the same family as every other finding here
+— the success criterion does not measure the goal.
+
+Related and also unfixed: the landing-page prompt's palette ban names **Tailwind** and
+forbids its ramp by hex value; the page that triggered this investigation used
+**Bootstrap**. The ban was written against the last failure rather than the general
+case, which is the scaffolding-instead-of-judgement pattern in miniature.
 
 ## Phase 3 — Product / Management (absorbs the general manager)
 
@@ -1039,15 +1176,20 @@ commission nothing.** Design proved that over its entire life.
    assumes a department can be reached and can reach others.
 2. **Absence is visible** (Phase 2.7). Cheap, no new roles, and it is what lets any
    decider notice it is missing a standard rather than silently accept a default.
-3. **Product / Management** (Phase 3), absorbing the general manager. Closes four of
+3. **Absence is a fact, not a sentence** (Phase 2.8). The same predicates, readable by
+   something other than a prompt. Without it Phase 3 has nothing to judge *on*, and
+   every gap it finds will be closed by adding one more edge.
+4. **Product / Management** (Phase 3), absorbing the general manager. Closes four of
    the five gaps the live run exposed.
-4. **Customer Support / Success** (Phase 2.6), then a **Marketing manager**, then
+5. **Customer Support / Success** (Phase 2.6), then a **Marketing manager**, then
    **Discovery** (Phase 4).
 
 Independent of all of it, and not blocked by any of it: the `accepted_issues` defect
 from the 2026-09-15 run. A release judge that accepts a known flaw and is overruled
 by the next pass makes "done" unreachable, which is the exact failure the four-way
-release judgement was built to escape.
+release judgement was built to escape. Joining it as of 2026-09-16: the repair loop
+verifying every fix with a test command that cannot observe a design defect, which
+belongs to no department and blocks no phase.
 
 ## Handover: how the current system gives way
 
