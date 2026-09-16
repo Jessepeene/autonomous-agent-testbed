@@ -94,6 +94,75 @@ async def bootstrap_active(
     return existing.id
 
 
+async def resync_bootstrap(
+    session: AsyncSession,
+    *,
+    kind: str,
+    key: str,
+    value: dict[str, Any],
+    target_metric: str,
+    stale: TunableParameter,
+) -> str:
+    """Supersede a never-learned-on bootstrap row whose code constant has since changed.
+
+    ``bootstrap_active`` seeds version 1 as a *copy* of the code constant, and being a
+    copy is that row's entire claim to authority — it was never proposed, never
+    trialled, never measured against anything. So when the constant it copied is
+    edited, the copy is simply out of date, and continuing to serve it means serving
+    instructions the code no longer gives.
+
+    That is not hypothetical. ``LANDING_PAGE_SYSTEM`` served a 3,904-character August
+    snapshot for four weeks while the code constant grew to 8,133, so every landing
+    page was built without the design direction the code had been given — and was then
+    reviewed against exactly the direction the builder was never shown.
+
+    A *learned* version is the opposite case and is never touched here: it differs from
+    the code deliberately, because it beat the alternative on its target metric.
+
+    Supersedes rather than overwrites. The stale row is retired with its value intact,
+    so the ``learning_episodes`` already recorded against its id still describe the text
+    those episodes actually ran on. ``parent_id`` is deliberately left unset: the new
+    row descends from the code constant, not from the row it replaces, and that is also
+    what keeps it eligible to be re-synced again the next time the constant moves.
+    """
+    assert_mutable(key)
+    now = datetime.now(UTC)
+    version = await _next_version(session, key)
+    await session.execute(
+        update(TunableParameter)
+        .where(TunableParameter.id == stale.id)
+        .values(
+            status="retired",
+            retired_at=now,
+            retired_reason=f"code constant changed; re-bootstrapped as version {version}",
+        )
+    )
+    row = TunableParameter(
+        kind=kind,
+        key=key,
+        value=value,
+        version=version,
+        status="active",
+        target_metric=target_metric,
+        rationale=(
+            f"re-bootstrapped from the code constant, which changed after version "
+            f"{stale.version} copied it"
+        ),
+        created_by="bootstrap",
+        promoted_at=now,
+    )
+    session.add(row)
+    await session.flush()
+    log.warning(
+        "learning.bootstrap_resynced",
+        key=key,
+        retired_version=stale.version,
+        new_version=version,
+        tunable_parameter_id=row.id,
+    )
+    return row.id
+
+
 async def _next_version(session: AsyncSession, key: str) -> int:
     stmt = select(func.coalesce(func.max(TunableParameter.version), 0)).where(
         TunableParameter.key == key

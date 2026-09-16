@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from factory.learning import store
@@ -74,8 +75,170 @@ async def test_a_second_read_returns_the_stored_value_not_the_default(
     )
     await session.commit()
 
-    text, _ = await get_prompt(session, key=_KEY, default="a different default")
+    text, _ = await get_prompt(session, key=_KEY, default="original")
     assert text == "original"
+
+
+# --- get_prompt: the code constant is re-read, not only seeded --------------------
+#
+# A bootstrap row is a *copy* of the code constant and has no other claim on being
+# served. Until 2026-09-16 the copy was made once and never compared again, so editing
+# the constant left the old copy serving forever: LANDING_PAGE_SYSTEM served a
+# 3,904-char August snapshot while the code grew to 8,133, and every landing page was
+# built without design direction it was then reviewed against. Which text wins is
+# decided by provenance -- a copy follows the code, a trial winner outranks it.
+
+
+async def test_a_stale_bootstrap_row_is_resynced_when_the_code_constant_changes(
+    session: AsyncSession,
+) -> None:
+    from factory.learning.prompts import get_prompt
+
+    stale_id = await store.bootstrap_active(
+        session,
+        kind="PROMPT",
+        key=_KEY,
+        value={"text": "the August copy"},
+        created_by="bootstrap",
+        target_metric="outreach_content_pass_rate",
+    )
+    await session.commit()
+
+    text, version_id = await get_prompt(session, key=_KEY, default="the edited constant")
+    await session.commit()
+
+    assert text == "the edited constant"
+    assert version_id != stale_id
+
+    stale = await session.get(TunableParameter, stale_id)
+    assert stale is not None
+    assert stale.status == "retired"
+    # Retired with its value intact: the episodes already recorded against this id
+    # still describe the text they actually ran on.
+    assert stale.value == {"text": "the August copy"}
+
+    fresh = await session.get(TunableParameter, version_id)
+    assert fresh is not None
+    assert fresh.status == "active"
+    assert fresh.version == stale.version + 1
+    # Still a copy of the code, so still eligible to follow the next edit.
+    assert fresh.created_by == "bootstrap"
+    assert fresh.parent_id is None
+
+
+async def test_a_pending_candidate_defers_the_resync(session: AsyncSession) -> None:
+    from factory.learning.prompts import get_prompt
+
+    active_id = await store.bootstrap_active(
+        session,
+        kind="PROMPT",
+        key=_KEY,
+        value={"text": "the text the candidate was written against"},
+        created_by="bootstrap",
+        target_metric="outreach_content_pass_rate",
+    )
+    await store.insert_candidate(
+        session,
+        key=_KEY,
+        kind="PROMPT",
+        value={"text": "an edit to that text"},
+        rationale="x" * 30,
+        created_by="agent:analyst",
+        parent_id=active_id,
+        target_metric="outreach_content_pass_rate",
+    )
+    await session.commit()
+
+    text, version_id = await get_prompt(session, key=_KEY, default="an edited constant")
+    await session.commit()
+
+    # The candidate is a proposed edit *to this row*. Retiring it now would leave the
+    # trial comparing a pair that never coexisted, so the re-sync waits for the
+    # candidate to resolve rather than rebasing underneath it.
+    assert text == "the text the candidate was written against"
+    assert version_id == active_id
+    parent = await session.get(TunableParameter, active_id)
+    assert parent is not None and parent.status == "active"
+
+
+async def test_a_learned_version_outranks_a_changed_code_constant(
+    session: AsyncSession,
+) -> None:
+    from factory.learning.prompts import get_prompt
+
+    active_id = await store.bootstrap_active(
+        session,
+        kind="PROMPT",
+        key=_KEY,
+        value={"text": "v1"},
+        created_by="bootstrap",
+        target_metric="outreach_content_pass_rate",
+    )
+    trial_id = await store.insert_candidate(
+        session,
+        key=_KEY,
+        kind="PROMPT",
+        value={"text": "the version that won its trial"},
+        rationale="x" * 30,
+        created_by="agent:analyst",
+        parent_id=active_id,
+        target_metric="outreach_content_pass_rate",
+    )
+    await store.confirm_trial(session, trial_id, numerator=40, denominator=100)
+    await session.commit()
+
+    text, version_id = await get_prompt(session, key=_KEY, default="an edited constant")
+    await session.commit()
+
+    assert text == "the version that won its trial"
+    assert version_id == trial_id
+    winner = await session.get(TunableParameter, trial_id)
+    assert winner is not None and winner.status == "active"
+
+    # ...and the drift is escalated rather than absorbed, because nothing written into
+    # the code constant since the trial is reaching production.
+    from factory.state.orm import Interrupt
+
+    interrupts = list((await session.execute(select(Interrupt))).scalars().all())
+    assert [i.subject for i in interrupts] == [f"{_KEY} has drifted from the code constant"]
+
+
+async def test_a_trial_in_flight_is_not_disturbed_by_a_changed_code_constant(
+    session: AsyncSession,
+) -> None:
+    from factory.learning.prompts import get_prompt
+
+    active_id = await store.bootstrap_active(
+        session,
+        kind="PROMPT",
+        key=_KEY,
+        value={"text": "v1"},
+        created_by="bootstrap",
+        target_metric="outreach_content_pass_rate",
+    )
+    trial_id = await store.insert_candidate(
+        session,
+        key=_KEY,
+        kind="PROMPT",
+        value={"text": "the version being tried"},
+        rationale="x" * 30,
+        created_by="agent:analyst",
+        parent_id=active_id,
+        target_metric="outreach_content_pass_rate",
+    )
+    await store.promote_eligible_candidates(session, cooldown_hours=0, trial_days=7)
+    await session.commit()
+
+    text, version_id = await get_prompt(session, key=_KEY, default="an edited constant")
+    await session.commit()
+
+    # Re-bootstrapping the active row underneath a running trial would move the
+    # control it is being measured against, so nothing is rewritten while one runs.
+    assert text == "the version being tried"
+    assert version_id == trial_id
+    parent = await session.get(TunableParameter, active_id)
+    assert parent is not None and parent.status == "active"
+    assert parent.value == {"text": "v1"}
 
 
 # --- get_scoring_weights: dimension-mismatch guardrail (Phase 4) -------------------
@@ -144,6 +307,37 @@ async def test_get_scoring_weights_falls_back_on_a_dimension_mismatch(
 
     assert weights == new_default  # the code default, not the stale served row
     assert tunable_parameter_id is not None  # still identifies the drifted row
+
+
+async def test_get_scoring_weights_resyncs_a_stale_bootstrap_copy(
+    session: AsyncSession,
+) -> None:
+    """The same provenance rule as prompts: matching dimensions but different numbers
+    is drift, not a broken contract, so a never-learned-on copy follows the code."""
+    from factory.learning.prompts import get_scoring_weights
+    from factory.state.schemas import ScoredIdea
+
+    default = ScoredIdea.default_weights()
+    old = {dim: 1.0 for dim in default}
+    assert old != default, "this test needs the code defaults to not already be all-1.0"
+
+    stale_id = await store.bootstrap_active(
+        session,
+        kind="SCORING_WEIGHTS",
+        key=_WEIGHTS_KEY,
+        value=old,
+        created_by="bootstrap",
+        target_metric="idea_survival_rate",
+    )
+    await session.commit()
+
+    weights, version_id = await get_scoring_weights(session, key=_WEIGHTS_KEY, default=default)
+    await session.commit()
+
+    assert weights == default
+    assert version_id != stale_id
+    stale = await session.get(TunableParameter, stale_id)
+    assert stale is not None and stale.status == "retired"
 
 
 async def test_concurrent_bootstrap_creates_only_one_row(session: AsyncSession) -> None:

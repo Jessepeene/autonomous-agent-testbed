@@ -1525,6 +1525,19 @@ constant needs its own migration to reach an already-bootstrapped
 database**, the same way a schema change needs a migration to reach
 already-existing rows.
 
+> **Superseded 2026-09-16 — see the second entry 31, "The builder was judged
+> for four weeks against design direction it was never given."** The conclusion
+> above is wrong on both halves and this entry should not be followed. The
+> procedural rule failed the very next time it was tested: `LANDING_PAGE_SYSTEM`
+> was edited from 3,904 to 8,133 characters with no migration, and every landing
+> page for four weeks was built from the old text and then failed for not
+> matching the new one. A code-side fix *was* possible — it looked impossible
+> only because this entry framed the choice as "overwrite live rows" versus
+> "never touch them". The actual question is what a value's claim to being
+> served is, and the row already answers it: `created_by='bootstrap'` with no
+> `parent_id` is a copy of the code and follows it; a promoted trial winner
+> outranks it. `get_prompt` now makes that comparison on every read.
+
 ---
 
 ## 20. 40 identical provider-outage escalations mislabeled as legal review, spamming past the dedup guard
@@ -2107,3 +2120,90 @@ completes. **Confirmed the test fails with the guard removed** rather than
 assuming it: `assert True is False`.
 
 **Status**: Fixed and deployed 2026-09-15.
+
+---
+
+## 31. The builder was judged for four weeks against design direction it was never given
+
+**Found**: 2026-09-16, chasing a question that had nothing to do with tunables:
+"why does the page get regenerated over and over again not meeting the
+requirement?" Product A's validation page kept being rebuilt, kept coming back
+with a framework-stock palette and no webfont, kept being failed by the gap
+check for exactly that, and ended in `rethink` after exhausting its heal cycles.
+Every earlier look had gone at the *judge* — were the requirements too strict,
+was the tier wrong, was the Council over-filing. The judge was right. The
+builder had never been told.
+
+**Severity**: Silent, total, and four weeks long. `LANDING_PAGE_SYSTEM` in the
+code is 8,133 characters and includes the instructions that matter for exactly
+this failure — "design it for this specific product, and say so before you
+build", "ground the look in the buyer's own world", "link real typefaces from
+Google Fonts", and an explicit ban on Tailwind's stock ramp by hex value. The
+version actually served to every build since 2026-08-20 was 3,904 characters and
+contained **none** of them. Checked directly rather than inferred: the served
+text contains no occurrence of `Tailwind`, `#64748b`, `fonts.googleapis`,
+`stock palette`, or `webfont`.
+
+Every regeneration re-read the same stale version (`development/graph.py:1194`,
+inside `_patch`), so the repair loop could not converge by construction: build
+without the instruction, fail the check that enforces the instruction, rebuild
+without the instruction. Five of the factory's seven tunables were fine —
+`LANDING_PAGE_SYSTEM` was the only one whose code constant had been edited since
+its bootstrap, which is why nothing else showed the symptom.
+
+**Root cause**: this is entry 19, still open. That entry found the mechanism
+exactly right on 2026-08-24 — `bootstrap_active` copies the code constant into
+the database once, and `get_prompt` serves the copy forever — and then closed
+with the wrong conclusion:
+
+> "No code-side fix is possible or desirable here: the correct general fix is
+> procedural... any future change to a tunable prompt constant needs its own
+> migration to reach an already-bootstrapped database."
+
+Both halves were wrong. The procedural rule failed the first time it was tested:
+`LANDING_PAGE_SYSTEM` was edited with no accompanying migration and nobody
+noticed for four weeks. And a code-side fix *was* possible — it was ruled out by
+framing the choice as "overwrite live rows" versus "never touch them", when the
+real question is what each value's claim to being served actually is. The rows
+already carry that: `created_by='bootstrap'` with no `parent_id` means the value
+is a copy of the code and has no other authority, while a promoted trial winner
+differs from the code deliberately and has evidence behind it. Two different
+facts had been held as one.
+
+The same blind spot shows up one function lower. `get_scoring_weights` has always
+compared its served row against the caller's `default` — but only for the
+*dimension set*, because a mismatched weights dict corrupts a score loudly. A
+stale prompt just quietly produces worse work, so nobody built the check on the
+side where it was invisible.
+
+**Affected**: `src/factory/learning/prompts.py`, `src/factory/learning/store.py`.
+Symptomatically: every landing page built between 2026-08-20 and 2026-09-16.
+
+**Fix**: `get_prompt` and `get_scoring_weights` now compare the served value
+against the code constant on **every** call — they were already being handed it —
+and resolve a disagreement by provenance rather than precedence:
+
+- a bootstrap copy follows the code, via `store.resync_bootstrap`, which
+  supersedes rather than overwrites so that `learning_episodes` already recorded
+  against the old id still describe the text those episodes actually ran on;
+- a learned version outranks the code and keeps serving, but raises a
+  `DATA_INTEGRITY` interrupt, because the code's new intent is not reaching
+  production and nobody downstream can tell;
+- either way the re-sync waits while a candidate or trial is open on the key,
+  since both were authored as edits *to the value being replaced* — rebasing
+  underneath them would leave the trial comparing a pair that never coexisted.
+
+No migration, and none needed for the next prompt edit either. The check that
+caught entry 19 was a hand-written test comparing one key's DB text to one code
+constant; this is that same comparison, for every key, on every read.
+
+**Verification**: `tests/integration/test_learning_store.py`, 25 passing — a
+stale bootstrap row is superseded and the retired row keeps its old value; a
+learned version outranks a changed constant and escalates; a running trial and a
+pending candidate each defer the re-sync; weights take the same path. One
+pre-existing test had to change: `test_a_second_read_returns_the_stored_value_not_the_default`
+asserted the defect — it bootstrapped one text and asserted a *different* code
+default lost — and its real intent (a learned value beats the default) is now
+covered explicitly.
+
+**Status**: Fixed 2026-09-16.
