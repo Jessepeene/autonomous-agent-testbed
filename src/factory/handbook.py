@@ -33,7 +33,29 @@ from __future__ import annotations
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from factory.agents.roles import CALL_SITE_SCOPED_ROLES, ROLES
+from factory.facts import Unmet, product_facts
 from factory.settings import Settings, get_settings
+
+#: **What is not known, stated as plainly as what is.**
+#:
+#: A brief listing only what exists cannot distinguish "nobody has researched this
+#: audience" from "this audience is thoroughly understood" — both produce a brief with
+#: no audience section, and a decider reading it has no way to tell. Every gap found
+#: across five live runs had that shape: a silent default reaching a decision as though
+#: it were a finding.
+#:
+#: The *facts* live in `factory.facts`; these are one reader's phrasing of them. A
+#: manager scanning ten products needs a sentence, so the sentence is written here
+#: rather than in the fact itself — a different reader (a dashboard column, a test, a
+#: future Product department deciding what to commission) needs the name, not the
+#: prose, and would otherwise have to parse English back into a predicate.
+_UNMET_PROSE: dict[Unmet, str] = {
+    Unmet.AUDIENCE: "nobody has established who this is for beyond one inferred sentence",
+    Unmet.REQUIREMENTS: "nobody has written what this product must do",
+    Unmet.DESIGN_GUIDELINES: "nobody has written how it should look",
+    Unmet.DEPLOYMENT: "it has never been deployed, so nobody has looked at it",
+    Unmet.REACH: "nobody outside the company has seen it",
+}
 
 #: How departments actually hand work to each other, and who owns what.
 #:
@@ -275,8 +297,12 @@ async def product_dossier(session: AsyncSession, product_id: str) -> str:
             "",
             "## Known open issues",
             "None recorded."
-            + ("" if reviewed else " Nothing has ever reviewed this product, so read "
-               "that as 'unexamined' rather than 'clean'."),
+            + (
+                ""
+                if reviewed
+                else " Nothing has ever reviewed this product, so read "
+                "that as 'unexamined' rather than 'clean'."
+            ),
         ]
     else:
         lines += ["", "## Known open issues"]
@@ -309,48 +335,40 @@ async def product_brief(session: AsyncSession, product_id: str) -> str:
     whether anyone wants it, whether there is anything to look at, and whether it is
     already known to be broken. Everything else is a reason to open the dossier.
     """
-    from factory.state import repository
-
-    pair = await repository.get_product_with_idea(session, product_id)
-    if pair is None:
+    facts = await product_facts(session, product_id)
+    if facts is None:
         return f"- {product_id}: no such product."
-    product, idea = pair
 
-    interest, reach = await repository.product_traction(session, product_id)
-    open_issues = await repository.open_issues_for(session, product_id)
-
-    # **What is not known, stated as plainly as what is.**
-    #
-    # A brief that lists only what exists cannot distinguish "nobody has researched
-    # this audience" from "this audience is thoroughly understood" -- both produce a
-    # brief with no audience section, and a decider reading it has no way to tell.
-    # Every one of the gaps found across four live runs had this shape: a silent
-    # default reaching a decision as though it were a finding.
-    #
-    # Derived from rows like everything else here, so it cannot claim an absence that
-    # is not real.
-    unknowns: list[str] = []
-    if await repository.live_requirements(session, "product", product_id) is None:
-        unknowns.append("nobody has written what this product must do")
-    if await repository.live_design_guidelines(session, product_id) is None:
-        unknowns.append("nobody has written how it should look")
-    if not product.deploy_url:
-        unknowns.append("it has never been deployed, so nobody has looked at it")
-    if reach == 0:
-        unknowns.append("nobody outside the company has seen it")
-
-    return "\n".join(
-        [
-            f"- {product.id}  {product.name}",
-            f"    for: {idea.target_niche}",
-            f"    status: {product.status}, "
-            + (f"deployed at {product.deploy_url}" if product.deploy_url else "nothing deployed"),
-            f"    wanted: {interest} confirmed interest signal(s) after {reach} approach(es)"
-            + (" -- nobody has been told about it yet" if reach == 0 and interest == 0 else ""),
-            f"    known problems: {len(open_issues)} open issue(s)",
-        ]
-        + ([f"    NOT known: {'; '.join(unknowns)}"] if unknowns else [])
-    )
+    # Derived once, in `facts.product_facts`, so that every reader gets the same answer
+    # to "does this have design guidelines" -- the builder and the reviewer holding
+    # slightly different derivations of the same question is how a page came to be
+    # built to one standard and judged against another.
+    lines = [
+        f"- {facts.product_id}  {facts.name}",
+        f"    for: {facts.audience_sentence}",
+        f"    status: {facts.status}, "
+        + (f"deployed at {facts.deploy_url}" if facts.is_deployed else "nothing deployed"),
+        f"    wanted: {facts.interest} confirmed interest signal(s) after "
+        f"{facts.reach} approach(es)"
+        + (
+            " -- nobody has been told about it yet"
+            if facts.reach == 0 and facts.interest == 0
+            else ""
+        ),
+        f"    known problems: {facts.open_issues} open issue(s)",
+    ]
+    if facts.unmet:
+        lines.append(f"    NOT known: {'; '.join(_UNMET_PROSE[u] for u in facts.unmet)}")
+    # A tally its own rows cannot support is not a fact about the product, so it is
+    # stated separately rather than folded into `NOT known`: a decider told "2 pieces
+    # of evidence" should know it cannot read any of them.
+    if not facts.evidence_count_is_trustworthy:
+        lines.append(
+            f"    CAUTION: the idea claims {facts.claimed_evidence_count} piece(s) of "
+            f"evidence but {facts.audience_evidence} are stored, so nothing downstream "
+            "can read what it rests on"
+        )
+    return "\n".join(lines)
 
 
 async def brief_products(session: AsyncSession, product_ids: list[str], *, limit: int = 10) -> str:
