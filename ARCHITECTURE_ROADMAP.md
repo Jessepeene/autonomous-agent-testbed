@@ -1042,6 +1042,77 @@ forbids its ramp by hex value; the page that triggered this investigation used
 **Bootstrap**. The ban was written against the last failure rather than the general
 case, which is the scaffolding-instead-of-judgement pattern in miniature.
 
+### Correction, 2026-09-17: a gap list is a diagnostic, not a plan
+
+Everything above is right about *facts* and wrong about *what to do with them*. Four
+live runs found it, and Jesse's question is what named it: **"let's say this logic
+emerges in a human team — how would they solve it, or how would this problem not come
+up in the first place?"**
+
+**A human team never asks "what is missing?"** Nobody sits down and enumerates *this
+product lacks audience research, requirements, design guidelines, deployment and market
+reach; which of these has an owner?* They start from the goal and step back once — we
+want to know if bakers will pay, so bakers need to see something, so someone has to
+make a page, so we need to know what it says — and then they do the first thing.
+
+The question a human asks is **"what is the next thing I can actually do?"** The
+question Phase 2.8 built asks **"what is absent, and who owns it?"** Those look alike
+and are not: *a list of absences has no direction, and a goal has an arrow.*
+
+#### The specific defect
+
+`Unmet` silently mixes two kinds of thing:
+
+- **Means** — design guidelines, requirements, a built page. Things you do.
+- **Ends** — reach, interest. The reason you are doing any of it.
+
+Presented as one flat list of equivalent gaps, the objective becomes indistinguishable
+from an obstacle. Run 10's decider, verbatim: *"the more urgent blocker is that nobody
+outside the company has encountered this product yet."* It treated the goal as a
+blocker, and that sentence is impossible in a human team — nobody says "we are blocked
+on having customers". You are blocked on what stands between you and customers.
+
+The third piece is ownership. In a company, *"nobody owns X"* is a **staffing
+observation raised upward**, not a reason today's work cannot proceed; a designer does
+not down tools because there is no data analyst. `_render_options` told the decider
+*"you cannot pursue these"*, and a reasonable decider concluded the product was stuck.
+An unownable need is a fact about the company and does not belong in a decision about a
+product at all.
+
+#### Why this produced special-casing, which is the tell
+
+Three runs stalled on three different needs, each read as an unclearable wall:
+`requirements` (run 8), `deployment` (run 7, a menu bug), `reach` (run 10). Each was
+fixed by annotating that one need with its causal story — "requirements come out of the
+build", "reach needs something deployed". That is **reconstructing, one entry at a
+time, the direction a goal would have supplied for free**, and Jesse called it before
+run 10 finished: *"I feel like we're hardcoding a lot again."*
+
+The variance is the evidence. Runs 7, 8, 9 and 10 saw near-identical facts and chose
+three different orderings, because from a flat list of absences there is no reason to
+prefer any order. That is also what makes *"the system should be smart enough to know
+design needs to finish before dev"* mechanical rather than hopeful: with a goal and a
+sense of what is possible now, ordering falls out.
+
+#### What changes, and what does not
+
+**Keeps**: `ProductFacts`, `Unmet`, `OWNER`, the inbox, and everything about deriving
+absence from rows rather than prose. The diagnostic is good and it is what made all of
+this visible.
+
+**Changes**: what the decider is asked. Not *"which unmet needs will you pursue"* but
+*"this product exists to find out whether bakery owners will pay for it; here is what
+it has and what is possible right now — what is the next thing worth doing?"*
+
+- Ends are stated as the goal, never listed as gaps to close.
+- Needs nobody owns are reported upward as a staffing gap, not offered as options.
+- What is *possible now* is distinct from what is *absent* — a page cannot be reached
+  before it is built, and that is physics rather than a priority.
+
+The line to hold, and it is a fine one: **a physical prerequisite is a fact and may be
+encoded; a priority is a judgement and may not.** "Reach requires something deployed"
+is the former. "Design before development" is the latter, and stays the decider's call.
+
 ## Phase 3 — Product / Management (absorbs the general manager)
 
 **Rewritten 2026-09-15.** This was "a second department manager, most likely
@@ -1178,7 +1249,10 @@ commission nothing.** Design proved that over its entire life.
    decider notice it is missing a standard rather than silently accept a default.
 3. **Absence is a fact, not a sentence** (Phase 2.8). The same predicates, readable by
    something other than a prompt. Without it Phase 3 has nothing to judge *on*, and
-   every gap it finds will be closed by adding one more edge.
+   every gap it finds will be closed by adding one more edge. **Read its 2026-09-17
+   correction before building on it**: the facts are right, and asking a decider to
+   plan from a flat list of absences is not — a gap list is a diagnostic, and work is
+   organised from a goal.
 4. **Product / Management** (Phase 3), absorbing the general manager. Closes four of
    the five gaps the live run exposed.
 5. **Customer Support / Success** (Phase 2.6), then a **Marketing manager**, then
