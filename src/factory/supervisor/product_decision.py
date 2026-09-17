@@ -178,7 +178,23 @@ _WHAT: dict[Unmet, str] = {
         "nobody has decided how it should look; a builder starting now would use the "
         "generic house style, which is instructions to decide rather than a decision"
     ),
-    Unmet.DEPLOYMENT: "nothing has been built or deployed, so there is nothing to look at",
+    # States what a build reads and what it writes, because the decider has to know
+    # that to reason about order at all. Run 11 concluded the design guidelines "are
+    # inputs that the builder will generate as part of building" -- true of the
+    # acceptance criteria, false of the design standard, which a build *reads* and
+    # silently falls back to the generic house style when it is absent. On that
+    # conflation it commissioned the build alongside the design work instead of after
+    # it, and the page came out generic.
+    #
+    # This is a fact about what consumes what, not a priority: "build only after design"
+    # stays a judgement, and a house style that genuinely suits a product is a perfectly
+    # good reason to decide the other way.
+    Unmet.DEPLOYMENT: (
+        "nothing has been built or deployed, so there is nothing to put in front of "
+        "anyone. A build writes its own acceptance criteria first, then generates the "
+        "page -- and it *reads* the design standard rather than producing one, falling "
+        "back to the generic house style if none has been decided yet"
+    ),
     Unmet.REACH: "nobody outside the company has seen it",
 }
 
