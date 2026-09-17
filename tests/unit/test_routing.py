@@ -102,6 +102,48 @@ def test_deterministic_route_is_ambiguous_for_an_unranked_engine() -> None:
     assert routing.deterministic_route(snapshot) is None
 
 
+def test_every_engine_is_ranked() -> None:
+    """The rule, not another instance of it.
+
+    An engine missing from PRIORITY is invisible to the deterministic scan: work
+    queued only for it falls through, returns None, and turns every tick into an LLM
+    call that routes wherever the model happens to look. It has now happened twice --
+    SUPERVISOR, fixed with a test covering SUPERVISOR, and then DESIGN, which was
+    created as a department eight days later and never added here.
+
+    Writing the regression test for the *value* rather than the *rule* is what let the
+    identical bug come back wearing a different name. This asserts the rule.
+    """
+    assert set(routing.PRIORITY) == set(EngineName), (
+        "every EngineName must appear in PRIORITY; missing: "
+        f"{sorted(e.value for e in set(EngineName) - set(routing.PRIORITY))}"
+    )
+    assert len(routing.PRIORITY) == len(set(routing.PRIORITY)), "no engine may be ranked twice"
+
+
+def test_design_outranks_development_because_development_consumes_its_output() -> None:
+    """A queued design task is a standard a builder is about to work without.
+
+    Run 11: the supervisor commissioned guidelines and a build in the same decision,
+    Development was serviced immediately and Design eighteen minutes later, so the
+    page was built to the generic house style and then failed for not matching the
+    standard that arrived afterwards.
+    """
+    snapshot = _snapshot(pending_by_engine={"design": 1, "development": 1}, pending_tasks_total=2)
+    decision = routing.deterministic_route(snapshot)
+    assert decision is not None
+    assert decision.target_engine is EngineName.DESIGN
+
+
+def test_design_only_pending_work_routes_deterministically() -> None:
+    """The case that actually broke: design work and nothing else queued."""
+    snapshot = _snapshot(pending_by_engine={"design": 3}, pending_tasks_total=3)
+    decision = routing.deterministic_route(snapshot)
+    assert decision is not None
+    assert decision.target_engine is EngineName.DESIGN
+    assert decision.next_action is NextAction.ROUTE
+
+
 def test_supervisor_only_pending_work_routes_deterministically_not_ambiguous() -> None:
     """Regression test: SUPERVISOR was previously absent from PRIORITY, so
     maintenance-only pending work (a common, not rare, steady state) always
@@ -122,9 +164,7 @@ def test_supervisor_ranks_last_behind_every_revenue_bearing_engine() -> None:
     assert decision is not None
     assert decision.target_engine is EngineName.FINANCE
 
-    only_supervisor_and_discovery = _snapshot(
-        pending_by_engine={"supervisor": 5, "discovery": 1}
-    )
+    only_supervisor_and_discovery = _snapshot(pending_by_engine={"supervisor": 5, "discovery": 1})
     decision = routing.deterministic_route(only_supervisor_and_discovery)
     assert decision is not None
     assert decision.target_engine is EngineName.DISCOVERY

@@ -43,6 +43,11 @@ if TYPE_CHECKING:
 #: this module's own docstring says routing was built to eliminate.
 PRIORITY: tuple[EngineName, ...] = (
     EngineName.FINANCE,
+    # Ahead of Development because Development *consumes* what this department
+    # produces. A queued design task is a standard that a builder is about to work
+    # without, so servicing the builder first means doing the work twice -- which is
+    # queue discipline, not a claim about which department matters more.
+    EngineName.DESIGN,
     EngineName.DEVELOPMENT,
     EngineName.COMPLIANCE,
     EngineName.MARKETING,
@@ -202,10 +207,20 @@ def record_decision(memo: RoutingMemo, decision: OrchestratorDecision, fp: str) 
 
 def deterministic_route(snapshot: FactorySnapshot) -> OrchestratorDecision | None:
     """The same fixed priority scan the Supervisor has always fallen back to.
+
     Returns ``None`` only when queued work exists on an engine this table does not
-    rank — the table now covers every ``EngineName``, including SUPERVISOR, so this
-    is unreachable today. Kept as the correct signal to escalate to the model
-    rather than silently dropping the work if the engine set ever grows."""
+    rank. `test_every_engine_is_ranked` makes that unreachable for any real engine;
+    it is kept as the correct signal to escalate to the model rather than silently
+    dropping work, for an engine that exists in a snapshot but not yet in this build.
+
+    That claim used to be a comment asserting the table "covers every EngineName",
+    and it was false for eight days. DESIGN was created as a department and never
+    added here, so a tick whose only queued work was a design task fell through the
+    scan, returned None, and became an LLM call that mostly routed elsewhere -- the
+    department waited 18 minutes for a request the supervisor had already decided it
+    wanted. This is the *second* time: the same paragraph once said the same thing
+    while SUPERVISOR was missing. The regression test written then covered SUPERVISOR
+    rather than the rule, so the identical bug returned with a different value."""
     for engine in PRIORITY:
         if snapshot.pending_by_engine.get(engine.value, 0) > 0:
             return OrchestratorDecision(
