@@ -1184,6 +1184,39 @@ the journey, moved the page into the product, added a redirect and composed the 
 four decisions made by us about what good looks like, where two changes to *visibility*
 let the system reach them itself.
 
+### Broaden, do not enumerate (Jesse, 2026-09-21)
+
+*"This should broaden its scope, not narrow it down with new rules that are
+hardcoded."* The test each change has to pass: **is it removing a narrowing, or adding
+a rule?** Stated as three removals, none of which names the confirmation flow:
+
+- **What this company sends is kept and readable.** Not "retain the confirmation
+  email". `send_email` is the single chokepoint every message already passes through,
+  and `OutreachLog` records a subject and *no body* — so nobody can read what was
+  actually said to a real prospect either. Recording subject, body, sender and product
+  for every send, including the ones composed but deliberately not sent (dry run,
+  suppressed, self-test), makes the whole of what the company says reviewable without
+  anyone deciding in advance which messages are interesting. It closes a blind spot on
+  outreach nobody had raised.
+- **A self-test signal is a signal that does not count.** Not a branch: a flag. Today
+  the endpoint has two behaviours and the reserved address takes the silent one. After,
+  every submission takes the same path and carries `is_self_test`, and every demand
+  count excludes those rows. This *removes* a special case rather than adding one.
+- **The reviewer's world is the product's journey, not the product's page.** The
+  allowlist gains the origin the product's own confirmation link points at, derived from
+  the same setting that builds that link rather than written down as a literal.
+
+The version scoped before this one failed the test: "specify the journey in
+requirements", "redirect the visitor back", "compose the email with the product name"
+are four decisions about what good looks like, taken by us, in advance. These three are
+the reviewer being allowed to see what already happens.
+
+**Carries a real obligation.** Storing message bodies stores personal data about the
+recipient, so `erase_lead` and `erase_validation_signals` must delete retained messages
+too, or the erasure path silently stops being complete. The address is already stored in
+`OutreachLog`, so this is more of an existing category rather than a new one — but the
+erasure coverage is part of the work, not a follow-up.
+
 ### What this still does not reach
 
 A *real* visitor's email. The reviewer reads the composed message, not a delivered one,
