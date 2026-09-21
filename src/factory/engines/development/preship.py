@@ -53,10 +53,16 @@ from factory.supervisor.context import FactoryContext
 
 log = get_logger(__name__)
 
-#: The address the reviewer submits. `/interest/{product_id}` answers it exactly
-#: like a real submission -- same status, same body, same CORS envelope -- but
-#: records nothing and sends nothing, so a self-test can never inflate the count a
-#: build-or-scrap decision is gated on or bounce against the sending reputation.
+#: The address the reviewer submits. `/interest/{product_id}` answers it exactly like
+#: a real submission -- same status, same body, same CORS envelope -- and now takes the
+#: same path too: the signal is recorded and flagged `is_self_test`, excluded from every
+#: demand count, and its confirmation mail is composed and retained but never handed to
+#: a transport (`.invalid` cannot receive mail).
+#:
+#: It used to record nothing and send nothing at all, which kept the count honest and
+#: made everything past the form unreviewable -- no mail, no token, no confirmation page
+#: for any employee to look at. Excluded from counting was the requirement; leaving no
+#: trace was the over-reach.
 SELF_TEST_EMAIL = f"preship-review{SELF_TEST_SUFFIX}"
 
 REVIEW_SYSTEM = """\
@@ -127,9 +133,8 @@ def _failed_requests(observed: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _describe(entry: dict[str, Any]) -> str:
-    return (
-        f"{entry.get('method', '?')} {entry.get('url', '?')} -> {entry.get('status')}"
-        + (f"\n{entry['body']}" if entry.get("body") else "")
+    return f"{entry.get('method', '?')} {entry.get('url', '?')} -> {entry.get('status')}" + (
+        f"\n{entry['body']}" if entry.get("body") else ""
     )
 
 
@@ -167,6 +172,7 @@ async def review_before_ship(
     from factory.agents.runtime import AgentRuntime
     from factory.tools.browser import BrowserSession, allowed_origins_for
     from factory.tools.handbook import build_handbook_tools
+    from factory.tools.messages import register_message_tools
 
     origins = allowed_origins_for(deploy_url, custom_domain)
     if not origins:
@@ -179,9 +185,15 @@ async def review_before_ship(
         f"It is meant to be: {product_name}\n\n"
         "Open it and follow your instructions. When you submit the form, use "
         f"exactly this address: {SELF_TEST_EMAIL}\n"
-        "It is a reserved self-test address -- the endpoint answers it exactly like "
-        "a real submission but records nothing, so you can test the form honestly "
-        "without creating a fake signup."
+        "It is a reserved self-test address: the submission is recorded and excluded "
+        "from every demand count, and its confirmation email is written but never "
+        "transmitted, so you can walk the whole thing honestly without creating a "
+        "fake signup or mailing anybody.\n\n"
+        "**What you are reviewing is the journey, not only the page.** Submitting the "
+        "form is the middle of it, not the end. Afterwards call `read_sent_messages` "
+        "to read the confirmation email exactly as a visitor receives it, then open "
+        "the link inside it and look at where they land. A visitor judges this company "
+        "by all three, and until now nobody here could see past the first."
     )
     if requirements is not None:
         objective += (
@@ -193,6 +205,9 @@ async def review_before_ship(
     browser = BrowserSession(allowed_origins=origins)
     try:
         async with browser as tools:
+            # The confirmation link exists only inside the mail, so without this the
+            # journey stops at the form however wide the origin allowlist is.
+            register_message_tools(tools, product_id=product_id)
             runtime = AgentRuntime(
                 ctx.llm,
                 settings=ctx.settings,
@@ -244,9 +259,7 @@ async def review_before_ship(
     blocking = [_describe(entry) for entry in primary]
     notes = [_describe(entry) for entry in incidental]
 
-    outcome = PreShipOutcome(
-        ran=True, blocking=blocking, notes=notes, summary=result.answer[:2000]
-    )
+    outcome = PreShipOutcome(ran=True, blocking=blocking, notes=notes, summary=result.answer[:2000])
 
     if not result.answer.strip():
         # Same failure `_review_live_product` hit twice live: a budget spent

@@ -45,6 +45,19 @@ async def session() -> AsyncIterator[AsyncSession]:
     await engine.dispose()
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def _reset_global_engine() -> AsyncIterator[None]:
+    """`read_sent_messages` opens its own `session_scope`, which uses the process-wide
+    cached engine -- a different connection from this file's `session` fixture. Without
+    disposing it around each test, a pooled connection outlives the `drop_all` another
+    test's fixture runs, and this passes alone but fails in the suite. Same fixture and
+    same reason as `test_validation_gate.py`'s."""
+    yield
+    from factory.state import db as db_module
+
+    await db_module.dispose_engine()
+
+
 async def _product(session: AsyncSession) -> str:
     idea = await repository.upsert_idea(
         session,
@@ -166,3 +179,46 @@ async def test_erasure_deletes_what_was_written_to_that_person(session: AsyncSes
 
     remaining = (await session.execute(select(SentMessage.to_address))).scalars().all()
     assert remaining == ["someone.else@example.test"]
+
+
+async def test_a_reviewer_can_read_the_confirmation_and_find_its_link(
+    session: AsyncSession,
+) -> None:
+    """The third of the three, and the one that was missing.
+
+    Retaining the message and widening the origin allowlist are both useless while
+    nothing can read the mail: the confirmation link exists only inside it, so a
+    reviewer that submits the form has no way to learn the token and the journey
+    stops at the form regardless.
+    """
+    from factory.state.orm import new_id
+    from factory.tools.messages import confirmation_links, register_message_tools
+    from factory.tools.registry import ToolRegistry
+
+    product_id = await _product(session)
+    session.add(
+        SentMessage(
+            id=new_id(),
+            product_id=product_id,
+            to_address="preship-review@factory-selftest.invalid",
+            from_address="alex@factory.test",
+            subject="Please confirm your interest",
+            body="Thanks for your interest.\n\nhttps://api.example.test/confirm/tok-123",
+            outcome="composed_only",
+            detail="recipient domain cannot receive mail (RFC 2606)",
+        )
+    )
+    await session.commit()
+
+    registry = ToolRegistry()
+    register_message_tools(registry, product_id=product_id)
+    result = await registry.get("read_sent_messages").handler()
+
+    assert result["count"] == 1
+    message = result["messages"][0]
+    assert message["subject"] == "Please confirm your interest"
+    assert message["outcome"] == "composed_only"
+    # The link a visitor would click, reachable from what the reviewer can read.
+    assert confirmation_links(message["body"]) == ["https://api.example.test/confirm/tok-123"]
+    # ...and the recipient is not handed to the transcript.
+    assert message["to"] == "<recipient>@factory-selftest.invalid"

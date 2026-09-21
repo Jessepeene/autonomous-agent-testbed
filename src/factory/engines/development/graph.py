@@ -726,9 +726,7 @@ async def _record_council_findings(
     return recorded
 
 
-async def _ensure_deps_for_repair(
-    ctx: FactoryContext, workspace: str, *, product_id: str
-) -> None:
+async def _ensure_deps_for_repair(ctx: FactoryContext, workspace: str, *, product_id: str) -> None:
     """Make sure the repair agent has a toolchain before it is told it has one.
 
     Moving the `.deps` clear to install time is not sufficient on its own: a
@@ -789,6 +787,7 @@ async def _review_live_product(ctx: FactoryContext, session: AsyncSession, task:
     from factory.agents.runtime import AgentRuntime
     from factory.tools.browser import BrowserSession, allowed_origins_for
     from factory.tools.handbook import build_handbook_tools
+    from factory.tools.messages import register_message_tools
     from factory.tools.product_review import ReviewVerdict, queue_review_patch
 
     product_id = task.product_id or str(task.payload.get("product_id", ""))
@@ -810,12 +809,18 @@ async def _review_live_product(ctx: FactoryContext, session: AsyncSession, task:
         "thing yourself. Report anything genuinely wrong; if it is fine, say so.\n\n"
         "If it asks for an email address, submit exactly this one: "
         f"{preship.SELF_TEST_EMAIL}\n"
-        "It is a reserved self-test address -- the endpoint answers it exactly like "
-        "a real submission but records nothing and mails nothing. Using any other "
-        "address files a fake signup against the very demand signal this product "
-        "exists to measure, and a review that corrupts what it is measuring is "
-        "worse than no review. Observed: a run invented "
-        "`qa.tester.lead@example-agency.test` and it landed in the real table."
+        "It is a reserved self-test address -- the endpoint answers it exactly like a "
+        "real submission and records one, flagged so it is excluded from every demand "
+        "count, and its confirmation mail is written but never transmitted. Using any "
+        "other address files a fake signup against the very demand signal this product "
+        "exists to measure, and a review that corrupts what it is measuring is worse "
+        "than no review. Observed: a run invented "
+        "`qa.tester.lead@example-agency.test` and it landed in the real table.\n\n"
+        "**What you are reviewing is the journey, not only the page.** The form is the "
+        "middle of it. Afterwards call `read_sent_messages` to read the confirmation "
+        "email exactly as a visitor receives it, then open the link inside it and look "
+        "at where they land. A visitor judges this company by all three, and until now "
+        "nobody here could see past the first."
     )
 
     # The standard, if anyone wrote one. Without it a reviewer can only judge the
@@ -841,6 +846,9 @@ async def _review_live_product(ctx: FactoryContext, session: AsyncSession, task:
     review_started_at = datetime.now(UTC)
 
     async with BrowserSession(allowed_origins=origins) as tools:
+        # The confirmation link exists only inside the mail, so without this the
+        # journey stops at the form however wide the origin allowlist is.
+        register_message_tools(tools, product_id=product_id)
         runtime = AgentRuntime(
             ctx.llm,
             settings=ctx.settings,
@@ -888,8 +896,7 @@ async def _review_live_product(ctx: FactoryContext, session: AsyncSession, task:
             task_type=TaskType.ANALYSIS,
             system=_REVIEW_VERDICT_SYSTEM,
             prompt=(
-                "The reviewer's own account of what it did and found:\n\n"
-                f"{result.answer[:4000]}"
+                "The reviewer's own account of what it did and found:\n\n" f"{result.answer[:4000]}"
             ),
             engine=EngineName.DEVELOPMENT,
             task_id=task.id,
@@ -1872,9 +1879,7 @@ async def _verify_and_ship(
                 )
             ),
             headline=f"\U0001f9ed Release decision: {decision.decision}",
-            reply_hint=(
-                "Reply with guidance to try again, or REJECT to retire this product."
-            ),
+            reply_hint=("Reply with guidance to try again, or REJECT to retire this product."),
             product_id=product_id,
         )
         await repository.set_product_status(session, product_id, ProductStatus.PLANNED)
