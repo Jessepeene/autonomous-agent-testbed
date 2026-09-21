@@ -135,12 +135,105 @@ async def _mailgun_send(payload: dict[str, Any], settings: Settings) -> None:
     response.raise_for_status()
 
 
+#: Addresses that can never reach anybody. Mail to them can only hard-bounce, so it is
+#: composed and kept but never handed to a transport.
+#:
+#: Deliberately only the two RFC 2606 names that are *guaranteed* unresolvable rather
+#: than all four. `.test` and `.example` are reserved for testing and documentation,
+#: which is precisely what this project's own fixtures use them for -- `ada@example.test`
+#: stands in for a real prospect in the outreach tests, and refusing it made those tests
+#: assert against sends that never happened. Blocking them would redefine what every
+#: existing fixture means while gaining nothing: no real recipient is ever `.test`.
+_UNROUTABLE_TLDS: tuple[str, ...] = (".invalid", ".localhost")
+
+
 async def send_email(
     *,
     to: str,
     subject: str,
     body: str,
     settings: Settings | None = None,
+    from_address: str | None = None,
+    unsubscribe_url: str | None = None,
+    tracking_id: str | None = None,
+    product_id: str | None = None,
+) -> SendResult:
+    """Send one message, or refuse -- and keep what was composed either way.
+
+    A thin wrapper over `_attempt_send`, which holds the original logic and check
+    order unchanged. The retention is here rather than inside it so that every exit
+    path is covered by construction: this function has one return, and adding a new
+    refusal to `_attempt_send` cannot accidentally skip the record.
+
+    Nothing kept message bodies before. `OutreachLog` records a subject and no body,
+    so what this company actually said to a prospect was unreadable afterwards by
+    anyone -- and the interest-confirmation mail, which had no product name, no sender
+    and no working unsubscribe link, went out on every signup for weeks with no
+    employee able to read a word of it.
+
+    Recording never blocks a send and never raises: a message that went out and was
+    not recorded is a gap in the record, while a message refused because the record
+    failed is a gap in the business.
+    """
+    settings = settings or get_settings()
+    result = await _attempt_send(
+        to=to,
+        subject=subject,
+        body=body,
+        settings=settings,
+        from_address=from_address,
+        unsubscribe_url=unsubscribe_url,
+        tracking_id=tracking_id,
+    )
+    await _retain(
+        to=to,
+        subject=subject,
+        body=body,
+        from_address=from_address or settings.outbound_from_address,
+        product_id=product_id,
+        result=result,
+    )
+    return result
+
+
+async def _retain(
+    *,
+    to: str,
+    subject: str,
+    body: str,
+    from_address: str | None,
+    product_id: str | None,
+    result: SendResult,
+) -> None:
+    """Keep the composed message. Best effort, by design -- see `send_email`."""
+    try:
+        from factory.state.db import session_scope
+        from factory.state.orm import SentMessage, new_id
+
+        async with session_scope() as session:
+            session.add(
+                SentMessage(
+                    id=new_id(),
+                    product_id=product_id,
+                    to_address=to.strip().lower()[:320],
+                    from_address=(from_address or None),
+                    subject=subject[:500],
+                    body=body,
+                    # "we said this" and "we would have said this" are different facts.
+                    outcome="sent" if result.sent else "composed_only",
+                    detail=(result.reason or "")[:200] or None,
+                )
+            )
+    except Exception as exc:  # never let the record break the send
+        log.warning("email.not_retained", detail=str(exc)[:200])
+
+
+async def _attempt_send(
+    *,
+    to: str,
+    subject: str,
+    body: str,
+    settings: Settings,
     from_address: str | None = None,
     unsubscribe_url: str | None = None,
     tracking_id: str | None = None,
@@ -161,7 +254,6 @@ async def send_email(
     transactional confirmation emails) can omit it and get the bare mailbox as
     before.
     """
-    settings = settings or get_settings()
     recipient = to.strip().lower()
 
     # 1. Suppression list. Checked first and fail-closed.
@@ -174,6 +266,23 @@ async def send_email(
     if rule is not None:
         log.info("email.suppressed", rule=rule, domain=recipient.partition("@")[2])
         return SendResult(False, f"recipient matches blacklist rule {rule!r}")
+
+    # 1b. A domain that cannot receive mail is never attempted. `.invalid` and `.test`
+    # are reserved by RFC 2606 precisely so they can be used without reaching anyone,
+    # so a delivery attempt is a guaranteed hard bounce against a sender reputation
+    # this factory freezes sending over.
+    #
+    # Sits with the suppression list rather than down by the transport because it is a
+    # fact about the *recipient*, true before any question of whether a transport is
+    # configured -- so the retained record gives the real reason in every environment
+    # instead of whichever config happened to be missing first.
+    #
+    # A fact about addresses, not a rule about any one caller: the reviewer's reserved
+    # address lands here, and so would any other unroutable address from anywhere. The
+    # message is still composed and retained, so a reviewer reads exactly what a real
+    # visitor would have received.
+    if recipient.rpartition("@")[2].endswith(_UNROUTABLE_TLDS):
+        return SendResult(False, "recipient domain cannot receive mail (RFC 2606)")
 
     # 2. Sender identity is a legal requirement, not a nicety.
     from_address = from_address or settings.outbound_from_address

@@ -302,20 +302,25 @@ async def interest(
     at insert time (see `insert_validation_signal`), so the rest of the
     pipeline never needs a dry-run-aware branch.
     """
-    if submission.email.strip().lower().endswith(SELF_TEST_SUFFIX):
-        # The pre-ship browser review actually submits this form, because that is the
-        # only way to learn whether a visitor can. It must not leave a trace: a
-        # recorded row would inflate the very count a build-or-scrap decision is
-        # gated on, and a confirmation email to an address nobody owns is a
-        # guaranteed bounce against a deliverability reputation the factory freezes
-        # sending over.
-        #
-        # Answered identically to a real submission on purpose -- same status, same
-        # body, same CORS envelope. The reviewer is testing whether the browser can
-        # complete a submission, so anything that made this path distinguishable from
-        # the real one would make the test prove something other than what is asked.
-        log.info("interest.self_test", product_id=product_id)
-        return {"received": True}
+    # The pre-ship and live browser reviews actually submit this form, because that is
+    # the only way to learn whether a visitor can. Their reserved address used to stop
+    # here, recording nothing and mailing nothing (BUG_LOG 36, which fixed a reviewer's
+    # invented signup inflating the build-or-scrap count).
+    #
+    # That conflated two facts. "Must not corrupt the demand count" is true; "must
+    # leave no trace at all" is what got implemented -- and a submission that records
+    # nothing composes no confirmation email and issues no token, so everything past
+    # this form became invisible to every reviewer by construction. A plain-text
+    # confirmation page served from the factory's own domain, with no product name and
+    # no working unsubscribe link, then sat in front of real visitors for weeks with
+    # nobody able to look at it.
+    #
+    # So a self-test submission now takes exactly the same path as any other and
+    # carries a flag: recorded, excluded from every demand count
+    # (`tally_validation_signals`), and its confirmation mail composed and retained
+    # rather than sent -- `.invalid` is unmailable by design, which is the point. The
+    # reviewer can read what a visitor would receive and follow where it leads.
+    is_self_test = submission.email.strip().lower().endswith(SELF_TEST_SUFFIX)
 
     settings = get_settings()
     require_confirmation = (
@@ -340,6 +345,7 @@ async def interest(
             require_confirmation=require_confirmation,
             confirmation_token=confirmation_token,
             submitter_ip_hash=ip_hash,
+            is_self_test=is_self_test,
         )
 
     # Only a genuinely new row needs a confirmation email -- a duplicate
@@ -362,6 +368,9 @@ async def interest(
                     f"below. If you didn't request this, you can ignore it.\n\n{confirm_link}"
                 ),
                 settings=settings,
+                # So a retained message can be read back against the product it
+                # was about, rather than sitting in an undifferentiated pile.
+                product_id=product_id,
             )
     return {"received": True}
 

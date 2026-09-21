@@ -40,6 +40,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from factory.logging import get_logger
+from factory.settings import Settings, get_settings
 from factory.tools.registry import ToolDescriptor, ToolRegistry
 
 log = get_logger(__name__)
@@ -109,12 +110,29 @@ def origin_of(url: str) -> str | None:
     return f"{parsed.scheme}://{parsed.netloc}".lower()
 
 
-def allowed_origins_for(*urls: str | None) -> set[str]:
-    """The origin allowlist for a review: the product's own deploy URL, plus its
-    custom domain once it has one. Unparseable or missing entries are dropped
-    rather than raising -- a product with no custom domain is the normal case."""
+def allowed_origins_for(*urls: str | None, settings: Settings | None = None) -> set[str]:
+    """Every origin this product's own visitor journey touches.
+
+    The deploy URL, the custom domain once it has one, and the origin the product's
+    own form posts to -- which is where a visitor lands after clicking the
+    confirmation link in their email, and is therefore part of what a review of this
+    product has to be able to look at.
+
+    That last one used to be missing, and the docstring here said why: *"the reviewer
+    only ever needs the product's own origin, so that is all it gets."* True while the
+    product was the page. It stopped being true the moment the journey continued onto
+    the API host, and nothing revisited it -- so a plain-text confirmation page on the
+    factory's own domain sat in front of real visitors with every reviewer walled off
+    from it by the SSRF guard.
+
+    Derived from the same setting that builds the confirmation link rather than written
+    down as a literal, so it cannot drift from the address visitors are actually sent
+    to. Unparseable or missing entries are dropped rather than raising -- a product
+    with no custom domain is the normal case.
+    """
+    settings = settings or get_settings()
     origins = set()
-    for url in urls:
+    for url in (*urls, settings.unsubscribe_base_url):
         if not url:
             continue
         origin = origin_of(url)
@@ -244,9 +262,10 @@ class BrowserSession:
         request" is the causal claim the reviewer needs, and a cumulative log
         makes that exact question harder to answer, not easier.
         """
-        requests, console = self._requests[-_MAX_INSTRUMENT_ROWS:], self._console[
-            -_MAX_INSTRUMENT_ROWS:
-        ]
+        requests, console = (
+            self._requests[-_MAX_INSTRUMENT_ROWS:],
+            self._console[-_MAX_INSTRUMENT_ROWS:],
+        )
         self._requests, self._console = [], []
         return {"network": requests, "console_errors": console}
 

@@ -51,6 +51,7 @@ from factory.state.orm import (
     Requirement,
     ScoutSignal,
     ScrapeDomainFailure,
+    SentMessage,
     Subscription,
     Task,
     TaskEvent,
@@ -903,9 +904,7 @@ async def record_heal_attempt(
     """
     highest = (
         await session.execute(
-            select(func.max(HealAttempt.attempt_number)).where(
-                HealAttempt.product_id == product_id
-            )
+            select(func.max(HealAttempt.attempt_number)).where(HealAttempt.product_id == product_id)
         )
     ).scalar()
     row = HealAttempt(
@@ -1000,9 +999,7 @@ async def get_product_with_idea(
     detail view needs one product's business plan (niche/problem/monetization
     all live on `Idea`, not `Product`), not the whole portfolio list."""
     stmt = (
-        select(Product, Idea)
-        .join(Idea, Idea.id == Product.idea_id)
-        .where(Product.id == product_id)
+        select(Product, Idea).join(Idea, Idea.id == Product.idea_id).where(Product.id == product_id)
     )
     row = (await session.execute(stmt)).first()
     if row is None:
@@ -1477,6 +1474,8 @@ async def erase_lead(
     settings = settings or get_settings()
     normalised = email.strip().lower()
     await session.execute(delete(Lead).where(Lead.work_email == normalised))
+    # Everything this company wrote to them, not only the row that held their address.
+    await session.execute(delete(SentMessage).where(SentMessage.to_address == normalised))
 
     path = settings.blacklist_path
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
@@ -1531,6 +1530,7 @@ async def insert_validation_signal(
     require_confirmation: bool = True,
     confirmation_token: str | None = None,
     submitter_ip_hash: str | None = None,
+    is_self_test: bool = False,
 ) -> str | None:
     """Record real interest in a product still in its validation stage.
 
@@ -1562,6 +1562,7 @@ async def insert_validation_signal(
             confirmed_at=confirmed_at,
             confirmation_token=confirmation_token if require_confirmation else None,
             confirmation_method=method,
+            is_self_test=is_self_test,
             submitter_ip_hash=submitter_ip_hash,
         )
         .on_conflict_do_nothing(
@@ -1620,7 +1621,14 @@ async def tally_validation_signals(
     stmt = (
         select(func.count())
         .select_from(ValidationSignal)
-        .where(ValidationSignal.product_id == product_id)
+        .where(
+            ValidationSignal.product_id == product_id,
+            # The reviewer's own submissions are recorded so the journey past the form
+            # can be reviewed at all, and excluded here because a build-or-scrap
+            # decision must never count the company testing its own page. BUG_LOG 36
+            # got the exclusion right and the recording wrong; this is both.
+            ValidationSignal.is_self_test.is_(False),
+        )
     )
     if confirmed_only:
         stmt = stmt.where(ValidationSignal.confirmed_at.isnot(None))
@@ -1860,6 +1868,9 @@ async def erase_validation_signals(session: AsyncSession, email: str) -> None:
     `erase_lead`, not as a replacement for it (the two tables are unrelated)."""
     normalised = email.strip().lower()
     await session.execute(delete(ValidationSignal).where(ValidationSignal.email == normalised))
+    # Retained messages hold what was written *to this person*, so erasure that stops
+    # at the signal row leaves their data behind under a different table name.
+    await session.execute(delete(SentMessage).where(SentMessage.to_address == normalised))
 
 
 async def record_outreach(
@@ -2530,9 +2541,7 @@ async def list_open_integration_alerts(
 
 async def count_open_integration_alerts(session: AsyncSession) -> int:
     stmt = (
-        select(func.count())
-        .select_from(IntegrationAlert)
-        .where(IntegrationAlert.status == "open")
+        select(func.count()).select_from(IntegrationAlert).where(IntegrationAlert.status == "open")
     )
     return int((await session.execute(stmt)).scalar_one())
 
@@ -2801,11 +2810,7 @@ async def products_with_recent_heal_attempts(
     several unrelated products all hitting a heal cycle in the same short
     window is the kind of pattern a human operator would notice and suspect a
     systemic cause for, not four coincidental unrelated bugs."""
-    stmt = (
-        select(HealAttempt.product_id)
-        .where(HealAttempt.created_at >= since)
-        .distinct()
-    )
+    stmt = select(HealAttempt.product_id).where(HealAttempt.created_at >= since).distinct()
     return [row[0] for row in (await session.execute(stmt)).all()]
 
 
@@ -3462,9 +3467,7 @@ async def accept_issues(
     return applied
 
 
-async def close_issues_as_invalid(
-    session: AsyncSession, *, task_id: str, reason: str
-) -> int:
+async def close_issues_as_invalid(session: AsyncSession, *, task_id: str, reason: str) -> int:
     """Close the issues a task was commissioned for, because the brief was wrong.
 
     The other half of `RESULT: NOT_NEEDED`. An agent that investigates and finds its
@@ -3647,9 +3650,7 @@ async def evidence_for_idea(session: AsyncSession, idea_id: str) -> list[IdeaEvi
     return list((await session.execute(stmt)).scalars().all())
 
 
-async def record_demand_assessment(
-    session: AsyncSession, *, idea_id: str, assessment: Any
-) -> None:
+async def record_demand_assessment(session: AsyncSession, *, idea_id: str, assessment: Any) -> None:
     """Keep the demand judgement and the audience brief with the idea.
 
     Stored whatever the verdict, including `thin` -- the reasoning is what lets a

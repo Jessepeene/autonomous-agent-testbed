@@ -270,6 +270,18 @@ class ValidationSignal(Base):
     #: confirmed_only default.
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     confirmation_token: Mapped[str | None] = mapped_column(String(64))
+    #: A submission from the reviewer's reserved address. Recorded like any other
+    #: signal and excluded from every demand count -- see
+    #: `repository.tally_validation_signals`.
+    #:
+    #: BUG_LOG 36 fixed a reviewer's invented signup inflating the build-or-scrap
+    #: count by making that address leave no trace at all, which conflated "must not
+    #: corrupt the count" with "must not be recorded". A submission that records
+    #: nothing composes no confirmation email and issues no token, so everything past
+    #: the form became invisible to review by construction -- and a plain-text
+    #: confirmation page served from the factory's own domain sat in front of real
+    #: visitors for weeks with no employee able to look at it.
+    is_self_test: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     #: 'double_opt_in' | 'dry_run_auto' | 'operator' -- why this row counts, kept
     #: even after confirmation so an audit can tell a real click from a
     #: dry-run/manual bypass without cross-referencing anything else.
@@ -719,6 +731,45 @@ class DunningEvent(Base):
         Index("ix_dunning_events_subscription", "subscription_id"),
         Index("ix_dunning_events_open", "subscription_id", "status"),
     )
+
+
+class SentMessage(Base):
+    """Every message this company composed, whether or not it went out.
+
+    `send_email` is the one chokepoint all mail passes through, and nothing kept what
+    was in it: `OutreachLog` records a subject and no body, so what was actually said
+    to a real prospect could not be read afterwards by anyone -- human or reviewer. A
+    review could examine a page in detail and never a word of the company's own writing.
+
+    Retained for every send rather than for the messages somebody thought worth
+    keeping, because deciding that in advance is how the interesting one gets missed:
+    the confirmation email that said "Thanks for your interest" with no product name,
+    no sender and no working unsubscribe link went out under an address nobody had
+    read, on every signup, for weeks.
+
+    Holds personal data about the recipient, so `erase_lead` and
+    `erase_validation_signals` delete from here too.
+    """
+
+    __tablename__ = "sent_messages"
+
+    id: Mapped[str] = _pk()
+    product_id: Mapped[str | None] = mapped_column(String(32), index=True)
+    to_address: Mapped[str] = mapped_column(String(320), nullable=False, index=True)
+    from_address: Mapped[str | None] = mapped_column(String(320))
+    subject: Mapped[str] = mapped_column(String(500), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    #: ``sent`` or ``composed_only``. Kept apart because "we said this" and "we would
+    #: have said this" are different facts, and a review of an unsent draft read as a
+    #: review of what a customer received is worse than no review.
+    outcome: Mapped[str] = mapped_column(String(32), nullable=False)
+    #: Why it was held, when it was -- the `SendResult` reason, verbatim.
+    detail: Mapped[str | None] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (Index("ix_sent_messages_product_created", "product_id", "created_at"),)
 
 
 class Interrupt(Base):
