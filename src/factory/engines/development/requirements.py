@@ -33,6 +33,7 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from factory.logging import get_logger
+from factory.memory import store as memory_store
 from factory.settings import EngineName, TaskType
 from factory.state import repository
 from factory.state.schemas import (
@@ -143,6 +144,33 @@ async def write_landing_page_requirements(
         )
         + "\nWrite the acceptance criteria for that page."
     )
+
+    # What this company has already been told about work of this kind. Until now
+    # nothing that *writes* recalled anything: two reviewers, the heal loop and agent
+    # spawns all did, and every one of them reads work that is already finished. So a
+    # standard this company learned could only ever arrive as a complaint about a
+    # built page, never as a criterion before the build -- which is the difference
+    # between an organisation that learns and one that has to be told twice.
+    #
+    # Here rather than in the builder's own prompt, because criteria are read three
+    # times: the builder works to them, the pre-ship reviewer judges against them, and
+    # the release decision weighs them. A standard that becomes a criterion reaches
+    # all three. One injected into the build prompt reaches one.
+    recalled = await memory_store.recall_block(
+        session,
+        query=(
+            f"landing page for {idea.target_niche}: what the page must say and do, "
+            "the signup, the confirmation mail it sends, the page that link leads to"
+        ),
+        scopes=memory_store.scopes_for(engine=EngineName.DEVELOPMENT, product_id=product_id),
+    )
+    if recalled:
+        prompt += (
+            "\n\nStandards this company has learned, from people who have looked at "
+            "work like this before. They are not criteria yet -- turning them into "
+            "criteria is your judgement. Apply the ones that bear on this page, and "
+            "ignore any that do not.\n\n" + recalled
+        )
 
     try:
         requirements = await ctx.llm.parse(
@@ -282,9 +310,8 @@ HOUSE_STYLE = DesignGuidelines(
         "keep running text near 65 characters wide."
     ),
     must_hold=[
-        "The page loads at least one webfont; a system-font-only stack is not a "
-        "typographic choice",
-        "The palette is specific to this product rather than a framework's default " "ramp",
+        "The page loads at least one webfont; a system-font-only stack is not a typographic choice",
+        "The palette is specific to this product rather than a framework's default ramp",
         "Real, specific copy throughout -- never lorem-ipsum or placeholder text",
         "Legible on a phone: no horizontal scrolling, tap targets a thumb can hit",
     ],
@@ -389,8 +416,7 @@ def render_design_for_prompt(guidelines: DesignGuidelines) -> str:
     standard only works if everyone who acts on it reads the identical text.
     """
     lines = [
-        "DESIGN GUIDELINES. The page is judged against these as well as its "
-        "acceptance criteria.",
+        "DESIGN GUIDELINES. The page is judged against these as well as its acceptance criteria.",
         "",
         f"Direction: {guidelines.direction}",
         "",

@@ -45,6 +45,12 @@ from factory.tools.product_review import ReviewVerdict
 #: been unusually thorough.
 STRUCTURAL_FIELDS = {
     ("LeadAssessment", "ref"),
+    # A capability or department name, checked against a closed allowlist the model
+    # is shown (`learning/feedback.py::ALLOWED_CAPABILITIES`). A cap is a real
+    # constraint on shape here: nothing this company has is 60 characters long, and a
+    # model writing a sentence into it has misread the field rather than been
+    # thorough -- and the answer is dropped by the allowlist either way.
+    ("ProposedLesson", "capability"),
 }
 
 

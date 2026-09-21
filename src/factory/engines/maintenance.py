@@ -55,6 +55,14 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
 
         return await decide_next(ctx, session, task)
 
+    # Also its own kind rather than a slug: this is a judgement about something a
+    # person said, and a run where it silently never happened should be visible as a
+    # task that did not run rather than as a quiet absence.
+    if task.kind == TaskKind.LEARN_FROM_FEEDBACK.value:
+        from factory.learning.feedback import learn
+
+        return await learn(ctx, session, task)
+
     slug = str(task.payload.get("slug", "maintenance"))
 
     # These four are either fully deterministic or need the two-step structured

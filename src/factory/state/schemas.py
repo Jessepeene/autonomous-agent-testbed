@@ -128,6 +128,12 @@ class TaskKind(StrEnum):
     #: nothing ever asked whether the product was ready to be built. Ordering falls
     #: out of this decision rather than out of any rule -- see `ProductNext`.
     DECIDE_PRODUCT_NEXT = "decide_product_next"
+    #: Ask whether something said to this company from outside it contains a standard
+    #: that outlives the thing it was said about. Its own task rather than a step
+    #: inside reply handling: a reply must be acted on immediately and a judgement
+    #: about what to keep needs a model, and neither should be able to delay or
+    #: silently skip the other. See `learning/feedback.py`.
+    LEARN_FROM_FEEDBACK = "learn_from_feedback"
 
 
 class TaskStatus(StrEnum):
@@ -188,6 +194,15 @@ class InterruptReason(StrEnum):
     #: discovery weeks later by someone noticing a number looks off. See
     #: supervisor/audit.py.
     DATA_INTEGRITY = "data_integrity"
+    #: A human reply contained something that would, if kept as a standing rule,
+    #: loosen a limit this company holds regardless of circumstance -- the
+    #: suppression list, erasure, the spend cap, campaign approval, or what may be
+    #: claimed to a customer. Refused rather than filed, and handed to a person. Not
+    #: folded into LEGAL_UNCERTAINTY for the reason this enum's docstring gives about
+    #: the other three: most rails are not legal ones, and a spend cap arriving under
+    #: a `[LEGAL_UNCERTAINTY]` prefix misdescribes it to the only reader who matters.
+    #: See learning/feedback.py.
+    CONSTRAINT_CHALLENGED = "constraint_challenged"
     #: A product failed `MAX_HEAL_CYCLES` repair attempts and needs a human's
     #: guidance or a decision to retire it. Previously raised under
     #: LEGAL_UNCERTAINTY, which is what a human actually saw in the Telegram
@@ -818,6 +833,47 @@ class GapReport(Contract):
     #: a criterion that passed -- the instrumentation principle, applied to the
     #: comparison itself.
     undetermined: list[str] = Field(default_factory=list, max_length=20)
+
+
+class ProposedLesson(Contract):
+    """Whether something said to this company should outlive what it was said about.
+
+    A human reply is two things at once: an instruction about the thing at hand, and
+    sometimes a standard that applies far beyond it. Only the first was ever taken --
+    `enqueue_guided_patch` turned a reply into one patch for one product and discarded
+    the rest. Told that a confirmation email reading "Thanks for your interest" with no
+    product name was "boring and indescriptive", this company had nowhere to put that,
+    so it reached a human who wrote code. Every standard arriving as a commit does not
+    scale past the human writing the commits.
+
+    Asked of every reply rather than offered as an option, for the reason `Ask` gives:
+    `report_product_issue` shipped as an elected action and two live runs spent their
+    whole budget without ever choosing it.
+    """
+
+    #: Most replies are instructions and nothing more -- "yes, ship it", "use this
+    #: domain". Saying so is the common, correct answer, and inventing a standard from
+    #: a routine reply fills every future agent's context with noise it must read.
+    durable: bool
+    #: The standard itself, written so it means something to somebody who never saw
+    #: the product it came from. "The confirmation page should look like the product"
+    #: travels; "fix the Rise confirmation page" does not.
+    content: str = ""
+    #: Who carries it. `capability` is the one that behaves like a professional
+    #: standard -- it applies to every future run of that role, on every product --
+    #: and is usually right for a judgement about how work should be done.
+    scope: Literal["capability", "product", "engine", "company"] = "capability"
+    #: Which role, when `scope` is `capability`. Ignored otherwise.
+    capability: str = Field(default="", max_length=60)
+    #: Why this outlives the thing it was said about, or why it does not.
+    why: str = Field(min_length=10)
+    #: **The line the end goal depends on.** A remembered preference may shape
+    #: judgement; it may never relax a constraint. Set this when the reply would soften
+    #: a rail rather than inform a choice -- suppression lists, erasure, spend limits,
+    #: campaign approval, what may be claimed to a customer. Such a lesson is refused
+    #: and raised to a human instead, because a learning write path is exactly how an
+    #: autonomous system would otherwise talk its way out of its own safety rails.
+    touches_a_rail: bool = False
 
 
 class VisitorFinding(Contract):

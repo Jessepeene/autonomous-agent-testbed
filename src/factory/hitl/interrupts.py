@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from factory.hitl import commands
 from factory.hitl.formatting import build_escalation_text, tag_for
+from factory.learning import feedback
 from factory.llm.providers.base import LLMError
 from factory.logging import get_logger
 from factory.settings import EngineName, TaskType
@@ -306,6 +307,14 @@ async def resolve_reply(session: AsyncSession, target: Interrupt, answer: str) -
         action = await _act_on_product_reply(
             session, target.id, target.product_id, answer, escalation_detail=target.detail
         )
+    # Asked of every reply, after the reply has already done its work and regardless
+    # of which branch above did it. Until now a reply was consumed entirely by its
+    # immediate effect: a domain got attached, an idea got approved, a product got a
+    # guided patch, and the standard behind the instruction -- the part that would
+    # still be true next month on a different product -- was discarded with the task.
+    # This only queues the question; see `learning/feedback.py` for why the judgement
+    # is a task of its own and why it is never an elected step.
+    await feedback.capture(session, interrupt=target, action=action)
     log.info("hitl.resolved", interrupt_id=target.id, action=action)
     return action
 

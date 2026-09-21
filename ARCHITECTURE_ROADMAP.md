@@ -1227,7 +1227,7 @@ composed message and the served page, and therefore visible to a reviewer today.
 
 ## Phase 2.10 — how this company learns anything (added 2026-09-21)
 
-**Status**: scoped, not built. The read half shipped the same day.
+**Status**: built 2026-09-21 (read half and write half). See *Built 2026-09-21* below.
 
 Jesse's question, and it is the one that generalises: *"how can we get it to do the
 thing we want without explicitly needing to ask it? How would a human operate?"*
@@ -1306,6 +1306,73 @@ It is also the cheapest correction available to the confirmation-page problem. T
 alternative is extending Design's remit to the journey, which is another rule written
 by us in advance. This is: say it once, and any reviewer of any product carries it,
 including to the things neither of us has thought of yet.
+
+### Built 2026-09-21
+
+`learning/feedback.py`, hooked into `hitl/interrupts.py::resolve_reply` — the single
+funnel every human reply passes through exactly once, whether it arrived by Telegram
+or through the dashboard, and whichever per-reason branch acted on it.
+
+- **`capture()` runs on every reply, after it has acted.** One insert, no model, so it
+  cannot delay a domain attachment or an idea approval. The judgement itself is
+  `TaskKind.LEARN_FROM_FEEDBACK`, its own task — because a step inside `resolve_reply`
+  would either block the reply on a model being reachable or be wrapped in a
+  `try`/`except` that makes a skipped judgement invisible. As a task, a skipped one is
+  a task that did not run.
+- **The exchange includes what the reply already did.** Without it a model reads
+  "attach rise-audit.com" and proposes remembering the hostname — a lesson to redo
+  finished work. Knowing the instruction was carried out is what moves the question
+  from *what did they want* to *what did they mean that keeps being true*.
+- **Scope is judged, then checked against what actually recalls.** `capability:` is
+  read by `agents/spawner.py` and `development/preship.py`, both keyed on a
+  `RoleName`; `engine:` by `scopes_for`. A lesson filed under `capability:ux_reviewer`
+  — a perfectly reasonable string this company has no reader for — would exist, count
+  against the scope budget, and never be read by anything, which is indistinguishable
+  from never having been written. So an unknown name widens to the company scope,
+  over-broad but read, and logs. A `product:` lesson with no product is dropped
+  instead: widening a deliberately narrow lesson is the one direction scope must never
+  move by accident.
+- **The rail holds by refusing, not by softening.** A lesson the extraction judges
+  would loosen the suppression list, erasure, the spend cap, campaign approval, or
+  what may be claimed to a customer is not filed in any form — it raises
+  `CONSTRAINT_CHALLENGED` (its own reason, for the same cause this enum's docstring
+  gives for the other three: a spend cap arriving under a `[LEGAL_UNCERTAINTY]` prefix
+  misdescribes it to the only reader who matters) and says plainly that a limit which
+  should move belongs in code where it is reviewed, not in memory where it applies
+  quietly. Replies to that escalation are not themselves learned from, or every turn
+  of the cycle is another escalation.
+
+**And the half that would have made all of it write-only.** Ten `remember()` sites and
+five `recall()` sites, and *every reader read work that was already finished* — two
+reviewers, the heal loop, discovery, agent spawns. Nothing that **writes** recalled
+anything. A standard learned from a reply could only ever arrive as a complaint about
+a built page, never as a criterion before the build.
+
+So `write_landing_page_requirements` now recalls. There rather than in the builder's
+prompt, because criteria are read three times — the builder works to them, the pre-ship
+reviewer judges against them, the release decision weighs them — and a standard that
+becomes a criterion reaches all three. It is handed over as standards, explicitly *not*
+as criteria: turning one into a criterion, or setting it aside, stays the judgement it
+should be.
+
+### What this does not reach, and it is the interesting part
+
+Jesse's two observations were the confirmation **email** ("could say Alex from Rise")
+and the confirmation **page**. Both are literal strings in `api/app.py` — `subject="Please
+confirm your interest"` and a `text/plain` Response. Factory infrastructure, byte-identical
+for every product, authored by us.
+
+So the honest answer to *"why didn't the LLMs see it"* is not that they could not see
+it. Run 15's pre-ship reviewer opened that exact confirmation URL, screenshotted the
+exact page Jesse then screenshotted, and reported `blocking: 0, notes: 0`. **It saw it
+and had no lever.** Its only lever is a patch to the product workspace, and neither
+string is in the product workspace. A reviewer that cannot change a thing has no reason
+to develop a standard about it, and a lesson filed about it would be unactionable by
+construction.
+
+That is an ownership gap, not a memory gap, and it is the next question: the signup
+journey past the form belongs to the product, not to the factory. Until it does, no
+amount of learning reaches it.
 
 ## Phase 3 — Product / Management (absorbs the general manager)
 
