@@ -18,7 +18,10 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from factory.engines.development.requirements import render_for_prompt
+from factory.engines.development.requirements import (
+    render_design_for_prompt,
+    render_for_prompt,
+)
 from factory.state.schemas import AcceptanceCriterion, WorkRequirements
 
 
@@ -56,21 +59,76 @@ class TestRendering:
         blocks a release from what merely improves it -- that distinction is what
         lets a product be done without being perfect."""
         rendered = render_for_prompt(_requirements())
-        assert "MUST (not done without these)" in rendered
-        assert "SHOULD (valuable, does not block a release)" in rendered
+        must_line = next(line for line in rendered.splitlines() if line.startswith("MUST"))
+        should_line = next(line for line in rendered.splitlines() if line.startswith("SHOULD"))
+        assert must_line != should_line
+        assert "not done" in must_line
+        assert "never blocking" in should_line
 
-    def test_out_of_scope_says_not_to_flag_them(self) -> None:
+    def test_out_of_scope_says_a_departure_is_presence_not_absence(self) -> None:
         """Named so a reviewer stops reporting the absence of things nobody meant to
-        build, and a repair agent stops building them."""
+        build, and a repair agent stops building them.
+
+        Strengthened after a live run filed `MUST not met: OUT OF SCOPE: A pricing
+        page or price display` -- a thing deliberately not built, reported as missing,
+        blocking a release it could never stop blocking. Saying "do not flag these"
+        was not enough, because the reviewer had no other way to report the one case
+        where an out-of-scope item genuinely is a departure: when it got built.
+        """
         rendered = render_for_prompt(_requirements())
-        assert "OUT OF SCOPE" in rendered
-        assert "do not add or flag" in rendered
+        section = next(line for line in rendered.splitlines() if line.startswith("OUT OF SCOPE"))
+        assert "never be reported as unmet" in section
+        assert "presence" in section
         assert "user accounts" in rendered
 
-    def test_the_goal_leads(self) -> None:
+    def test_the_goal_leads_the_criteria(self) -> None:
         """What the work is *for* comes before the checklist: a criterion read
         without its purpose is a rule, and rules cannot be weighed."""
-        assert render_for_prompt(_requirements()).startswith("What this must achieve:")
+        rendered = render_for_prompt(_requirements())
+        assert rendered.index("What this must achieve:") < rendered.index("MUST")
+
+    def test_standing_policy_is_marked_as_not_being_criteria(self) -> None:
+        """The failure this is here for, from a live run: a `PAGE_POLICY` line was
+        reported as an unmet MUST -- a sentence explaining why a provisional canonical
+        URL is correct, filed as a defect. It was graded because it arrived in the
+        same undifferentiated block as the criteria, under a heading calling all of it
+        "the acceptance criteria this product was built to meet"."""
+        rendered = render_for_prompt(_requirements())
+        preamble = rendered[rendered.index("not part of the criteria") :]
+        assert "standing policy" in preamble
+        assert "override any criterion" in preamble
+        # The two properties that stop it being graded: a product cannot leave one
+        # unmet, and it is therefore never a thing to report.
+        assert "unmet" in preamble
+        assert "report as a gap" in preamble
+
+    def test_a_block_with_no_policy_still_renders(self) -> None:
+        """`policy` is a parameter because standing policy is not a landing-page
+        idea -- every department judging work against criteria has rules above them.
+        A department without one yet must not get a dangling empty section."""
+        rendered = render_for_prompt(_requirements(), policy="")
+        assert "standing policy" not in rendered.lower()
+        assert "MUST" in rendered
+
+    def test_everything_rendered_can_be_placed_back_against_the_standard(self) -> None:
+        """The invariant that stops the grounding check becoming a mute button.
+
+        `render_for_prompt` hands a worker the standard; `standard_catalogue` is what
+        its report is placed against. Anything in the first but not the second grounds
+        nowhere, and a real blocking gap gets quietly downgraded to an observation.
+        Found while building it: design `must_hold` is graded by the same pass that
+        grades `must`, and leaving it out of the catalogue would have silenced exactly
+        the defect a human had to catch.
+        """
+        from factory.engines.development.requirements import HOUSE_STYLE, standard_catalogue
+
+        requirements = _requirements()
+        rendered = render_for_prompt(requirements) + render_design_for_prompt(HOUSE_STYLE)
+        catalogue = standard_catalogue(requirements, design=HOUSE_STYLE)
+
+        for group, entries in catalogue.items():
+            for entry in entries:
+                assert entry in rendered, f"{group} entry is placeable but never shown: {entry!r}"
 
     def test_each_criterion_carries_its_reason(self) -> None:
         """`why` exists so a reviewer can tell a near-miss from a real failure. A
@@ -85,7 +143,7 @@ class TestRendering:
 
 
 def test_criteria_must_be_substantial_enough_to_check() -> None:
-    """"Fast" and "good UX" are the failure mode: a reviewer cannot fail them
+    """ "Fast" and "good UX" are the failure mode: a reviewer cannot fail them
     honestly, which makes every judgement citing them unfalsifiable. The length
     floor does not guarantee checkability, but it does stop one-word wishes."""
     with pytest.raises(ValidationError):

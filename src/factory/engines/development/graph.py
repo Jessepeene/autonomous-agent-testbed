@@ -909,7 +909,7 @@ async def _review_live_product(ctx: FactoryContext, session: AsyncSession, task:
             task_type=TaskType.ANALYSIS,
             system=_REVIEW_VERDICT_SYSTEM,
             prompt=(
-                "The reviewer's own account of what it did and found:\n\n" f"{result.answer[:4000]}"
+                f"The reviewer's own account of what it did and found:\n\n{result.answer[:4000]}"
             ),
             engine=EngineName.DEVELOPMENT,
             task_id=task.id,
@@ -1846,15 +1846,22 @@ async def _verify_and_ship(
     # is done -- which "no outstanding findings" can never be.
     requirements = await requirements_for_product(session, product_id)
     if requirements is not None:
+        # Resolved once and handed to both. Judging a page against one standard and
+        # placing its report against another is how a real design gap -- "stock
+        # framework palette, no webfont", the defect only a human ever caught --
+        # gets filed as an unplaceable observation instead of a blocking one.
+        design = effective_design(await design_for_product(session, product_id))
         report = await find_requirement_gaps(
             ctx,
             sources=sources,
             requirements=requirements,
             task_id=task_id,
-            design=effective_design(await design_for_product(session, product_id)),
+            design=design,
         )
         if report is not None:
-            await record_gaps_as_issues(session, product_id, report)
+            await record_gaps_as_issues(
+                session, product_id, report, requirements=requirements, design=design
+            )
 
     # The release judgement, where an `if` used to be. Whether this is good enough
     # to put in front of a real person is the highest-judgement moment in the

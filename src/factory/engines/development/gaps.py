@@ -37,7 +37,9 @@ from factory.engines.development.requirements import (
     HOUSE_STYLE,
     render_design_for_prompt,
     render_for_prompt,
+    standard_catalogue,
 )
+from factory.grounding import Grounded, ground
 from factory.logging import get_logger
 from factory.settings import EngineName, TaskType
 from factory.state import repository
@@ -49,7 +51,9 @@ log = get_logger(__name__)
 #: A MUST is what the product had to do, so an unmet one is high severity and will
 #: hold a release on its own. A SHOULD is a trade -- worth recording, never worth
 #: blocking on, which is the distinction that lets a product be done without being
-#: perfect.
+#: perfect. Extended by `_DEPARTURE` below, which keys on where a claim actually
+#: grounds rather than on the tier a reviewer named -- this stays because it is still
+#: the correct statement of what the two tiers mean.
 _TIER_SEVERITY = {"must": "high", "should": "low"}
 
 GAP_SYSTEM = """\
@@ -77,11 +81,14 @@ cannot see:
 - A product that *says* one thing and *does* another. Copy promising a feature that \
 is not built, a privacy claim contradicted by a script on the page, a price in the \
 text that differs from the one in the code. These pass every category-based review.
-- Something present that the criteria list as out of scope. That is a gap too: it \
-was deliberately not wanted, and building it anyway is as wrong as leaving a \
-requirement unbuilt.
+- Something present that the standard lists as out of scope. That is a departure \
+too, in the opposite direction: it was deliberately not wanted and it got built. \
+Report it and quote the out-of-scope line -- never as a missing MUST, because it is \
+not missing.
 
-Never invent a criterion. Judge only what you were given.\
+Judge only what you were given, and quote the line you are judging. Standing policy \
+is not a criterion: it is the rule the criteria are read against, nothing a product \
+does can leave a policy line unmet, and it is never something to report.\
 """
 
 
@@ -106,7 +113,11 @@ async def find_requirement_gaps(
     corpus = review_corpus(rendered, truncated=truncated)
     prompt = (
         f"{corpus}\n\n"
-        "The acceptance criteria this product was built to meet:\n\n"
+        # No heading of our own. The block states what each of its sections is and
+        # what force it carries, and the heading that used to sit here -- "The
+        # acceptance criteria this product was built to meet" -- was applied to all
+        # of it, the deliberate non-goals and the standing policy included. That is
+        # how a policy line came to be graded and filed as an unmet MUST.
         f"{render_for_prompt(requirements)}\n\n"
         # Design is judged here for the first time. Until now "it looks
         # machine-generated" was true, obvious to anyone who opened the page, and
@@ -141,8 +152,39 @@ async def find_requirement_gaps(
         return None
 
 
+#: How a departure is recorded, keyed by *which part of the standard the claim was
+#: actually about* rather than by the tier the reviewer named. A reviewer works in
+#: prose and can only pick from `must`/`should`; where a statement really lives is a
+#: fact about the standard, and the standard is right here to be checked against.
+#:
+#: The two non-`must` entries are the ones that were previously unrepresentable, and
+#: each is a real departure that must not block a release:
+#: - `out_of_scope` is something built that nobody asked for. Worth recording as scope
+#:   creep; a product that does more than asked is not a product that fails its job.
+#: - `policy` and "grounded nowhere" both mean the claim is not a departure from this
+#:   standard at all. Kept anyway -- a reviewer noticing something the criteria never
+#:   mentioned is the holistic signal a criteria-shaped gate is structurally blind to,
+#:   and it is worth more than the noise of one low issue that closes itself.
+_DEPARTURE = {
+    "must": ("high", "MUST not met"),
+    "must_avoid": ("high", "Present, and the standard says it must not be"),
+    "should": ("low", "SHOULD not met"),
+    "out_of_scope": ("low", "OUT OF SCOPE, but present"),
+    "policy": ("low", "Observed, but standing policy says this is correct"),
+    None: ("low", "Observed, outside the stated standard"),
+}
+
+
 async def record_gaps_as_issues(
-    session: AsyncSession, product_id: str, report: GapReport
+    session: AsyncSession,
+    product_id: str,
+    report: GapReport,
+    *,
+    requirements: WorkRequirements | None = None,
+    #: The same guidelines `find_requirement_gaps` rendered. Passed rather than
+    #: re-resolved so the standard a page was judged against and the catalogue its
+    #: report is placed against cannot be two different things.
+    design: DesignGuidelines | None = None,
 ) -> tuple[int, int]:
     """File every gap as an issue. Returns ``(blocking_gaps, total_gaps)``.
 
@@ -150,19 +192,49 @@ async def record_gaps_as_issues(
     consecutive builds is one issue with `times_seen = 2` rather than two rows -- and
     that count is the convergence signal a heal counter never had: a criterion still
     unmet after three attempts is a different situation from three different ones.
+
+    **Each claim is placed against the standard before it is filed.** The reviewer
+    names the criterion in prose and `tier` only lets it say `must` or `should`, so
+    what it names and what it meant can come apart -- and when they do, the result is
+    a blocking MUST that can never be satisfied. Both live cases were that: a policy
+    line reported as an unmet MUST (a sentence explaining why something is fine, filed
+    as a defect) and an out-of-scope entry reported as missing, because a reviewer
+    correctly told out-of-scope violations are gaps had no tier to put one in. Two
+    repair cycles moved nothing and a human had to break the loop.
+
+    So the tier is derived from where the claim actually grounds rather than taken on
+    trust. Nothing is discarded by this -- an ungrounded claim is still filed, just not
+    as a failure against a criterion nobody wrote.
     """
+    catalogue = standard_catalogue(requirements, design=design) if requirements is not None else {}
     blocking = 0
     present: set[str] = set()
     for gap in report.gaps:
-        severity = _TIER_SEVERITY.get(gap.tier, "low")
+        # Without a standard to check against, the reviewer's own tier is the best
+        # available answer -- never a silent downgrade to "ungrounded", which would
+        # turn a missing argument into a product with no blocking gaps.
+        placed = ground(gap.criterion, catalogue) if catalogue else Grounded(gap.tier, None, 1.0)
+        severity, label = _DEPARTURE[placed.group]
+        if placed.group != gap.tier:
+            log.info(
+                "gaps.reclassified",
+                product_id=product_id,
+                claimed=gap.tier,
+                placed=placed.group or "nowhere",
+                score=placed.score,
+                criterion=gap.criterion[:120],
+            )
         if severity == "high":
             blocking += 1
+        # The canonical wording when there is one, so the same gap reported twice in
+        # two paraphrases is one issue rather than two -- the identity this function
+        # depends on survives the reviewer rewording itself between builds.
+        subject = placed.entry or gap.criterion
+        title = f"{label}: {subject}"
+        location = f"requirement: {subject[:150]}"
         present.add(
             issues.fingerprint_for(
-                product_id=product_id,
-                kind="bug",
-                location=f"requirement: {gap.criterion[:150]}",
-                title=f"{gap.tier.upper()} not met: {gap.criterion}",
+                product_id=product_id, kind="bug", location=location, title=title
             )
         )
         await repository.record_issue(
@@ -170,11 +242,11 @@ async def record_gaps_as_issues(
             product_id=product_id,
             kind="bug",
             severity=severity,
-            title=f"{gap.tier.upper()} not met: {gap.criterion}",
+            title=title,
             # Stable across rewording and across superseded requirement rows,
             # because the criterion text is the thing that identifies the gap.
-            location=f"requirement: {gap.criterion[:150]}",
-            expected=gap.criterion,
+            location=location,
+            expected=subject,
             actual=gap.evidence,
             found_by="requirements_gap_check",
         )

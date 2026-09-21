@@ -1374,6 +1374,80 @@ That is an ownership gap, not a memory gap, and it is the next question: the sig
 journey past the form belongs to the product, not to the factory. Until it does, no
 amount of learning reaches it.
 
+## Phase 2.11 — saying which kind of statement this is (added 2026-09-21)
+
+**Status**: built the same day, prompted by a live failure.
+
+A run parked on a human with two blocking MUSTs, neither of which could ever be met:
+
+- `MUST not met: The page does not know its own final address. It is deployed to a
+  Vercel subdomain first and a custom domain is attached afterwards, by a person` —
+  a `PAGE_POLICY` line, word for word. A sentence explaining why something is *fine*,
+  filed as a defect.
+- `MUST not met: OUT OF SCOPE: A pricing page or price display` — a thing deliberately
+  not built, reported as missing.
+
+Two repair cycles moved nothing, and the release decision — correctly — refused to
+spend a third: *"a criterion that should not exist as a MUST at all… continued
+attempts to fix the unmet MUST will cycle without progress."* It diagnosed the problem
+precisely and had no lever except to stop.
+
+### Neither was the model being careless
+
+`render_for_prompt` emitted four kinds of statement — a goal, graded criteria,
+deliberate non-goals, standing policy — as one undifferentiated block, and `gaps.py`
+handed the whole thing over under the heading *"The acceptance criteria this product
+was built to meet."* The reviewer was told the policy lines were criteria, so it
+graded them. And `RequirementGap.tier` is `Literal["must", "should"]`, so a reviewer
+correctly instructed that out-of-scope violations are departures had **nowhere to put
+one** and squeezed it into `must`, where everything blocks.
+
+`GAP_SYSTEM` did say *"Never invent a criterion. Judge only what you were given."* An
+instruction in a prompt standing in for a check in code — and this project has now
+paid for that substitution more than once.
+
+### The two general fixes
+
+**Statements carry their force.** Each section now says what a *departure* from it
+means, because that is the thing a worker needs and could not recover: a MUST absent
+means not done, a SHOULD absent is weighed, an out-of-scope item *present* is scope
+creep, and a policy line cannot be departed from by a work product at all. `policy` is
+a parameter rather than welded in — standing policy is not a landing-page idea, every
+department that judges work against criteria has rules sitting above them, and the
+page policy is just the first one written.
+
+**`factory/grounding.py` — does this claim refer to something the claimant was given?**
+A worker naming items in prose can name anything; when the name resolves to nothing it
+was handed, the report is a statement about the report. Three places already did a
+narrow version by hand (`product_decision.py` drops an unknown `Unmet`,
+`learning/feedback.py` drops a capability the company lacks), and the number only goes
+up as more of this company's internal traffic becomes one part naming something to
+another. *An autonomous organisation that cannot tell "I found a problem with X" from
+"I have invented an X" accumulates work that cannot be finished.*
+
+So the gap check derives the tier from **where a claim actually grounds** rather than
+taking the reviewer's word. Matching is overlap-on-the-shorter-text, not Jaccard: the
+live case was a 150-character truncation of a 300-character policy line, every token
+present, which Jaccard scores 0.5 and calls a different statement.
+
+### Two things that keep this from becoming a mute button
+
+**Nothing is discarded.** A claim grounding nowhere is still filed — just not as a
+failure against a criterion nobody wrote. A reviewer noticing something the standard
+never mentioned is the holistic signal a criteria-shaped gate is structurally blind
+to, and it is worth more than the noise of one low issue that closes itself.
+
+**Whatever is rendered must be in the catalogue.** Caught while building it: design
+`must_hold` is graded by the same pass that grades `must`, so leaving it out would
+have silently downgraded a real "stock framework palette, no webfont" gap — the exact
+defect that only a human ever caught — to an observation, by a change meant to stop
+over-blocking. `must_avoid` needed its own group for the same reason: it is "present
+is a departure" like `out_of_scope`, but it is a stated defect rather than scope
+creep, so it blocks. `design` is now resolved once and handed to both the judge and
+the catalogue, and a test asserts every group the catalogue emits has a departure
+rule — the rule, not the values, which is the shape that would have caught DESIGN
+missing from `routing.PRIORITY`.
+
 ## Phase 3 — Product / Management (absorbs the general manager)
 
 **Rewritten 2026-09-15.** This was "a second department manager, most likely

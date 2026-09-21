@@ -258,24 +258,117 @@ repair.\
 """
 
 
-def render_for_prompt(requirements: WorkRequirements) -> str:
-    """The requirements as an instruction block, for whoever is doing the work.
+def render_for_prompt(requirements: WorkRequirements, *, policy: str = PAGE_POLICY) -> str:
+    """The standard as an instruction block, for whoever is doing or judging the work.
 
     One rendering, shared by the builder, the gap check, the live review and the
     pre-ship review, so four employees cannot end up working to four different
-    readings of the same standard -- and, since `PAGE_POLICY` is rendered here, so
-    that changing a standing rule reaches all four at once without regenerating
-    anything.
+    readings of the same standard -- and so that changing a standing rule reaches all
+    four at once without regenerating anything.
+
+    **Every section says what force it carries, because the absence of that cost two
+    repair cycles and a human.** This used to emit four kinds of statement -- a goal,
+    graded criteria, deliberate non-goals, and standing policy -- as one undifferentiated
+    block, and `gaps.py` handed the whole thing over under the heading "the acceptance
+    criteria this product was built to meet". So a reviewer graded the policy: it
+    reported *"the page does not know its own final address... a custom domain is
+    attached afterwards, by a person"* as an unmet MUST, which is a sentence explaining
+    why something is fine, filed as a defect. It also reported an out-of-scope entry as
+    missing. Neither could ever be satisfied, so repair cycled without moving and the
+    release decision correctly gave up and escalated.
+
+    The four kinds differ in what a *departure* from them means, which is the thing a
+    worker needs and could not previously recover: a MUST absent means not done, a
+    SHOULD absent is weighed, an out-of-scope item *present* is scope creep, and a
+    policy line cannot be departed from by a work product at all -- it is the rule the
+    criteria are read against.
+
+    `policy` is a parameter rather than welded in because standing policy is not a
+    landing-page idea. Every department that judges work against criteria has rules
+    that sit above them, and they all belong in this position with this framing; the
+    page policy is simply the first one written.
     """
-    lines = [f"What this must achieve: {requirements.goal}", "", "MUST (not done without these):"]
+    lines = [
+        "THE STANDARD THIS WORK IS JUDGED AGAINST.",
+        "",
+        f"What this must achieve: {requirements.goal}",
+        "",
+        "MUST -- absent means the work is not done:",
+    ]
     lines += [f"- {c.criterion}  ({c.why})" for c in requirements.must]
     if requirements.should:
-        lines += ["", "SHOULD (valuable, does not block a release):"]
+        lines += ["", "SHOULD -- weighed in the release judgement, never blocking:"]
         lines += [f"- {c.criterion}  ({c.why})" for c in requirements.should]
     if requirements.out_of_scope:
-        lines += ["", "OUT OF SCOPE (deliberately not built -- do not add or flag these):"]
+        lines += [
+            "",
+            "OUT OF SCOPE -- deliberately not built. These are not missing and must "
+            "never be reported as unmet. Only their *presence* is a departure:",
+        ]
         lines += [f"- {item}" for item in requirements.out_of_scope]
-    return "\n".join(lines) + "\n\n" + PAGE_POLICY
+    if policy:
+        lines += [
+            "",
+            "The section below is not part of the criteria above. It is standing "
+            "policy: rules that hold for every piece of work of this kind and that "
+            "override any criterion disagreeing with them. Nothing a work product "
+            "does can make a policy line unmet, and no policy line is ever something "
+            "to report as a gap, a defect, or something to repair.",
+            "",
+            policy,
+        ]
+    return "\n".join(lines)
+
+
+def standard_catalogue(
+    requirements: WorkRequirements,
+    *,
+    design: DesignGuidelines | None = None,
+    policy: str = PAGE_POLICY,
+) -> dict[str, list[str]]:
+    """Every statement a worker was given, grouped by the force it carries.
+
+    The counterpart to `render_for_prompt` and `render_design_for_prompt`: those hand
+    a worker the standard, this lets a caller take what the worker said about it and
+    find out which part it was actually talking about.
+
+    **Everything rendered must appear here.** A statement a worker is graded against
+    but that its report cannot be placed against gets treated as ungrounded, and the
+    grounding check stops being a correction and becomes a mute button. Design is the
+    live example: `must_hold` is graded by the same pass that grades `must`, so a real
+    "no webfont, stock framework palette" gap -- the defect a human had to catch
+    because no automated judge could -- would have been quietly downgraded to an
+    observation by a change meant to stop over-blocking.
+
+    The groups are the *force* of a statement, not the list it came from, which is why
+    `must` and design's `must_hold` share one:
+
+    - `must` / `must_hold` -- absent means not done. Blocks.
+    - `should` -- absent is weighed, never blocking.
+    - `must_avoid` -- present is a stated defect. Blocks. Not the same as scope creep:
+      a page built from a framework's stock ramp is not a page that did extra work.
+    - `out_of_scope` -- present is scope creep. Real, recorded, never blocking: a
+      product that does more than it was asked is not one that fails its job.
+    - `policy` -- not a criterion at all. The rule the criteria are read against, which
+      nothing a work product does can leave unmet.
+
+    Ordered strictest-first because `grounding.ground` breaks ties toward the earlier
+    group, and a line restated in two places matters most as the strictest of them.
+    """
+    return {
+        "must": [c.criterion for c in requirements.must]
+        + (list(design.must_hold) if design else []),
+        "must_avoid": list(design.must_avoid) if design else [],
+        "should": [c.criterion for c in requirements.should],
+        "out_of_scope": list(requirements.out_of_scope),
+        # Bullets, not the whole block: a claim is placed against one statement, and
+        # the policy's prose preamble is not one anybody can depart from.
+        "policy": [
+            line.lstrip("- ").strip()
+            for line in policy.splitlines()
+            if line.strip().startswith("- ")
+        ],
+    }
 
 
 #: The house style every page is built and judged against until a Design department
