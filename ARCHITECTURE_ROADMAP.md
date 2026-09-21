@@ -1113,85 +1113,84 @@ The line to hold, and it is a fine one: **a physical prerequisite is a fact and 
 encoded; a priority is a judgement and may not.** "Reach requires something deployed"
 is the former. "Design before development" is the latter, and stays the decider's call.
 
-## Phase 2.9 — the journey, not the page (added 2026-09-21)
+## Phase 2.9 — let the reviewer see the whole journey (added 2026-09-21)
 
 **Status**: scoped, not built. Found by Jesse signing up to his own live product.
 
 Run 12 shipped a genuinely good page — Fraunces and Public Sans, a bakery palette,
 zero repair cycles. Then Jesse submitted his email, clicked the confirmation link,
-and landed on this:
-
-```
-manifestaudit.com
-
-Thanks — your interest has been confirmed. If you'd rather not be
-contacted about this again, visit /u/QvmRNIf02QX19hVkIaQ3d9xiQgOJMMiLsgoTEBtfliA
-to have your details deleted.
-```
-
-Plain monospace text, on the **factory's own domain**, with the unsubscribe as a bare
-relative path the browser offered to download as a `.txt`. The confirmation email
-before it read "Thanks for your interest" with no product name, no sender, no brand.
+and landed on plain monospace text served from **the factory's own domain**, with the
+unsubscribe as a bare relative path the browser offered to download as a `.txt`. The
+email before it said "Thanks for your interest" with no product name and no sender.
 
 `PAGE_POLICY` forbids exactly this — *"nothing internal to this factory appears on the
 page"* — and the journey ends on factory infrastructure one hop past where the policy
 applies.
 
-### Why no LLM saw it, which is the part that matters
+### Why no LLM saw it: the fix for BUG_LOG 36 made the journey a dead end
 
-Three reasons, and none of them is "the model did not think to look".
+BUG_LOG 36: AUDITOR reviewed a landing page, was told to "actually try to do that thing
+yourself", invented an email address, and its fake signup landed in the table the
+build-or-scrap decision is gated on. The fix gave it the reserved
+`@factory-selftest.invalid` address, and `api/app.py`'s handling of that address is the
+whole story:
 
-1. **The reviewer cannot leave the product's origin.** `tools/browser.py` pins every
-   review to `allowed_origins_for(deploy_url, custom_domain)`, and its own docstring
-   states the assumption: *"The reviewer only ever needs the product's own origin, so
-   that is all it gets."* True when the product was the page. The confirmation lives on
-   the API origin, so a reviewer following the flow is stopped by the SSRF guard. Not
-   an oversight — a correct security control whose premise expired.
-2. **No employee has an inbox.** The confirmation link arrives by email, and nothing in
-   this company can receive one (that is Phase 2.6). The journey contains a step no
-   reviewer can physically take.
-3. **Every remit is an artifact, not a journey.** AUDITOR reviews the live page, Design
-   reviews the deployed page against guidelines, the gap check compares the workspace to
-   its criteria. Even with origins and an inbox, nobody was asked what happens after the
-   click.
+```python
+if submission.email.strip().lower().endswith(SELF_TEST_SUFFIX):
+    # It must not leave a trace: a recorded row would inflate the very count
+    # a build-or-scrap decision is gated on, and a confirmation email to an
+    # address nobody owns is a guaranteed bounce...
+```
 
-The same shape as every other defect this month: not a bad judgement, a question
-nobody was in a position to ask.
+Answered identically to a real submission, records nothing, sends nothing. So the
+reviewer sees a form that submits successfully and **the journey stops there** — no
+email is composed, no token is issued, and everything downstream became invisible to
+review by construction. Not an oversight and not a reasoning failure: the previous
+bug's fix removed the next bug's evidence.
 
-### The fix, and what would make it hardcoding
+The conflation is the familiar one. *"Must not corrupt the demand signal"* is true.
+*"Must leave no trace at all"* is what got implemented. Those are two different facts,
+and the correct isolation is **excluded from counting**, not **not recorded**.
 
-The wrong fix is an HTML template in `api/app.py`. That is factory code emitting
-product-branded output, one generic page for every product — the house-style-as-decided-
-answer mistake, in a new place.
+Two further walls sit behind it, real but not binding: `tools/browser.py` pins reviews
+to the product's own origin (*"the reviewer only ever needs the product's own origin, so
+that is all it gets"* — true when the product was the page), and no employee has an
+inbox.
 
-**The product's experience is the product's to build.** The builder already emits
-`index.html` and `privacy.html`; a confirmation page belongs beside them, designed to
-that product's own standard.
+### The fix: expand what the reviewer is allowed to see
 
-- **Specify the journey, not the page.** `LANDING_PAGE_REQUIREMENTS_SYSTEM` asks for
-  "what a visitor has to be able to do" and means the page. Widen it to the whole
-  visitor journey — submit, receive, confirm, unsubscribe — and the criteria get written
-  per product, the builder builds to them, and the gap check checks them. No file list,
-  no template: the same generate-and-judge loop already in use, pointed at more of the
-  product.
-- **Let the reviewer follow it.** Add the factory's own public API origin to
-  `allowed_origins_for`. One known origin read from settings, not an opening of the
-  allowlist, and it is the origin *this product's own form already posts to*.
-- **Hand the visitor back.** `/confirm/{token}` records the confirmation and redirects
-  to the product's own page. The redirect target is derived from the product's
-  `deploy_url`, which the API already has — plumbing, not a decision.
-- **The email knows its product.** `/interest/{product_id}` has the product id as its
-  URL parameter and ignores it; `send_email` already accepts `from_address` and
-  `unsubscribe_url` and is passed neither. Composing subject, sender and a real
-  unsubscribe link needs no new machinery, only the values already in hand.
+Jesse's framing, and it is smaller than specifying the journey in requirements: *"what
+if we simply expand the scope of what it's allowed to see, so it sees the email
+confirmation that gets sent and the subsequent webpage it directs to?"*
 
-### What this does not fix
+- **Make the self-test journey complete but isolated.** A `@factory-selftest.invalid`
+  submission records a signal *marked as self-test and excluded from every demand
+  count*, composes the confirmation email and **retains it rather than sending it** (the
+  `.invalid` domain is unmailable by design, which is correct — the point is to compose
+  and keep it), and issues a real token. The reviewer can then read exactly what a
+  visitor would receive and follow exactly where it leads.
+- **Widen the origin allowlist by one origin**: the factory's own public API origin,
+  read from settings. Not an opening of the allowlist — it is the origin this product's
+  own form already posts to.
 
-An inbox. A reviewer still cannot receive the confirmation email, so the middle of the
-journey stays unverifiable and honest criteria about it land in `GapReport.undetermined`
-rather than `met`. That is Phase 2.6, and this phase is deliberately not waiting for it:
-widening the origin and moving the page to the product fixes what a visitor sees today,
-and the email step can be checked by a human until an employee can read mail.
+Then nothing else is needed. The existing reviewers see the whole journey and judge it
+against the standards they already hold, the defect is reported through the normal path,
+and repair fixes it. **No requirements rewrite, no redirect plumbing, no confirmation-page
+template.** We do not write down what a confirmation page should look like; we let the
+reviewer look at the one we have and say.
+
+That is the difference between this and the version first scoped here, which specified
+the journey, moved the page into the product, added a redirect and composed the email —
+four decisions made by us about what good looks like, where two changes to *visibility*
+let the system reach them itself.
+
+### What this still does not reach
+
+A *real* visitor's email. The reviewer reads the composed message, not a delivered one,
+so a transport failure between composition and inbox stays invisible until Phase 2.6.
+That is a smaller gap than it sounds: every defect Jesse found — no product name, no
+sender, no real unsubscribe link, plain-text confirmation page — is present in the
+composed message and the served page, and therefore visible to a reviewer today.
 
 ## Phase 3 — Product / Management (absorbs the general manager)
 
