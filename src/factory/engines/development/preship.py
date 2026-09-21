@@ -198,9 +198,14 @@ async def review_before_ship(
     )
     if requirements is not None:
         objective += (
-            "\n\nThis page was built to meet the criteria below. Anything listed as "
-            "out of scope is absent on purpose and is not a defect.\n\n"
-            + render_for_prompt(requirements)
+            # Was "the criteria below", of a block that also carries the deliberate
+            # non-goals and the standing policy. The same sentence in `gaps.py` is how
+            # a policy line got graded and filed as a blocking unmet MUST; the block
+            # now labels its own sections, so this names the standard rather than
+            # describing its contents wrongly.
+            "\n\nThe standard this page was built to meet is below. Each section says "
+            "what a departure from it means; take that at face value rather than "
+            "deciding it again.\n\n" + render_for_prompt(requirements)
         )
 
     # What this role has learned, which it was starting every review without.
@@ -328,8 +333,7 @@ async def review_before_ship(
         detail = (
             "could not complete"
             if review.primary_action_attempted
-            else "never attempted -- a review that does not try the page's one job "
-            "cannot clear it"
+            else "never attempted -- a review that does not try the page's one job cannot clear it"
         )
         outcome.blocking.append(
             f"The action the page exists for was {detail}: {review.summary[:400]}"

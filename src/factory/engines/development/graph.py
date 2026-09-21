@@ -471,7 +471,14 @@ async def _evaluate_validation(ctx: FactoryContext, session: AsyncSession, task:
             session,
             kind=TaskKind.BUILD_MVP,
             engine=EngineName.DEVELOPMENT,
-            idempotency_key=f"build:{product.idea_id}",
+            # Scoped to the evaluation that commissioned it, not to the idea's
+            # lifetime. `build:{idea_id}` answered "has this idea ever been built",
+            # when the question is "is this build already queued" -- so a BUILD_MVP
+            # that failed for a since-resolved reason could never be commissioned
+            # again, silently: the enqueue returns None, nothing is queued, and the
+            # log reads like a decision rather than a drop. That is the same key
+            # shape that swallowed run 14's rebuild, and this was the last one left.
+            idempotency_key=f"build:{product_id}:{task.id}",
             payload={"idea_id": product.idea_id, "product_id": product_id},
             idea_id=product.idea_id,
             product_id=product_id,
@@ -829,10 +836,16 @@ async def _review_live_product(ctx: FactoryContext, session: AsyncSession, task:
     requirements = await requirements_for_product(session, product_id)
     if requirements is not None:
         objective += (
-            "\n\nThis product was built to meet the criteria below. Check it against "
-            "them specifically -- a MUST that is not met is a real finding even if "
-            "nothing looks broken, and anything listed as out of scope is absent on "
-            "purpose and is not a defect.\n\n" + render_for_prompt(requirements)
+            # "The criteria below" was a lie about a block that also carries the
+            # deliberate non-goals and the standing policy, and the identical
+            # sentence in `gaps.py` is how a policy line came to be graded and filed
+            # as an unmet MUST. The block now states what each of its sections is and
+            # what force it carries, so this says which standard, not what is in it.
+            "\n\nThe standard this product was built to meet is below. Check it "
+            "against that standard specifically -- a MUST that is not met is a real "
+            "finding even if nothing looks broken. Each section says what a departure "
+            "from it means; take that at face value rather than deciding it "
+            "again.\n\n" + render_for_prompt(requirements)
         )
     recalled = await memory_store.recall_block(
         session,
