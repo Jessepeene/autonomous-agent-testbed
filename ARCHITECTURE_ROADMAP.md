@@ -1113,6 +1113,86 @@ The line to hold, and it is a fine one: **a physical prerequisite is a fact and 
 encoded; a priority is a judgement and may not.** "Reach requires something deployed"
 is the former. "Design before development" is the latter, and stays the decider's call.
 
+## Phase 2.9 — the journey, not the page (added 2026-09-21)
+
+**Status**: scoped, not built. Found by Jesse signing up to his own live product.
+
+Run 12 shipped a genuinely good page — Fraunces and Public Sans, a bakery palette,
+zero repair cycles. Then Jesse submitted his email, clicked the confirmation link,
+and landed on this:
+
+```
+manifestaudit.com
+
+Thanks — your interest has been confirmed. If you'd rather not be
+contacted about this again, visit /u/QvmRNIf02QX19hVkIaQ3d9xiQgOJMMiLsgoTEBtfliA
+to have your details deleted.
+```
+
+Plain monospace text, on the **factory's own domain**, with the unsubscribe as a bare
+relative path the browser offered to download as a `.txt`. The confirmation email
+before it read "Thanks for your interest" with no product name, no sender, no brand.
+
+`PAGE_POLICY` forbids exactly this — *"nothing internal to this factory appears on the
+page"* — and the journey ends on factory infrastructure one hop past where the policy
+applies.
+
+### Why no LLM saw it, which is the part that matters
+
+Three reasons, and none of them is "the model did not think to look".
+
+1. **The reviewer cannot leave the product's origin.** `tools/browser.py` pins every
+   review to `allowed_origins_for(deploy_url, custom_domain)`, and its own docstring
+   states the assumption: *"The reviewer only ever needs the product's own origin, so
+   that is all it gets."* True when the product was the page. The confirmation lives on
+   the API origin, so a reviewer following the flow is stopped by the SSRF guard. Not
+   an oversight — a correct security control whose premise expired.
+2. **No employee has an inbox.** The confirmation link arrives by email, and nothing in
+   this company can receive one (that is Phase 2.6). The journey contains a step no
+   reviewer can physically take.
+3. **Every remit is an artifact, not a journey.** AUDITOR reviews the live page, Design
+   reviews the deployed page against guidelines, the gap check compares the workspace to
+   its criteria. Even with origins and an inbox, nobody was asked what happens after the
+   click.
+
+The same shape as every other defect this month: not a bad judgement, a question
+nobody was in a position to ask.
+
+### The fix, and what would make it hardcoding
+
+The wrong fix is an HTML template in `api/app.py`. That is factory code emitting
+product-branded output, one generic page for every product — the house-style-as-decided-
+answer mistake, in a new place.
+
+**The product's experience is the product's to build.** The builder already emits
+`index.html` and `privacy.html`; a confirmation page belongs beside them, designed to
+that product's own standard.
+
+- **Specify the journey, not the page.** `LANDING_PAGE_REQUIREMENTS_SYSTEM` asks for
+  "what a visitor has to be able to do" and means the page. Widen it to the whole
+  visitor journey — submit, receive, confirm, unsubscribe — and the criteria get written
+  per product, the builder builds to them, and the gap check checks them. No file list,
+  no template: the same generate-and-judge loop already in use, pointed at more of the
+  product.
+- **Let the reviewer follow it.** Add the factory's own public API origin to
+  `allowed_origins_for`. One known origin read from settings, not an opening of the
+  allowlist, and it is the origin *this product's own form already posts to*.
+- **Hand the visitor back.** `/confirm/{token}` records the confirmation and redirects
+  to the product's own page. The redirect target is derived from the product's
+  `deploy_url`, which the API already has — plumbing, not a decision.
+- **The email knows its product.** `/interest/{product_id}` has the product id as its
+  URL parameter and ignores it; `send_email` already accepts `from_address` and
+  `unsubscribe_url` and is passed neither. Composing subject, sender and a real
+  unsubscribe link needs no new machinery, only the values already in hand.
+
+### What this does not fix
+
+An inbox. A reviewer still cannot receive the confirmation email, so the middle of the
+journey stays unverifiable and honest criteria about it land in `GapReport.undetermined`
+rather than `met`. That is Phase 2.6, and this phase is deliberately not waiting for it:
+widening the origin and moving the page to the product fixes what a visitor sees today,
+and the email step can be checked by a human until an employee can read mail.
+
 ## Phase 3 — Product / Management (absorbs the general manager)
 
 **Rewritten 2026-09-15.** This was "a second department manager, most likely
