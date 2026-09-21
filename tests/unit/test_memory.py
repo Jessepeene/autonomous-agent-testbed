@@ -452,3 +452,70 @@ async def test_pruning_never_hard_deletes(memory_session: AsyncSession) -> None:
 
     total_rows = (await memory_session.execute(select(Memory))).scalars().all()
     assert len(total_rows) == 5  # nothing physically removed, only superseded
+
+
+# --------------------------------------------------------- recall never blocks
+
+
+class _BrokenSession:
+    """A session whose every statement fails, the way a dropped connection or an
+    un-run migration behaves."""
+
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    async def execute(self, *_a, **_k):
+        self.attempts += 1
+        raise RuntimeError("connection reset while reading memories")
+
+
+async def test_recall_returns_nothing_rather_than_raising() -> None:
+    """The rule, pinned as behaviour rather than as a comment somebody has to have
+    read. Recall is an enhancement at every call site and a dependency at none: an
+    agent missing its standards is degraded, one that never ran is a hole in the
+    pipeline.
+
+    This exists because the comment version failed. It was worked out in
+    `preship.py`, written down there, and five of this codebase's seven recall sites
+    stayed unguarded regardless -- including one put on the landing-page build path
+    on 2026-09-21, where a failed recall would have failed the build, inside a
+    function whose own docstring promises it never blocks one.
+    """
+    session = _BrokenSession()
+
+    assert await memory.recall(session, query="anything at all", scopes=["global"]) == []
+    assert session.attempts == 1, "it must actually have tried"
+
+
+async def test_recall_block_returns_empty_rather_than_raising() -> None:
+    """The rendered form takes the same guarantee -- it is what callers actually use."""
+    assert await memory.recall_block(_BrokenSession(), query="anything at all") == ""
+
+
+async def test_a_failed_hit_count_does_not_cost_the_caller_its_memories(
+    memory_session: AsyncSession, monkeypatch
+) -> None:
+    """Recording that a memory was useful is bookkeeping for `prune`'s value score.
+    Losing it must not lose the recall it was bookkeeping for."""
+    await memory.remember(
+        memory_session,
+        content="The repair sandbox has no dependencies installed before the first run.",
+        scope="global",
+    )
+    await memory_session.flush()
+
+    real_execute = memory_session.execute
+    calls = {"n": 0}
+
+    async def flaky(stmt, *a, **k):
+        calls["n"] += 1
+        # The SELECT succeeds; the hit-count UPDATE that follows it does not.
+        if calls["n"] > 1:
+            raise RuntimeError("write failed")
+        return await real_execute(stmt, *a, **k)
+
+    monkeypatch.setattr(memory_session, "execute", flaky)
+    found = await memory.recall(memory_session, query="repair sandbox dependencies")
+
+    assert len(found) == 1
+    assert "dependencies installed" in found[0].content

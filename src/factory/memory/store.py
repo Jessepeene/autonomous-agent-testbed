@@ -182,8 +182,30 @@ async def recall(
     scopes: list[str] | None = None,
     limit: int = RECALL_LIMIT,
 ) -> list[Recalled]:
-    """Most relevant memories for a situation, scored on token overlap."""
-    rows = await _in_scopes(session, scopes or [GLOBAL_SCOPE])
+    """Most relevant memories for a situation, scored on token overlap.
+
+    **Never raises.** Recall is an enhancement at every call site and a dependency at
+    none: an agent without its accumulated standards is degraded, an agent that did
+    not run at all is a hole in the pipeline. So a recall that cannot be served
+    returns nothing rather than taking its caller down with it.
+
+    The guarantee lives here rather than in each caller because it kept not living in
+    each caller. It was discovered in `preship.py`, written down as a comment there,
+    and then five of the seven recall sites in this codebase went on doing it
+    unguarded -- including one added to the landing-page build path on 2026-09-21, by
+    the same person who had written the preship comment. A rule that has to be
+    remembered at each new call site is a rule that holds until somebody is busy.
+
+    Logged rather than silently swallowed: "ran with memory" and "ran without it" are
+    different events and must never look alike in a trace. And nothing is truly
+    hidden by this -- if the session itself is broken, the caller's next statement
+    fails on its own account, with its own error, which is the one worth seeing.
+    """
+    try:
+        rows = await _in_scopes(session, scopes or [GLOBAL_SCOPE])
+    except Exception as exc:
+        log.warning("memory.recall_unavailable", scopes=scopes, detail=str(exc)[:200])
+        return []
     if not rows:
         return []
 
@@ -208,11 +230,16 @@ async def recall(
     scored.sort(key=lambda r: r.relevance, reverse=True)
     top = scored[:limit]
     if top:
-        await session.execute(
-            update(Memory)
-            .where(Memory.id.in_([r.id for r in top]))
-            .values(hits=Memory.hits + 1, last_used_at=datetime.now(UTC))
-        )
+        try:
+            await session.execute(
+                update(Memory)
+                .where(Memory.id.in_([r.id for r in top]))
+                .values(hits=Memory.hits + 1, last_used_at=datetime.now(UTC))
+            )
+        except Exception as exc:
+            # Bookkeeping for `prune`'s value score. Failing to record that a memory
+            # was useful must not cost the caller the memory it already has in hand.
+            log.warning("memory.hit_not_recorded", count=len(top), detail=str(exc)[:200])
     return top
 
 
