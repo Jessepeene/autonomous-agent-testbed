@@ -46,6 +46,7 @@ from factory.api.app import SELF_TEST_SUFFIX
 from factory.engines.development.requirements import render_for_prompt
 from factory.llm.providers.base import LLMError
 from factory.logging import get_logger
+from factory.memory import store as memory_store
 from factory.settings import EngineName, TaskType
 from factory.state import repository
 from factory.state.schemas import PreShipReview, WorkRequirements
@@ -201,6 +202,33 @@ async def review_before_ship(
             "out of scope is absent on purpose and is not a defect.\n\n"
             + render_for_prompt(requirements)
         )
+
+    # What this role has learned, which it was starting every review without.
+    #
+    # A human reviewer does not need the standard restated on each job: somebody told
+    # them once, or they watched a bad one land badly, and it became theirs. This
+    # reviewer had no memory at all -- every run a first-day hire who has never been
+    # told anything and never will be. So the only place a standard could live was
+    # this brief, which means every standard has to be written down in advance by
+    # somebody who already knows to want it.
+    #
+    # `capability:` is the right scope rather than the product's: a lesson about how
+    # reviewing goes applies to the next product too.
+    # Recall must never be the reason a review does not happen: a reviewer without its
+    # standards is degraded, one that did not run at all is a gap in the gate. Logged
+    # rather than swallowed, because "reviewed without memory" and "reviewed with it"
+    # are different events and must not look alike.
+    try:
+        recalled = await memory_store.recall_block(
+            session,
+            query=f"{product_name} pre-ship review: page, signup, confirmation, email",
+            scopes=memory_store.scopes_for(engine=EngineName.DEVELOPMENT, role=role.name.value),
+        )
+    except Exception as exc:
+        log.warning("preship.recall_unavailable", product_id=product_id, detail=str(exc)[:200])
+        recalled = ""
+    if recalled:
+        objective += f"\n\n{recalled}"
 
     browser = BrowserSession(allowed_origins=origins)
     try:

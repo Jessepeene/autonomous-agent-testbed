@@ -836,8 +836,21 @@ async def _review_live_product(ctx: FactoryContext, session: AsyncSession, task:
         )
     recalled = await memory_store.recall_block(
         session,
-        query=f"{product.name} live page defect",
-        scopes=memory_store.scopes_for(engine=EngineName.DEVELOPMENT, product_id=product_id),
+        # The journey, not the page: the query decides what comes back, and this
+        # reviewer now follows a signup through its confirmation mail and onto
+        # whatever page that link leads to.
+        query=f"{product.name} live product review: page, signup, confirmation, email",
+        scopes=memory_store.scopes_for(
+            engine=EngineName.DEVELOPMENT,
+            product_id=product_id,
+            # Its own accumulated judgement, which it was not being given. A standard
+            # this role has learned -- "a confirmation page on a domain the visitor
+            # does not recognise reads as phishing" -- belongs to the reviewing job and
+            # applies on every product, which is exactly what `capability:` is for. A
+            # reviewer recalling only the product's history starts every review with
+            # no professional standards, which is how a human first-day hire reviews.
+            role=role.name.value,
+        ),
     )
 
     # Captured before the agent runs: anything it re-reports bumps that issue's

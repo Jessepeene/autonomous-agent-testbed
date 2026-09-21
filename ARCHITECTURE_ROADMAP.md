@@ -1225,6 +1225,88 @@ That is a smaller gap than it sounds: every defect Jesse found — no product na
 sender, no real unsubscribe link, plain-text confirmation page — is present in the
 composed message and the served page, and therefore visible to a reviewer today.
 
+## Phase 2.10 — how this company learns anything (added 2026-09-21)
+
+**Status**: scoped, not built. The read half shipped the same day.
+
+Jesse's question, and it is the one that generalises: *"how can we get it to do the
+thing we want without explicitly needing to ask it? How would a human operate?"*
+
+A designer is not told "brand the confirmation page" on every project. Somebody told
+them once, or they watched a bad one land badly, and it became theirs. The standard
+lives in the person and travels to every job they ever do. Ours is amnesiac: every
+review is a first-day hire who has never been told anything and never will be, so the
+only place a standard can live is the brief — which means every standard must be
+written down in advance by somebody who already knew to want it. That is the loop this
+phase exists to break.
+
+### What exists, and the exact shape of the hole
+
+`memory/store.py` is well built and correctly scoped: `global`, `engine:`,
+`capability:<role>` (*"a lesson about how a job goes belongs to the job, not to
+whichever product happened to surface it"*), `product:`. `MemoryKind.PREFERENCE`
+already means *"an operator decision to honour going forward"* and is the one kind
+exempt from eviction.
+
+Ten `remember()` call sites. Every one writes what the **system** observed — a build
+outcome, a heal failure, a compliance verdict, a churn lesson. Exactly one writes a
+`PREFERENCE`: a human's deliberate deploy-with-known-risk, scoped to that product.
+
+**Zero writes in `hitl/`.** A human reply becomes `enqueue_guided_patch` — one
+instruction, for one product, consumed and discarded. On 2026-09-21 Jesse read a
+confirmation email and said it was "boring and indescriptive… it could say Alex from
+Rise". There is no path by which that sentence becomes anything the company carries.
+It reached a human collaborator, who turned it into code. **That is the loop to
+escape**: every standard arriving as a code change, authored by whoever happened to be
+listening.
+
+### The general shape
+
+An observation from outside this company is **two things at once**: an instruction
+about the thing at hand, and sometimes a standard that outlives it. Only the first is
+taken today.
+
+- **Extraction is a field, not a step.** The same finding as `Ask`/`needs_to_know`:
+  `report_product_issue` shipped as an elected action and two live runs never chose it.
+  Whatever handles a reply must always be asked "is there a standard in this that
+  outlives this product?", never given the option to skip it.
+- **Whose it is, is the judgement.** This product, this role, this department, or the
+  company. `scope_for` already expresses all four; picking is a judgement and must not
+  become a rule. A standard filed on `capability:` is the one that behaves like a
+  professional standard — it applies on the next product, which is the whole point.
+- **Sources, in the order they will arrive.** Operator replies to escalations (exist,
+  discarded). Operator observations that never became escalations — today those reach a
+  human and become commits. Customer replies (Phase 2.6). Market outcomes: conversion,
+  churn, revenue. All four are one shape: *something outside said something, and some
+  part of this company should carry it forward.* Build it for the shape, not for the
+  first source.
+
+### The constraint, and it is not negotiable
+
+**A remembered preference may shape judgement. It may never relax a constraint.**
+
+The end goal is an organisation whose objective is fixed and whose rails are fixed,
+with judgement everywhere between (see the memory note on the end goal). A learning
+write path is precisely where that line gets crossed by accident: a preference that
+softens GDPR erasure, the suppression list, the spend cap or the campaign-approval gate
+is one that must never be written, however reasonably it was said. Extraction gets a
+allowlist of what a preference may be *about*, or it becomes the mechanism by which an
+autonomous system talks its way out of its own safety rails.
+
+### Why this one matters more than it looks
+
+The end goal names *"an external persistent memory system stores its mission,
+strategies, experiments, decisions, financial results and lessons learned"* and an
+organisation that *"learns from real-world feedback"*. **This is that write path.**
+Without it there is no accumulation: every strategic review starts from zero, every
+lesson is re-derived at full cost, and the only durable learning mechanism the company
+has is a human writing code — which does not scale past the human.
+
+It is also the cheapest correction available to the confirmation-page problem. The
+alternative is extending Design's remit to the journey, which is another rule written
+by us in advance. This is: say it once, and any reviewer of any product carries it,
+including to the things neither of us has thought of yet.
+
 ## Phase 3 — Product / Management (absorbs the general manager)
 
 **Rewritten 2026-09-15.** This was "a second department manager, most likely
