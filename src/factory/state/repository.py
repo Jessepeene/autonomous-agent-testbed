@@ -532,6 +532,29 @@ async def count_active_validations(session: AsyncSession) -> int:
     return int((await session.execute(stmt)).scalar_one())
 
 
+async def has_unfinished_task(session: AsyncSession, *, product_id: str, kind: TaskKind) -> bool:
+    """Is work of this kind already in flight for this product?
+
+    The honest version of "do not commission this twice". An idempotency key scoped to
+    an entity's *lifetime* answers a different question -- "has this ever happened" --
+    and swallows every later decision to do it again: a landing-page build keyed on
+    `validate:{idea_id}` made each product buildable exactly once, so when a build
+    failed its review and the supervisor decided to rebuild, the decision was dropped
+    with no trace and the product stalled forever looking like a deliberate hold.
+
+    Concurrency is the real invariant. Two builds racing on one workspace is the thing
+    to prevent; a second build after the first finished is often exactly right.
+    """
+    stmt = select(func.count()).where(
+        Task.product_id == product_id,
+        Task.kind == kind.value,
+        Task.status.in_(
+            (TaskStatus.PENDING.value, TaskStatus.CLAIMED.value, TaskStatus.RUNNING.value)
+        ),
+    )
+    return int((await session.execute(stmt)).scalar_one()) > 0
+
+
 async def count_pending_tasks(
     session: AsyncSession,
     engine: EngineName | None = None,

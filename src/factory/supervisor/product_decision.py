@@ -241,8 +241,8 @@ async def _raise_staffing_gap(session: AsyncSession, facts: ProductFacts) -> lis
 
 
 async def _commission(
-    session: AsyncSession, facts: ProductFacts, needs: list[Unmet]
-) -> list[Unmet]:
+    session: AsyncSession, facts: ProductFacts, needs: list[Unmet], decision_task_id: str
+) -> tuple[list[Unmet], list[Unmet]]:
     """Turn a decision into work, and nowhere else does this happen.
 
     Everything with a manager goes through `route_attention`, which asks rather than
@@ -259,23 +259,36 @@ async def _commission(
     """
     routed = await route_attention(session, facts.product_id, needs=needs, asked_by="supervisor")
     if Unmet.DEPLOYMENT not in needs:
-        return routed
+        return routed, []
 
-    # The key Compliance used to use, kept deliberately: a decision taken twice about
-    # the same product must not produce two builds.
+    # Two builds racing on one workspace is the thing to prevent -- not a second build
+    # ever. This key used to be `validate:{idea_id}`, scoped to the idea's lifetime, so
+    # a product was buildable exactly once: when run 14's build failed its review and
+    # the supervisor decided to rebuild, `enqueue_task` returned None, nothing
+    # happened, and the product stalled forever while the log said it was holding for
+    # design. A decision recorded and then discarded, which is the defect shape this
+    # module was written to remove.
+    if await repository.has_unfinished_task(
+        session, product_id=facts.product_id, kind=TaskKind.BUILD_LANDING_PAGE
+    ):
+        return routed, [Unmet.DEPLOYMENT]
+
     created = await repository.enqueue_task(
         session,
         kind=TaskKind.BUILD_LANDING_PAGE,
         engine=EngineName.DEVELOPMENT,
-        idempotency_key=f"validate:{facts.idea_id}",
+        # Scoped to the decision that asked for it, so one decision retried cannot
+        # double-build while a later decision still can build at all.
+        idempotency_key=f"validate:{facts.product_id}:{decision_task_id}",
         payload={"idea_id": facts.idea_id, "product_id": facts.product_id},
         idea_id=facts.idea_id,
         product_id=facts.product_id,
         priority=50,
     )
-    if created is not None:
-        routed.append(Unmet.DEPLOYMENT)
-    return routed
+    if created is None:
+        return routed, [Unmet.DEPLOYMENT]
+    routed.append(Unmet.DEPLOYMENT)
+    return routed, []
 
 
 async def decide_next(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
@@ -321,7 +334,19 @@ async def decide_next(ctx: FactoryContext, session: AsyncSession, task: Task) ->
             # reinterpreted into whatever is nearest.
             log.warning("supervisor.unknown_need", product_id=product_id, named=raw[:60])
 
-    routed = await _commission(session, facts, wanted)
+    routed, blocked = await _commission(session, facts, wanted, task.id)
+    if blocked:
+        # A decision that could not be carried out is not a decision to do nothing, and
+        # the two used to produce the same line. Run 14's supervisor chose to rebuild,
+        # the commission was swallowed by an idempotency key, and the note read
+        # "holding because..." -- so a permanently stuck product looked like a
+        # deliberate pause for design, and stayed that way.
+        log.warning(
+            "supervisor.commission_blocked",
+            product_id=product_id,
+            blocked=[n.value for n in blocked],
+            reason="work of this kind is already in flight for this product",
+        )
     # Raised after the decision, never before it: what the company is not staffed for
     # must not reach the decider as something it failed to pursue.
     staffing = await _raise_staffing_gap(session, facts)
@@ -337,10 +362,18 @@ async def decide_next(ctx: FactoryContext, session: AsyncSession, task: Task) ->
             "routed": [n.value for n in routed],
             "holding": decision.holding[:500],
             "staffing_gaps": [n.value for n in staffing],
+            "blocked": [n.value for n in blocked],
             "unmet": [n.value for n in facts.unmet],
         },
     )
     if not routed:
+        # Which of the two it was. "Chose to start nothing" and "could not start what
+        # it chose" are different facts about the company and must not read alike.
+        if blocked:
+            return (
+                f"supervisor: {facts.name} -- chose "
+                f"{', '.join(n.value for n in blocked)} but it is already in flight"
+            )
         return f"supervisor: {facts.name} -- nothing new commissioned" + (
             f"; holding because {decision.holding[:120]}" if decision.holding else ""
         )

@@ -312,6 +312,60 @@ async def test_a_product_with_only_a_build_left_still_gets_built(
     assert len(await _tasks_of(session, TaskKind.BUILD_LANDING_PAGE)) == 1
 
 
+async def test_a_rebuild_after_a_failed_attempt_is_commissioned(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """Run 14: the build failed its review, the supervisor decided to rebuild, and the
+    commission was swallowed by an idempotency key scoped to the idea's lifetime --
+    so the product was buildable exactly once, ever, and stalled forever."""
+    product_id = await _product(session)
+    decision = ProductNext(
+        assessment="Nothing is built yet and the only way to learn whether bakers want "
+        "this is to put something in front of them.",
+        pursue=[Unmet.DEPLOYMENT.value],
+    )
+    ctx, provider = _ctx(tmp_path, decision)
+    provider.register(ProductNext, decision)
+
+    await decide_next(ctx, session, _task(product_id))
+    await session.flush()
+    builds = await _tasks_of(session, TaskKind.BUILD_LANDING_PAGE)
+    assert len(builds) == 1
+
+    # The first attempt finishes and fails its review, exactly as run 14's did.
+    builds[0].status = TaskStatus.DONE.value
+    await session.flush()
+
+    await decide_next(ctx, session, _task(product_id))
+    await session.flush()
+    assert (
+        len(await _tasks_of(session, TaskKind.BUILD_LANDING_PAGE)) == 2
+    ), "a decision to rebuild after a finished attempt must reach the queue"
+
+
+async def test_a_second_build_is_refused_while_one_is_still_in_flight(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """Concurrency is the real invariant -- two builds racing on one workspace."""
+    product_id = await _product(session)
+    decision = ProductNext(
+        assessment="Nothing is built yet and the audience cannot answer without it.",
+        pursue=[Unmet.DEPLOYMENT.value],
+    )
+    ctx, provider = _ctx(tmp_path, decision)
+    provider.register(ProductNext, decision)
+
+    await decide_next(ctx, session, _task(product_id))
+    await session.flush()
+    # ...left pending, i.e. still in flight.
+    result = await decide_next(ctx, session, _task(product_id))
+    await session.flush()
+
+    assert len(await _tasks_of(session, TaskKind.BUILD_LANDING_PAGE)) == 1
+    # And it says so, rather than reading like a decision to do nothing.
+    assert "already in flight" in result
+
+
 async def test_an_unowned_need_cannot_be_pursued(session: AsyncSession, tmp_path: Path) -> None:
     """Naming it is how the company finds out it needs somebody to own it. Acting on
     it would require inventing a department, which is how an unowned question starts
