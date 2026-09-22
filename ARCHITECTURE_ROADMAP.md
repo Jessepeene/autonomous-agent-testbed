@@ -1448,6 +1448,109 @@ the catalogue, and a test asserts every group the catalogue emits has a departur
 rule — the rule, not the values, which is the shape that would have caught DESIGN
 missing from `routing.PRIORITY`.
 
+## Phase 2.12 — why this company cannot learn when to stop (added 2026-09-22)
+
+**Status**: investigated, not built. This is the bridge from the SaaS factory to the
+profit objective, and it is mostly schema rather than new machinery.
+
+Jesse, on his own instinct and then on the system's: *"I want everything to be perfect
+before shipping, but in an actual business case at one point you need to say 'this is
+enough'. How do we get an AI agent to do this?"* — and then the correction that made it
+the right question: *"instead of finding the answer to that question we should look
+into the psychology and decision making behind it."*
+
+Defining "enough" per artifact is the pipeline mistake wearing new clothes. A
+model-agnostic general manager cannot have us pre-writing a bar for landing pages, then
+services, then freelance deliverables. **"Enough" is not a quality threshold. It is a
+comparison** — further effort here has lower expected return than the next-best use of
+that effort. It is a property of the alternatives, never of the thing.
+
+### The psychology, which turns out to be structure
+
+Human perfectionism in shipping decisions is not a character trait. Defects are
+visible, specific and attributable to a person; the cost of delay is invisible, diffuse
+and attributed to nobody. Nobody is ever blamed for the customer they did not get.
+Being slow is individually rational even where it is collectively ruinous.
+
+**This system reproduced that asymmetry exactly and became a perfectionist for the same
+reason.** Every instrument it owns measures defects. Nothing measures the cost of not
+shipping. `RELEASE_SYSTEM` is *told* to weigh it — *"a page that never goes live answers
+nothing"* — and is handed no fact about it: no clock, no counterfactual, no alternatives.
+It is asked to balance a scale with one pan loaded.
+
+### What is learnable here, exactly
+
+A thing is learnable only if it is a `TunableParameter` (versioned prompt or weight
+vector) with one `target_metric`, accumulating `LearningEpisode` rows — Bernoulli
+success/failure — that a trial compares against baseline. Four findings follow.
+
+**The allowlist contains only makers.** Seven mutable keys: idea generator,
+discriminator, scoring weights, lead planner, outreach writer, landing-page builder,
+sender identity. Every one produces an artifact. **Not one judge is on it** — no
+`RELEASE_SYSTEM`, no `GAP_SYSTEM`, no `LANDING_PAGE_REQUIREMENTS_SYSTEM`, no
+`PAGE_POLICY`, no `product_decision.SYSTEM`. *This company can learn how to make things.
+It cannot learn how to decide things.* The bar lives in two frozen prompts — the one
+writing the MUSTs and the one enforcing "an unmet MUST is not shippable" — and no
+outcome can move either. Simon's adaptive aspiration level, the half everyone drops, is
+architecturally forbidden.
+
+**An outcome can only ever teach one thing.** `LearningEpisode` has a single non-null
+FK. `graph.py`'s validation result is recorded against `landing_page_prompt_version` and
+nothing else, so when an idea fails in the market the only thing that learns is the
+prompt that wrote the page. Idea selection, requirements, the release decision and the
+outreach never hear. **The page writer is blamed for a bad idea.**
+
+**The metric that would reveal a bar set too low does not exist.**
+`landing_page_interest_rate` cannot distinguish *"nobody wants this"* from *"the form was
+broken"*: both are `passed=False, sent=40, signals=0`. So the failure mode of a low bar
+is invisible to the only metric that bears on it, and there is no evidence path by which
+a bar ever comes *down* — only up, by someone adding another MUST. A ratchet with no
+pawl on the other side. That, and not anyone's disposition, is the institutional
+perfectionism.
+
+**Decisions have no identity.** `release.decided` records decision, rationale, unmet
+MUSTs, accepted issues and blocking count — genuinely rich — as JSONB in `task_events`,
+with nothing any outcome can reference. Good evidence, unaddressable.
+
+### What it would take
+
+1. **Decisions get identity**, so an outcome can point back at one. The content is
+   already being recorded; it needs a row and a key.
+2. **An outcome becomes evidence about several decisions** — a join replacing the single
+   FK. This is the keystone: 1, 3 and every form of profit attribution are blocked
+   behind it.
+3. **A metric that measures a decision rather than an artifact.** For the shipping bar,
+   *signal validity*: did shipping this produce usable information? Forty visitors and
+   zero signups on a working page is a successful experiment with a negative result; the
+   same numbers on a broken form is a wasted one. Nothing tells them apart today, and
+   that distinction **is** the aspiration level's feedback signal.
+4. **Resolve the safety tension deliberately.** The allowlist freezing every judge is not
+   an oversight — it is what stands between this and a system that talks itself into
+   shipping anything. The honest resolution is to **learn the evidence, not the
+   instruction**: judges' standards stay fixed and immutable, while the system learns
+   *which facts predict good outcomes* and shows the judge those. The rails do not move;
+   the bar adapts. Same line as `learning/feedback.py`'s refusal to file a lesson that
+   would relax a constraint.
+
+### Why this is the bridge to the objective
+
+**Profit is a decision-quality metric, not an artifact-quality one.** A company that can
+only learn to make things better and never to decide better cannot optimise profit — it
+can optimise craft, forever, which is precisely the trap. The end goal's *"learns from
+real-world feedback"* is blocked on item 2 and nothing else.
+
+### The authority error this explains
+
+`RELEASE_SYSTEM`'s *"a MUST that is not met means it is not shippable"* hands a
+source-reading reviewer an absolute veto over the judge that actually weighs purpose and
+cost of delay. The reviewer bears none of the cost of not shipping — no stake, no
+horizon, no view of alternatives — so its verdict trends conservative at no cost to
+itself. **The right to say "this is enough" belongs to whoever bears the opportunity
+cost.** That is what a hierarchical decision structure is *for*: each level holds a
+different horizon and a different set of alternatives, so each answers "enough"
+differently and legitimately, and a reviewer reports evidence rather than holding a
+veto.
+
 ## Phase 3 — Product / Management (absorbs the general manager)
 
 **Rewritten 2026-09-15.** This was "a second department manager, most likely
