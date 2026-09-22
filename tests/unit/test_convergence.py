@@ -142,3 +142,34 @@ def test_a_changed_standard_does_not_mask_a_finished_build() -> None:
         standard_changed=["product (development:landing_page)"],
     )
     assert done.converging is None, "no issues at all has never been a count comparison"
+
+
+def test_no_convergence_signal_is_never_reported_as_not_converging() -> None:
+    """`converging` is tri-valued and the release judge read it through `bool()`.
+
+    `bool(None)` is `False`, so every state with no signal in it was reported to the
+    judge as "no better than last time -- this is not converging". That already
+    misdescribed a build sitting at zero blocking issues, and once a moved standard
+    also produces `None` it would have contradicted, in the same prompt, the
+    paragraph explaining that the two counts are not comparable.
+
+    Asserted against the rendered facts rather than the property, because the
+    property was always right -- the defect was entirely in the reading.
+    """
+    from factory.engines.development.release import _render_progress_facts
+
+    moved = _progress(
+        blocking_now=4,
+        blocking_at_last_attempt=2,
+        standard_changed=["design (design:guidelines)"],
+    )
+    rendered = " ".join(_render_progress_facts(moved))
+    assert "4 now" in rendered and "2 at the last attempt" in rendered
+    assert "not converging" not in rendered, "no signal must not be reported as a wall"
+    assert "this is converging" not in rendered
+
+    # ...and a real direction is still stated when there is one.
+    shrinking = _progress(blocking_now=2, blocking_at_last_attempt=5, standard_changed=[])
+    assert "this is converging" in " ".join(_render_progress_facts(shrinking))
+    walled = _progress(blocking_now=5, blocking_at_last_attempt=5, standard_changed=[])
+    assert "not converging" in " ".join(_render_progress_facts(walled))

@@ -38,6 +38,55 @@ from factory.supervisor.context import FactoryContext
 
 log = get_logger(__name__)
 
+
+def _render_progress_facts(progress: repository.ProductProgress) -> list[str]:
+    """The thread across attempts, as facts for the judge to weigh.
+
+    Extracted so it can be tested without a database or a model call. It was inline,
+    and the defect it hid was invisible for exactly that reason: `converging` is
+    tri-valued and this read it through `bool()`, which collapses "no signal" onto
+    "not converging".
+    """
+    facts: list[str] = []
+    if progress.standard_changed:
+        # Stated before the counts, because it changes what the counts mean. Without
+        # it a bar that grew between attempts reads as a product that stopped
+        # improving, and the honest response to that reading is to stop -- so the
+        # company changing its mind about what good looks like would retire the
+        # product it had just raised its hopes for.
+        facts += [
+            "",
+            "**The standard changed since the last attempt.** These were written "
+            "after the previous build was judged, so that build was never held to "
+            "them: " + ", ".join(progress.standard_changed) + ".",
+            "A blocking count that did not fall across this change is not evidence "
+            "the product got worse; the two counts were taken against different "
+            "bars. Judge this build against the standard as it stands now, and treat "
+            "criteria that only appeared with the new standard as first-time work "
+            "rather than as a repair that failed.",
+        ]
+    if progress.blocking_at_last_attempt is not None:
+        counts = (
+            f"Blocking issues: {progress.blocking_now} now, "
+            f"{progress.blocking_at_last_attempt} at the last attempt."
+        )
+        # Three states, not two. `bool(None)` is False, so every state carrying no
+        # signal was asserted to the judge as "not converging" -- already wrong for a
+        # build sitting at zero blocking issues, and now contradicting the paragraph
+        # directly above it whenever the standard moved. Saying nothing about
+        # direction is the honest option when there is no direction to report.
+        if progress.converging is None:
+            facts.append(counts)
+        else:
+            direction = (
+                "fewer than last time -- this is converging"
+                if progress.converging
+                else "no better than last time -- this is not converging"
+            )
+            facts.append(f"{counts} {direction}.")
+    return facts
+
+
 RELEASE_SYSTEM = """\
 You decide whether a product is released. You are not a checklist -- the findings \
 below are evidence for a judgement, not a verdict you are restating.
@@ -138,32 +187,7 @@ async def decide_release(
     # progress from a wall, and "the blocking set went 6 -> 4 -> 4 and these two
     # criteria have failed on every pass" can.
     facts += ["", f"Repair attempts on this product so far: {heal_attempts}."]
-    if progress.standard_changed:
-        # Stated before the counts, because it changes what the counts mean. Without
-        # it a bar that grew between attempts reads as a product that stopped
-        # improving, and the honest response to that reading is to stop -- so the
-        # company changing its mind about what good looks like would retire the
-        # product it had just raised its hopes for.
-        facts += [
-            "",
-            "**The standard changed since the last attempt.** These were written "
-            "after the previous build was judged, so that build was never held to "
-            "them: " + ", ".join(progress.standard_changed) + ".",
-            "A blocking count that did not fall across this change is not evidence "
-            "the product got worse; the two counts were taken against different "
-            "bars. Judge this build against the standard as it stands now, and treat "
-            "criteria that only appeared with the new standard as first-time work "
-            "rather than as a repair that failed.",
-        ]
-    if progress.blocking_at_last_attempt is not None:
-        direction = {
-            True: "fewer than last time -- this is converging",
-            False: "no better than last time -- this is not converging",
-        }[bool(progress.converging)]
-        facts.append(
-            f"Blocking issues: {progress.blocking_now} now, "
-            f"{progress.blocking_at_last_attempt} at the last attempt. {direction}."
-        )
+    facts += _render_progress_facts(progress)
     if progress.stuck:
         facts += [
             "",
@@ -172,9 +196,7 @@ async def decide_release(
         ]
         facts += [f"  - {title}" for title in progress.stuck]
     if progress.last_decision:
-        facts.append(
-            f"\nThe last release decision on this product was: {progress.last_decision}."
-        )
+        facts.append(f"\nThe last release decision on this product was: {progress.last_decision}.")
     facts.append(
         "The test suite passes and the deterministic contract checks pass; those are "
         "not in question."

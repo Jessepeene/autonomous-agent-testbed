@@ -127,7 +127,8 @@ def _render_options(
         # alternative was an unbounded wait against a bounded action, and the bounded
         # one wins that comparison however well it is reasoned about. Asking cost
         # thirty seconds; nothing here said so.
-        lines.append("")
+        if mine:
+            lines.append("")
         lines.append(
             "Another department's to do. You can ask them to look at it and you "
             "cannot hand them the work, so what you are choosing is whether it is "
