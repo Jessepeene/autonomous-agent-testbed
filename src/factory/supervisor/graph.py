@@ -21,6 +21,7 @@ from langgraph.graph import END, START, StateGraph
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from factory import causality
 from factory.engines.base import get_runner
 from factory.engines.compliance.graph import (
     VALIDATION_CAPACITY_RECHECK_SECONDS,
@@ -173,7 +174,13 @@ async def _run_engine(
         async with session_scope(ctx.settings) as session:
             claimed = await session.get(Task, task_id)
             assert claimed is not None
-            note = await runner(ctx, session, claimed)
+            # Everything this handler enqueues is caused by this task. Marked once
+            # here rather than passed down through every runner, because the parent
+            # link is ambient to the work and a parameter threaded through five
+            # layers is one that gets dropped at the fourth -- which is how this
+            # column came to be populated in 0 of 232 rows. See `factory/causality`.
+            with causality.running(task_id):
+                note = await runner(ctx, session, claimed)
             await repository.complete_task(session, task_id)
             await repository.record_task_event(
                 session,

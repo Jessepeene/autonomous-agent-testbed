@@ -1635,6 +1635,101 @@ and was abandoned), first-pass blocking count, ship versus rethink, time to live
 are real measures of the build chain, available at one per run, and enough to run
 challengers against this company's own judges before a single customer exists.
 
+## Phase 2.14 — an outcome should teach more than one thing (added 2026-09-22)
+
+**Status**: step 1 of 4 built 2026-09-22. This is the keystone Phases 2.12 and 2.13
+both sit on, and the precondition for measuring profit at all.
+
+### The problem, in one picture
+
+```
+        ┌──────────────────────────────┐
+        │  OUTCOME: validation failed  │
+        │  40 approached, 0 signed up  │
+        └──────────────┬───────────────┘
+                       │  one foreign key
+                       ▼
+        ┌──────────────────────────────┐
+        │   LANDING_PAGE_SYSTEM  v7    │ ← the only thing that learns
+        └──────────────────────────────┘
+
+   was the idea any good?          ✗ learns nothing
+   were the criteria right?        ✗
+   was the design right?           ✗
+   was "ship it" the right call?   ✗
+   was the outreach any good?      ✗
+```
+
+`LearningEpisode` has exactly one non-null foreign key, so a market failure is
+recorded against the prompt that wrote the page. **The page writer is blamed for a
+bad idea.** What it should be:
+
+```
+        ┌──────────────────────────────┐
+        │  OUTCOME: 40 approached, 0   │
+        └──────────────┬───────────────┘
+                       │ is evidence about (many)
+   ┌───────┬───────────┼───────────┬────────────┐
+   ▼       ▼           ▼           ▼            ▼
+ idea   criteria    design    "ship it"     outreach
+chosen   written    decided   decision      prompt v3
+```
+
+### Four steps
+
+**1. The causal chain — built 2026-09-22.** Attribution walks backwards from an
+outcome to the decisions that led to it, which needs a chain. There was none:
+`task_events.caused_by_task_id`, whose own docstring calls it *"the column that makes
+this a trail rather than another log"*, was populated in **0 of 232 rows**. Both ends
+existed -- `supervisor/graph.py` reads the parent out of a claimed task's payload,
+`enqueue_task` accepts a payload -- and nothing ever put one into the other.
+
+Fixed with `factory/causality.py`: a context variable set once where a task's handler
+begins, read by `enqueue_task`. Ambient rather than a parameter, because the
+per-call-site convention is what already failed here, and had also cost five unguarded
+recall sites and a policy line graded as a criterion in three separate judges.
+`contextvars` rather than a global so two engines running concurrently attribute their
+own work.
+
+**2. Decisions get to exist.** A release decision currently lives as JSONB inside a log
+row: rich content, no identity, nothing can point at it. It becomes a first-class
+record — what was chosen, by whom, why, and what the alternatives were.
+
+**3. `learning_episodes` becomes `outcomes` + `outcome_evidence`.** One outcome, many
+subjects, through the same `(subject_kind, subject_id)` pattern `requirements` already
+uses. `subject_kind` starts as `parameter` and `decision` and extends to `code` or
+`workflow` with no schema change, which is exactly what Phase 2.13 needs.
+
+**4. The links are derived, never hand-written.** Walk the chain back from the
+outcome's task and collect the decisions made along the way. Hand-written links are
+the same convention that left step 1's column empty.
+
+### Migration safety
+
+Running trials must not break. Each `learning_episodes` row copies to one `outcome`
+plus one `outcome_evidence` row with `subject_kind='parameter'`; `episode_counts` reads
+through the join filtered the same way and returns **byte-identical** numbers. The old
+table stays one release as a fallback. No trial's numerator or denominator moves.
+
+### Against the bigger goal
+
+- **Model-agnostic** — `outcomes` carries a *value*, not only success/failure. A
+  validation's outcome is signals; a freelance job's is money. One record.
+- **Profit** — a `ledger` row becomes an outcome like any other, so *"which decisions
+  produced money"* is a query rather than a guess. Profit is a decision-quality
+  metric, and this is what makes decisions measurable.
+- **Strategic review** — *"what did we decide, and how did it go"* is currently
+  unanswerable.
+- **Self-improvement** — a challenger of any kind is just another `subject_kind`.
+
+### Honest limits
+
+This does not make learning *faster*. Spreading one outcome across five decisions
+creates no new information, and with zero customers there is still almost nothing to
+learn from. It makes things learnable **that currently cannot learn at all**. And
+crediting every ancestor decision is *evidence, not proof*: a decision in the chain is
+not necessarily a cause, and the record should not pretend otherwise.
+
 ## Phase 3 — Product / Management (absorbs the general manager)
 
 **Rewritten 2026-09-15.** This was "a second department manager, most likely

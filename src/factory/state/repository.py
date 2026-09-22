@@ -20,7 +20,7 @@ from sqlalchemy import CursorResult, case, delete, func, or_, select, text, upda
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from factory import issues
+from factory import causality, issues
 from factory.engines.compliance.minimize import minimize
 from factory.logging import get_logger
 from factory.settings import EngineName, Settings, get_settings
@@ -228,7 +228,12 @@ async def enqueue_task(
             engine=engine.value,
             status=TaskStatus.PENDING.value,
             priority=priority,
-            payload=payload or {},
+            # Carries the parent link when this enqueue happens inside another task's
+            # handler, which is almost always. Filled here rather than at each call
+            # site because that convention existed already and held at zero of them:
+            # `caused_by_task_id` was populated in 0 of 232 events. See
+            # `factory/causality.py`.
+            payload=causality.attribute(payload),
             idea_id=idea_id,
             product_id=product_id,
             idempotency_key=idempotency_key,
