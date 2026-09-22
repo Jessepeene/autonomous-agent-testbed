@@ -104,3 +104,41 @@ class TestWhenHealingStops:
         comparison that does not exist yet."""
         progress = _progress(blocking_at_last_attempt=None, stuck=[])
         assert not (progress.converging is False or bool(progress.stuck))
+
+
+def test_a_changed_standard_gives_no_convergence_signal() -> None:
+    """The live failure this exists for, 2026-09-22.
+
+    A product was built against five acceptance criteria plus the four-item generic
+    house style. Design's manager ticks once a day; at midnight it woke, correctly saw
+    a product with no guidelines of its own, and wrote seven -- and design `must_hold`
+    items are graded as blocking MUSTs. The bar went from nine to twelve between
+    attempts and the blocking count did not fall.
+
+    Read as `False`, that is a wall, and `_heal` escalates on a wall. So the company
+    changing its mind about what good looks like would retire the product it had just
+    raised its standards for. It is not a wall and it is not progress either -- the two
+    counts were taken against different bars, so there is no signal in their
+    difference, and `None` is the only honest answer.
+    """
+    moved = _progress(
+        blocking_now=4,
+        blocking_at_last_attempt=2,
+        standard_changed=["design (design:guidelines)"],
+    )
+    assert moved.converging is None
+
+    # ...and with the bar holding still, the same numbers are a real wall again.
+    held = _progress(blocking_now=4, blocking_at_last_attempt=2, standard_changed=[])
+    assert held.converging is False
+
+
+def test_a_changed_standard_does_not_mask_a_finished_build() -> None:
+    """Zero blocking is zero blocking. A standard that moved must not turn a product
+    with nothing wrong with it into an open question."""
+    done = _progress(
+        blocking_now=0,
+        blocking_at_last_attempt=3,
+        standard_changed=["product (development:landing_page)"],
+    )
+    assert done.converging is None, "no issues at all has never been a count comparison"

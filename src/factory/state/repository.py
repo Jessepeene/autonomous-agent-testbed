@@ -11,7 +11,7 @@ import hashlib
 import re
 import secrets
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -3341,6 +3341,26 @@ class ProductProgress:
     #: What was decided last time, so a second look starts from the first rather
     #: than re-deriving it.
     last_decision: str | None
+    #: Which standards were written *after* the last repair attempt, so this build is
+    #: being measured against a bar the previous one was never held to.
+    #:
+    #: Found live on 2026-09-22. A product was built at 20:31 and judged against five
+    #: acceptance criteria plus the four-item generic house style. Design's manager
+    #: ticks once a day; at 00:00 it woke, correctly saw a product with no guidelines
+    #: of its own, and wrote seven -- and design `must_hold` items are graded as
+    #: blocking MUSTs. The bar went from nine to twelve between attempts, the rebuild
+    #: chasing the new look dropped a content criterion it had already satisfied, and
+    #: the blocking count did not fall.
+    #:
+    #: Every judgement downstream then read that as the product failing. It is not:
+    #: it is the company changing its mind about what good means, which is a normal
+    #: and often correct thing for a company to do. Recorded so the two are
+    #: distinguishable, because `blocking_now >= blocking_at_last_attempt` is evidence
+    #: about the product only while the standard behind it holds still.
+    #: Defaulted so that "nobody told us" reads as "no known change", which leaves
+    #: `converging` behaving exactly as it did before this existed. The only real
+    #: caller is `product_progress`, which always supplies it.
+    standard_changed: list[str] = field(default_factory=list)
 
     @property
     def converging(self) -> bool | None:
@@ -3367,6 +3387,13 @@ class ProductProgress:
         if self.blocking_at_last_attempt is None:
             return None
         if self.blocking_now == 0:
+            return None
+        if self.standard_changed:
+            # The two counts were taken against different bars, so their difference
+            # is not a fact about the product. `None` rather than `False` because
+            # "no signal" is what this is -- and because False is read downstream as
+            # a wall, which would let the company's own change of mind escalate the
+            # product it was meant to improve.
             return None
         return self.blocking_now < self.blocking_at_last_attempt
 
@@ -3422,12 +3449,29 @@ async def product_progress(session: AsyncSession, product_id: str) -> ProductPro
     if previous is not None and previous.detail:
         last_decision = previous.detail.get("decision")
 
+    # Any standard written after the last attempt is one the previous build was never
+    # held to. Read from the rows' own timestamps rather than recorded on the attempt,
+    # so this needs no migration and cannot drift from what is actually live.
+    standard_changed: list[str] = []
+    if last_attempt is not None:
+        rows = (
+            await session.execute(
+                select(Requirement.subject_kind, Requirement.created_by).where(
+                    Requirement.subject_id == product_id,
+                    Requirement.superseded_at.is_(None),
+                    Requirement.created_at > last_attempt.created_at,
+                )
+            )
+        ).all()
+        standard_changed = [f"{kind} ({by or 'unknown'})" for kind, by in rows]
+
     return ProductProgress(
         attempts=attempts,
         blocking_now=blocking_now,
         blocking_at_last_attempt=blocking_before,
         stuck=stuck[:8],
         last_decision=last_decision,
+        standard_changed=standard_changed,
     )
 
 

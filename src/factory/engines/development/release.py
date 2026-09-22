@@ -138,6 +138,23 @@ async def decide_release(
     # progress from a wall, and "the blocking set went 6 -> 4 -> 4 and these two
     # criteria have failed on every pass" can.
     facts += ["", f"Repair attempts on this product so far: {heal_attempts}."]
+    if progress.standard_changed:
+        # Stated before the counts, because it changes what the counts mean. Without
+        # it a bar that grew between attempts reads as a product that stopped
+        # improving, and the honest response to that reading is to stop -- so the
+        # company changing its mind about what good looks like would retire the
+        # product it had just raised its hopes for.
+        facts += [
+            "",
+            "**The standard changed since the last attempt.** These were written "
+            "after the previous build was judged, so that build was never held to "
+            "them: " + ", ".join(progress.standard_changed) + ".",
+            "A blocking count that did not fall across this change is not evidence "
+            "the product got worse; the two counts were taken against different "
+            "bars. Judge this build against the standard as it stands now, and treat "
+            "criteria that only appeared with the new standard as first-time work "
+            "rather than as a repair that failed.",
+        ]
     if progress.blocking_at_last_attempt is not None:
         direction = {
             True: "fewer than last time -- this is converging",
