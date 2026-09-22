@@ -798,3 +798,101 @@ def test_a_broken_sandbox_share_disables_development_with_a_specific_reason(
 
     assert "sandbox workspace" in report.disabled_engines[EngineName.DEVELOPMENT]
     assert any(f.severity is Severity.DEGRADES for f in report.degradations)
+
+
+# ------------------------------------------- what it costs to ask another department
+
+
+def _facts_missing_design():
+    """A real product with no design standard and nothing deployed.
+
+    Built from the actual columns rather than by setting `unmet` -- that is a derived
+    property, and a fixture that could set it directly would let these tests pass
+    against a `unmet` that no product could ever really be in.
+    """
+    from factory.facts import ProductFacts
+
+    return ProductFacts(
+        product_id="p-1",
+        idea_id="i-1",
+        name="Driftwatch",
+        status="planned",
+        audience_sentence="engineering leads at small software companies",
+        audience_evidence=3,
+        claimed_evidence_count=3,
+        has_requirements=False,
+        has_design_guidelines=False,
+        deploy_url=None,
+        interest=0,
+        reach=0,
+        open_issues=0,
+    )
+
+
+def test_a_need_another_department_owns_says_what_asking_costs() -> None:
+    """The missing half of the trade-off, 2026-09-22.
+
+    The decider was shown `design_guidelines` as startable and told in plain words
+    that a build *reads* the design standard and falls back to the generic house
+    style. It chose to build anyway, three times running. That is not a reasoning
+    failure: the alternative was an unbounded wait against a bounded action, and the
+    bounded one wins that comparison however well it is reasoned about.
+
+    Asking actually cost thirty seconds -- Design's manager tick to guidelines on
+    disk, measured on that run. Nothing in the menu said so, so a cheap option looked
+    expensive and the product was built blind, then restyled hours later against a
+    standard that had moved underneath it.
+    """
+    from factory.facts import OWNER
+    from factory.state.repository import Responsiveness
+    from factory.supervisor.product_decision import _render_options
+
+    need = next(iter(OWNER))
+    engine, kind = OWNER[need]
+    facts = _facts_missing_design()
+
+    rendered = _render_options(
+        facts, {kind.value: Responsiveness(kind=kind.value, observations=4, median_seconds=31.0)}
+    )
+
+    # The need is presented as somebody else's, and what asking costs is on the line.
+    assert "Another department's to do" in rendered
+    asking = next(line for line in rendered.splitlines() if line.strip().startswith("Asking"))
+    assert engine.value in asking
+    assert "31 seconds" in asking
+    assert "median of 4" in asking
+    # ...and both options stay open. The menu prices the wait; it never spends the
+    # judgement. Building first is still a perfectly good answer for a product the
+    # house style genuinely suits, which is the whole reason this is a fact about the
+    # company rather than an ordering rule.
+    assert "whether it is worth waiting" in rendered
+    commissionable = rendered.split("Another department")[0]
+    assert "- deployment:" in commissionable
+
+
+def test_never_having_asked_is_said_plainly_rather_than_guessed() -> None:
+    """Zero observations is a real answer and a different one from "they are slow".
+    Inventing a number here would be the constant this measurement exists to avoid."""
+    from factory.facts import OWNER
+    from factory.state.repository import Responsiveness
+    from factory.supervisor.product_decision import _render_options
+
+    need = next(iter(OWNER))
+    _, kind = OWNER[need]
+    facts = _facts_missing_design()
+
+    rendered = _render_options(
+        facts, {kind.value: Responsiveness(kind=kind.value, observations=0, median_seconds=None)}
+    )
+    assert "nobody has asked them before" in rendered
+
+
+def test_every_owned_need_can_be_priced() -> None:
+    """The rule, not the values -- the shape that would have caught DESIGN missing
+    from routing.PRIORITY. A need added to OWNER without its manager's task kind
+    being measurable would silently render "not recorded" forever."""
+    from factory.facts import OWNER
+    from factory.state.schemas import TaskKind
+
+    for need, (_, kind) in OWNER.items():
+        assert isinstance(kind, TaskKind), f"{need} has no measurable manager task"

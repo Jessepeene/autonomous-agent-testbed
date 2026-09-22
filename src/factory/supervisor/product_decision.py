@@ -90,7 +90,9 @@ def _pursuable(need: Unmet) -> bool:
     return need in OWNER or need is Unmet.DEPLOYMENT
 
 
-def _render_options(facts: ProductFacts) -> str:
+def _render_options(
+    facts: ProductFacts, responsiveness: dict[str, repository.Responsiveness]
+) -> str:
     """The goal, then what can actually be started toward it.
 
     This used to be a list of everything the product lacked, split by who owned what,
@@ -107,12 +109,37 @@ def _render_options(facts: ProductFacts) -> str:
     """
     startable = [n for n in facts.unmet if _pursuable(n) and n not in ENDS]
     byproduct = [n for n in facts.unmet if n in _PRODUCED_BY]
+    # Split by who does it, derived from `OWNER` rather than named here, so a sixth
+    # department inherits this without anybody remembering to write a sentence about
+    # it. That is the difference between a fact about the company and a note somebody
+    # added once: the note is what we keep finding missing one layer along.
+    mine = [n for n in startable if n not in OWNER]
+    theirs = [n for n in startable if n in OWNER]
 
     lines = [_goal(facts), ""]
-    if startable:
-        lines.append("What can be started right now:")
-        lines.extend(f"  - {n.value}: {_WHAT[n]}" for n in startable)
-    else:
+    if mine:
+        lines.append("What you can commission directly, right now:")
+        lines.extend(f"  - {n.value}: {_WHAT[n]}" for n in mine)
+    if theirs:
+        # The missing half of the trade-off, and why the decider kept building
+        # blind. It was shown that a build *reads* the design standard, and chose to
+        # build anyway three times running -- not a reasoning failure, because the
+        # alternative was an unbounded wait against a bounded action, and the bounded
+        # one wins that comparison however well it is reasoned about. Asking cost
+        # thirty seconds; nothing here said so.
+        lines.append("")
+        lines.append(
+            "Another department's to do. You can ask them to look at it and you "
+            "cannot hand them the work, so what you are choosing is whether it is "
+            "worth waiting for their answer:"
+        )
+        for need in theirs:
+            engine, kind = OWNER[need]
+            speed = responsiveness.get(kind.value)
+            waiting = speed.describe() if speed else "how long they take is not recorded"
+            lines.append(f"  - {need.value}: {_WHAT[need]}")
+            lines.append(f"      Asking {engine.value}: {waiting}.")
+    if not startable:
         lines.append(
             "Nothing new can be started right now; whatever is already in flight is "
             "what moves this forward."
@@ -300,6 +327,13 @@ async def decide_next(ctx: FactoryContext, session: AsyncSession, task: Task) ->
     if not facts.unmet:
         return f"supervisor: {facts.name} is missing nothing; no decision needed"
 
+    # Measured, not asserted. A constant here would be a lie the first time a
+    # department got slow and this decider would go on believing it -- see
+    # `repository.Responsiveness`.
+    responsiveness = await repository.manager_response_times(
+        session, [kind for _, kind in OWNER.values()]
+    )
+
     try:
         decision = await ctx.llm.parse(
             ProductNext,
@@ -307,7 +341,7 @@ async def decide_next(ctx: FactoryContext, session: AsyncSession, task: Task) ->
             system=SYSTEM,
             prompt=(
                 f"{await product_brief(session, product_id)}\n\n"
-                f"{_render_options(facts)}\n\n"
+                f"{_render_options(facts, responsiveness)}\n\n"
                 "What is the next thing worth doing to move this toward its goal?"
             ),
             engine=EngineName.SUPERVISOR,

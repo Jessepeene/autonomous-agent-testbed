@@ -13,6 +13,7 @@ import secrets
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from statistics import median
 from typing import Any, cast
 
 from sqlalchemy import CursorResult, case, delete, func, or_, select, text, update
@@ -135,6 +136,72 @@ async def wake_manager(
         )
         is not None
     )
+
+
+@dataclass(frozen=True, slots=True)
+class Responsiveness:
+    """How long this company has actually taken to answer a given kind of request.
+
+    A measurement, never a constant. The decision it exists for is "ask them, or do
+    without and accept the consequences" -- and that is only a judgement if the cost
+    of asking is known. Written as a fixed number in a prompt it would be a lie the
+    first time the department got slow, and the decider would go on believing it;
+    measured, a department that becomes a bottleneck correctly starts losing the
+    argument without anybody rewriting anything.
+    """
+
+    kind: str
+    #: How many completed examples this is drawn from. Zero is a real and useful
+    #: answer -- "we have never asked them" is different from "they are slow", and a
+    #: decider told the difference can treat the first as worth finding out.
+    observations: int
+    median_seconds: float | None
+
+    def describe(self) -> str:
+        if not self.observations or self.median_seconds is None:
+            return "nobody has asked them before, so there is no record of how long they take"
+        if self.median_seconds < 90:
+            took = f"about {int(self.median_seconds)} seconds"
+        elif self.median_seconds < 5400:
+            took = f"about {int(self.median_seconds / 60)} minutes"
+        else:
+            took = f"about {self.median_seconds / 3600:.1f} hours"
+        return f"they have taken {took} to pick this up (median of {self.observations})"
+
+
+async def manager_response_times(
+    session: AsyncSession, kinds: Sequence[TaskKind], *, sample: int = 20
+) -> dict[str, Responsiveness]:
+    """Median time from asking for each kind of work to it being done.
+
+    `updated_at` carries `onupdate=func.now()`, so on a finished task the gap from
+    `created_at` is the whole wait: queued, claimed, run, completed. That is the
+    number a caller weighing "wait for them or proceed without" actually needs, and
+    it is the one nobody had -- so waiting read as an unbounded commitment against a
+    bounded alternative, and the bounded one wins every time regardless of how well
+    the trade-off is reasoned about.
+    """
+    out: dict[str, Responsiveness] = {}
+    for kind in kinds:
+        rows = (
+            await session.execute(
+                select(Task.created_at, Task.updated_at)
+                .where(Task.kind == kind.value, Task.status == TaskStatus.DONE.value)
+                .order_by(Task.created_at.desc())
+                .limit(sample)
+            )
+        ).all()
+        deltas = sorted(
+            (finished - started).total_seconds()
+            for started, finished in rows
+            if finished is not None and started is not None and finished >= started
+        )
+        out[kind.value] = Responsiveness(
+            kind=kind.value,
+            observations=len(deltas),
+            median_seconds=median(deltas) if deltas else None,
+        )
+    return out
 
 
 async def enqueue_task(

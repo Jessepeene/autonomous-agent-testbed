@@ -205,12 +205,11 @@ async def test_the_goal_is_stated_as_the_goal_not_listed_as_a_gap(
     assert facts is not None
     assert Unmet.REACH in facts.unmet  # still a true fact, still a good diagnostic
 
-    rendered = _render_options(facts)
+    rendered = _render_options(facts, {})
     assert "What this product is for" in rendered
     assert "will pay for it" in rendered
-    # ...and it is not offered as a thing to go and start.
-    startable = rendered.split("What can be started right now:")[-1]
-    assert "- reach:" not in startable
+    # ...and it is not offered as a thing to go and start, under any heading.
+    assert "- reach:" not in rendered
 
 
 async def test_a_need_nobody_owns_never_reaches_the_decider(session: AsyncSession) -> None:
@@ -223,7 +222,7 @@ async def test_a_need_nobody_owns_never_reaches_the_decider(session: AsyncSessio
     facts = await product_facts(session, product_id)
     assert facts is not None
 
-    assert "audience" not in _render_options(facts)
+    assert "audience" not in _render_options(facts, {})
 
     # It goes to a person instead, once, however many products hit it.
     await _raise_staffing_gap(session, facts)
@@ -249,14 +248,14 @@ async def test_requirements_read_as_pending_work_not_as_a_wall(session: AsyncSes
     assert facts is not None
     assert Unmet.REQUIREMENTS in facts.unmet
 
-    rendered = _render_options(facts)
+    rendered = _render_options(facts, {})
     requirements_line = next(
         line for line in rendered.splitlines() if line.strip().startswith("- requirements:")
     )
     assert "commission the build" in requirements_line
-    # It is not offered as something to go and start on its own...
-    startable = rendered.split("What can be started right now:")[-1].split("Comes with")[0]
-    assert "- requirements:" not in startable
+    # It is not offered as something to go and start on its own -- it appears only
+    # after the byproduct marker, whatever the startable sections above are called.
+    assert rendered.index("Comes with other work") < rendered.index("- requirements:")
     # ...and there is no longer any section telling the decider what it cannot do.
     assert "nobody owns" not in rendered.lower()
     assert "cannot pursue" not in rendered.lower()
