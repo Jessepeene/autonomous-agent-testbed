@@ -38,27 +38,75 @@ def _permitted_kinds() -> set[str]:
     raise AssertionError("no subject_kind check constraint found on requirements")
 
 
-def _written_kinds() -> dict[str, str]:
-    """Every literal `subject_kind=` the codebase actually writes, by file."""
+#: Which table each `subject_kind=` writer actually targets. `requirements` is not the
+#: only table with that column any more -- `outcome_evidence` (migration 0044) uses the
+#: same `(subject_kind, subject_id)` pattern, deliberately and with no CHECK constraint,
+#: so that adding `code` or `workflow` as something this company may change about itself
+#: costs an insert rather than a migration.
+#:
+#: An unrecognised callee is a **failure**, not an omission. Defaulting unknown writers
+#: to "requirements" would resurrect the false positive this map removes; defaulting
+#: them to "ignore" would silently reopen the hole the whole test exists to close. So a
+#: new writer has to be classified here by whoever adds it.
+_TARGETS: dict[str, str] = {
+    "record_requirements": "requirements",
+    "live_requirements": "requirements",
+    "Requirement": "requirements",
+    "record_decision": "decisions",
+    "Decision": "decisions",
+    "record_outcome": "outcome_evidence",
+    "outcome_counts": "outcome_evidence",
+    "OutcomeEvidence": "outcome_evidence",
+}
+
+
+def _callee(node: ast.Call) -> str:
+    func = node.func
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    if isinstance(func, ast.Name):
+        return func.id
+    return "<unknown>"
+
+
+def _written_kinds() -> tuple[dict[str, str], list[str]]:
+    """Literal `subject_kind=` writes aimed at `requirements`, plus any unclassified.
+
+    Returns `(kinds_by_file, unclassified)`.
+    """
     found: dict[str, str] = {}
+    unclassified: list[str] = []
     for path in _SRC.rglob("*.py"):
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except SyntaxError:  # pragma: no cover - not parseable, not our concern
             continue
         for node in ast.walk(tree):
-            if not isinstance(node, ast.keyword) or node.arg != "subject_kind":
+            if not isinstance(node, ast.Call):
                 continue
-            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-                found[node.value.value] = path.name
-    return found
+            for kw in node.keywords:
+                if kw.arg != "subject_kind":
+                    continue
+                if not (isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str)):
+                    continue
+                target = _TARGETS.get(_callee(node))
+                if target is None:
+                    unclassified.append(f"{path.name}:{_callee(node)}")
+                elif target == "requirements":
+                    found[kw.value.value] = path.name
+    return found, unclassified
 
 
 def test_every_subject_kind_the_code_writes_is_one_the_database_accepts() -> None:
     permitted = _permitted_kinds()
-    written = _written_kinds()
+    written, unclassified = _written_kinds()
 
     assert written, "found no subject_kind writes at all -- the scan is broken, not the code"
+    assert not unclassified, (
+        f"these write a subject_kind and this test does not know which table they mean: "
+        f"{sorted(set(unclassified))}. Add them to `_TARGETS`. Guessing would either "
+        "resurrect a false positive or silently stop checking a real writer."
+    )
 
     rejected = {kind: where for kind, where in written.items() if kind not in permitted}
     assert not rejected, (
@@ -75,4 +123,5 @@ def test_the_scan_actually_sees_the_write_that_caused_this() -> None:
     specific write that was rejected in production, so if it is no longer visible
     the detector has broken rather than the problem having gone away.
     """
-    assert _written_kinds().get("design") == "repository.py"
+    written, _ = _written_kinds()
+    assert written.get("design") == "repository.py"

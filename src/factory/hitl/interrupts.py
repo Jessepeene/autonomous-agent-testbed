@@ -314,7 +314,7 @@ async def resolve_reply(session: AsyncSession, target: Interrupt, answer: str) -
     # still be true next month on a different product -- was discarded with the task.
     # This only queues the question; see `learning/feedback.py` for why the judgement
     # is a task of its own and why it is never an elected step.
-    await feedback.capture(session, interrupt=target, action=action)
+    await feedback.capture(session, interrupt=target, answer=answer, action=action)
     log.info("hitl.resolved", interrupt_id=target.id, action=action)
     return action
 

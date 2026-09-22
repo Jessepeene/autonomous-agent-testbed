@@ -18,9 +18,10 @@ from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from factory import attribution
 from factory.learning.allowlist import assert_mutable
 from factory.logging import get_logger
-from factory.state.orm import LearningEpisode, TunableParameter
+from factory.state.orm import TunableParameter
 
 log = get_logger(__name__)
 
@@ -283,15 +284,16 @@ async def episode_counts(
 ) -> tuple[int, int]:
     """(successes, total) for a version's episodes, most recent first when ``limit``
     caps a baseline lookup to a rolling window rather than all-time history."""
-    stmt = select(LearningEpisode.outcome).where(
-        LearningEpisode.tunable_parameter_id == tunable_parameter_id
+    # Reads through `outcome_evidence` now. Migration 0044 copied every episode
+    # across with its id and `created_at` intact precisely so this returns the same
+    # numerator and denominator it always did -- a trial mid-flight must not have its
+    # own arithmetic change underneath it.
+    return await attribution.outcome_counts(
+        session,
+        subject_kind="parameter",
+        subject_id=tunable_parameter_id,
+        limit=limit,
     )
-    stmt = stmt.order_by(LearningEpisode.created_at.desc())
-    if limit is not None:
-        stmt = stmt.limit(limit)
-    outcomes = list((await session.execute(stmt)).scalars().all())
-    successes = sum(1 for o in outcomes if o == "success")
-    return successes, len(outcomes)
 
 
 async def confirm_trial(
@@ -373,11 +375,21 @@ async def record_episode(
     detail: dict[str, Any] | None = None,
     task_id: str | None = None,
 ) -> None:
-    session.add(
-        LearningEpisode(
-            tunable_parameter_id=tunable_parameter_id,
-            outcome=outcome,
-            detail=detail or {},
-            task_id=task_id,
-        )
+    """One governed call's result, recorded against the version that served it --
+    **and against every decision upstream of it**.
+
+    The signature is unchanged and every existing caller keeps working, but the row no
+    longer lands in `learning_episodes`. It became an `Outcome` with one
+    `OutcomeEvidence` row per subject, because the old table's single non-null foreign
+    key meant an outcome could only ever teach one thing: a validation that failed
+    because the idea was weak was recorded against the prompt that wrote the page. See
+    `factory/attribution.py` and ARCHITECTURE_ROADMAP.md Phase 2.14.
+    """
+    await attribution.record_outcome(
+        session,
+        kind="trial_episode",
+        succeeded=outcome == "success",
+        detail=detail,
+        task_id=task_id,
+        parameters=[tunable_parameter_id],
     )

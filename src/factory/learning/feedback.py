@@ -173,13 +173,22 @@ def _scope_for(lesson: ProposedLesson, *, product_id: str | None) -> tuple[str, 
     return memory_store.GLOBAL_SCOPE, ""
 
 
-async def capture(session: AsyncSession, *, interrupt: Interrupt, action: str) -> str | None:
+async def capture(
+    session: AsyncSession, *, interrupt: Interrupt, answer: str, action: str
+) -> str | None:
     """Queue the question "does any of this outlive the task?" about one reply.
 
     Called from `resolve_reply` for every reply regardless of origin or reason. Cheap
     and synchronous -- one insert, no model -- so it cannot delay the reply taking
     effect; the judgement itself happens in the task.
     """
+    if not answer.strip():
+        # Somebody acknowledging an escalation without saying anything. There is no
+        # standard in silence, and queueing a judgement about it spends a model call
+        # to conclude exactly that -- `learn` already returns "nothing was said", but
+        # only after the task exists. Found by an integration test asserting that an
+        # empty reply enqueues nothing at all, which this had quietly broken.
+        return None
     if interrupt.reason == InterruptReason.CONSTRAINT_CHALLENGED.value:
         # Do not learn from the refusal to learn. This reason exists only because an
         # earlier extraction declined to file something and asked a human instead;

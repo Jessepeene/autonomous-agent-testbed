@@ -73,7 +73,9 @@ async def test_every_reply_is_captured_whatever_it_was_about(monkeypatch) -> Non
     monkeypatch.setattr(feedback.repository, "enqueue_task", fake_enqueue)
 
     for reply in ("ok", "approve", "skip", "retry", "use rise-audit.com"):
-        await feedback.capture(None, interrupt=_interrupt(response=reply), action="none")
+        await feedback.capture(
+            None, interrupt=_interrupt(response=reply), answer=reply, action="none"
+        )
 
     assert len(enqueued) == 5, "capture must not be conditional on what the reply said"
     assert {e["kind"] for e in enqueued} == {TaskKind.LEARN_FROM_FEEDBACK}
@@ -97,6 +99,7 @@ async def test_a_refusal_is_not_itself_learned_from(monkeypatch) -> None:
     result = await feedback.capture(
         None,
         interrupt=_interrupt(reason=InterruptReason.CONSTRAINT_CHALLENGED.value),
+        answer="the suppression list stays",
         action="none",
     )
 
@@ -269,3 +272,29 @@ async def test_a_reply_that_would_relax_a_rail_is_refused_not_softened(monkeypat
     assert len(raised) == 1
     assert raised[0]["reason"] is InterruptReason.CONSTRAINT_CHALLENGED
     assert "refused" in result
+
+
+@pytest.mark.asyncio
+async def test_an_empty_reply_is_not_worth_a_judgement(monkeypatch) -> None:
+    """Acknowledging an escalation without saying anything contains no standard.
+
+    `learn` already returns "nothing was said" -- but only after the task exists, so
+    an empty reply still cost a queued task and a model call to conclude exactly
+    that. Found by an integration test asserting an empty reply enqueues nothing at
+    all, which this had quietly broken: the unit tests all passed, because none of
+    them had a reason to pass an empty answer.
+    """
+    enqueued: list[dict] = []
+
+    async def fake_enqueue(session, **kwargs):
+        enqueued.append(kwargs)
+        return "t-1"
+
+    monkeypatch.setattr(feedback.repository, "enqueue_task", fake_enqueue)
+
+    for blank in ("", "   ", "\n"):
+        assert (
+            await feedback.capture(None, interrupt=_interrupt(), answer=blank, action="none")
+            is None
+        )
+    assert enqueued == []

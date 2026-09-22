@@ -1214,6 +1214,142 @@ class LearningEpisode(Base):
     )
 
 
+
+class Decision(Base):
+    """A judgement this company made, as a record rather than a log line.
+
+    Release decisions were already rich -- the choice, the rationale, which MUSTs were
+    unmet, which issues were deliberately accepted -- and they lived as JSONB inside a
+    `task_events` row. Good evidence, no identity: nothing could point at one, so
+    nothing could ever say "that decision turned out well". A company whose decisions
+    are unaddressable cannot review them, and the recurring strategic review the end
+    goal names has nothing to review.
+
+    Deliberately wider than release: `kind` covers any judgement worth revisiting --
+    what a product should do next, whether an idea clears compliance, what a design
+    department commissioned. The question is always the same shape, so the record is.
+    """
+
+    __tablename__ = "decisions"
+
+    id: Mapped[str] = _pk()
+    #: What kind of judgement this was, e.g. `release`, `product_next`, `compliance`.
+    #: Free text rather than an enum: a new kind of decision should cost an insert,
+    #: not a migration.
+    kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    #: What it was about -- `product`, `idea` -- following `requirements`' pattern.
+    subject_kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    subject_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    #: The choice itself, in the vocabulary of that decision: `ship`, `rethink`,
+    #: `deployment`, `approved`.
+    choice: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: Why, in the decider's own words. Uncapped `Text` for the reason `Contract`
+    #: gives: a truncated rationale is a lost one, and this is the field a human
+    #: reads when asking whether the company is reasoning well.
+    rationale: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    made_by_engine: Mapped[str] = mapped_column(String(32), nullable=False)
+    #: The task this was decided in. The link to the causal chain: everything this
+    #: task caused is downstream of this decision, which is how an outcome finds the
+    #: decisions it is evidence about without anybody writing the link by hand.
+    made_by_task_id: Mapped[str | None] = mapped_column(String(32))
+    #: What else was available at the time. Without it a decision cannot be judged
+    #: later -- "shipped" means nothing unless you know it could have rethought.
+    alternatives: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    detail: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_decisions_subject", "subject_id", "created_at"),
+        Index("ix_decisions_task", "made_by_task_id"),
+        Index("ix_decisions_kind", "kind", "created_at"),
+    )
+
+
+class Outcome(Base):
+    """Something that happened, with enough on it to be worth learning from.
+
+    The generalisation of `LearningEpisode`, which was one Bernoulli result tied to one
+    `TunableParameter` by a single non-null foreign key. That shape decided, silently,
+    that every outcome teaches exactly one thing -- so a validation that failed because
+    the *idea* was weak was recorded against the prompt that wrote the page, and the
+    idea, the acceptance criteria, the design and the decision to ship it learned
+    nothing. See `OutcomeEvidence` for the half that fixes it.
+
+    `succeeded` stays because the trial statistics are Bernoulli and must keep working
+    unchanged. `value_cents` is the half the end goal needs: profit is a magnitude, and
+    a company that can only record whether something worked cannot tell a EUR 12 month
+    from a EUR 1,200 one. Both are nullable -- an outcome may honestly have one, the
+    other, or both.
+    """
+
+    __tablename__ = "outcomes"
+
+    id: Mapped[str] = _pk()
+    #: What kind of result this is: `trial_episode`, `validation`, `revenue`. Free
+    #: text for the same reason `Decision.kind` is.
+    kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    succeeded: Mapped[bool | None] = mapped_column(Boolean)
+    #: Money, when there is any. Integer cents, like `ledger`.
+    value_cents: Mapped[int | None] = mapped_column(Integer)
+    subject_kind: Mapped[str | None] = mapped_column(String(24))
+    subject_id: Mapped[str | None] = mapped_column(String(32))
+    detail: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    #: Where this was observed. The entry point to the causal chain: the decisions
+    #: this outcome is evidence about are the ones made in this task's ancestors.
+    task_id: Mapped[str | None] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_outcomes_kind", "kind", "created_at"),
+        Index("ix_outcomes_subject", "subject_id", "created_at"),
+    )
+
+
+class OutcomeEvidence(Base):
+    """One outcome is evidence about one thing. There may be many rows per outcome.
+
+    **This is the keystone.** Everything else in the learning loop was built and works;
+    the single foreign key on `LearningEpisode` is what stopped it learning about
+    anything but prompts, and therefore what stopped this company measuring the quality
+    of a decision at all. Profit is a decision-quality metric, so a system that can
+    only attribute outcomes to makers can optimise craft forever without ever noticing
+    it is not earning.
+
+    `subject_kind` carries **no check constraint, on purpose.** It starts as
+    `parameter` and `decision`, and a later phase adding `code` or `workflow` as
+    something this company may change about itself should cost an insert rather than a
+    migration -- see ARCHITECTURE_ROADMAP.md, Phase 2.13.
+
+    A caveat that belongs in the schema rather than only in the roadmap: this records
+    that an outcome *is evidence about* a subject, never that the subject *caused* it.
+    The links are derived by walking the causal chain, which credits every ancestor
+    decision, and being upstream of a result is not the same as having produced it.
+    """
+
+    __tablename__ = "outcome_evidence"
+
+    id: Mapped[str] = _pk()
+    outcome_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("outcomes.id", ondelete="CASCADE"), nullable=False
+    )
+    subject_kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    subject_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "outcome_id", "subject_kind", "subject_id", name="uq_outcome_evidence_subject"
+        ),
+        Index("ix_outcome_evidence_subject", "subject_kind", "subject_id"),
+    )
+
+
 class TaskEvent(Base):
     """What happened, in order, and what caused it.
 

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from factory import attribution
 from factory.facts import ENDS, OWNER, ProductFacts, Unmet, product_facts
 from factory.handbook import product_brief
 from factory.logging import get_logger
@@ -369,6 +370,24 @@ async def decide_next(ctx: FactoryContext, session: AsyncSession, task: Task) ->
             # reinterpreted into whatever is nearest.
             log.warning("supervisor.unknown_need", product_id=product_id, named=raw[:60])
 
+    # Recorded before commissioning, so the work this decision causes is downstream of
+    # a decision that already exists -- `attribution.record_outcome` walks the causal
+    # chain to find the judgements a result is evidence about, and a decision written
+    # afterwards would be invisible to everything it set in motion.
+    await attribution.record_decision(
+        session,
+        kind="product_next",
+        subject_kind="product",
+        subject_id=product_id,
+        choice=",".join(n.value for n in wanted) or "nothing",
+        rationale=decision.assessment,
+        made_by_engine=EngineName.SUPERVISOR.value,
+        made_by_task_id=task.id,
+        # Everything it could have pursued, so a later reader can see what it passed
+        # over rather than only what it took.
+        alternatives=[n.value for n in facts.unmet],
+        detail={"holding": decision.holding[:500]},
+    )
     routed, blocked = await _commission(session, facts, wanted, task.id)
     if blocked:
         # A decision that could not be carried out is not a decision to do nothing, and

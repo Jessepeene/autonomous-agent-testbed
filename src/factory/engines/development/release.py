@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from factory import attribution
 from factory.engines.development.requirements import render_for_prompt
 from factory.logging import get_logger
 from factory.settings import EngineName, TaskType
@@ -258,6 +259,30 @@ async def decide_release(
         decided_by_task_id=task_id,
     )
 
+    # The same judgement, twice, on purpose. The task event stays as the trace -- it is
+    # what a human reads when reconstructing a run -- and the decision row is what
+    # *later outcomes point at*. Until now this existed only as JSONB inside a log row,
+    # so the highest-judgement call in the company could never be told whether it had
+    # turned out well. `alternatives` is what makes it reviewable at all: "shipped"
+    # means nothing unless the record also shows it could have rethought.
+    await attribution.record_decision(
+        session,
+        kind="release",
+        subject_kind="product",
+        subject_id=product_id,
+        choice=decision.decision,
+        rationale=decision.rationale,
+        made_by_engine=EngineName.DEVELOPMENT.value,
+        made_by_task_id=task_id,
+        alternatives=["ship", "fix_first", "rethink", "abandon"],
+        detail={
+            "unmet_must": decision.unmet_must[:10],
+            "accepted": [f"{a.issue_ref}: {a.why[:120]}" for a in decision.accepted_issues[:10]],
+            "heal_attempts": heal_attempts,
+            "blocking_now": progress.blocking_now,
+            "standard_changed": progress.standard_changed,
+        },
+    )
     await repository.record_task_event(
         session,
         event="release.decided",
