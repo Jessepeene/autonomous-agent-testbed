@@ -1551,6 +1551,90 @@ different horizon and a different set of alternatives, so each answers "enough"
 differently and legitimately, and a reviewer reports evidence rather than holding a
 veto.
 
+## Phase 2.13 — improving everything about itself except the objective (added 2026-09-22)
+
+**Status**: scoped, not built. Depends on Phase 2.12's attribution keystone.
+
+Jesse: *"a lot of these small bugs were small things that the bigger goal of an
+autonomous system should catch on its own"*, and then the generalisation — *"make the
+ai be able to improve everything about itself except for its objective."*
+
+### Do not build a second system
+
+This already exists, for one artifact kind. The learning loop **is** self-improvement
+with a gate: `TunableParameter` (a versioned artifact), `target_metric` (what better
+means), `LearningEpisode` (evidence), and `trials.py` running challenger against
+baseline with a power analysis and rolling back losers. It is restricted to seven
+prompt strings, all of them makers (Phase 2.12).
+
+So the move is to generalise the *unit* from "a tunable prompt" to "a thing about
+itself this company may change", and let the allowlist become the honest statement of
+what that is. One registry, one question per entry: **may this change, and what
+evidence would show the change helped?**
+
+### Two mechanisms, chosen by the kind of question
+
+Jesse's framing was *"it tests the new vs current system and picks the better
+performing one"*, which is right and is the second of two. Which applies depends on
+whether the change has a *right* answer or a *better* one:
+
+- **Right answer — a defect.** A tri-state read through `bool()` is simply wrong. No
+  human engineer A/Bs that; they know, and they verify with a test. Correctness is
+  checkable without an experiment, so the loop is: detect the shape, write the failing
+  test, make it pass. **The system has none of this today.**
+- **Better answer — a judgement.** Prompt wording, who does what first, where a
+  threshold sits. No ground truth, so running both and measuring is the only honest
+  route. **The system already has this** and it needs generalising, not inventing.
+
+The recurring defect shapes are drawn from bugs that actually cost runs, not from
+theory: *something is written and nothing reads it* (`GapReport.undetermined` and
+`.met`, both `len()`'d into a log line); *an enum member missing from a table meant to
+cover all members* (`DESIGN` absent from `routing.PRIORITY`); *two derivations of one
+question* (`_render_options` against `_commission`); *a tri-state read as a boolean*;
+*an idempotency key scoped to a lifetime when the question is "is this in flight"*.
+The codebase already writes exactly these checks by hand, one at a time, after each
+bug — `test_every_engine_is_ranked`, `test_no_prose_field_an_llm_writes_carries_a_max_length`,
+`test_every_group_the_catalogue_emits_has_a_departure_rule`. Reactive, human-authored,
+and the loop worth closing.
+
+### The asymmetry that stops it inverting
+
+**Adding a check is cheap and near-automatic. Weakening or removing one is a
+rail-level change.** A system that can edit its own checks can delete the check that
+catches it, and if the metric is "tests pass" then deleting a test is the cheapest
+improvement available. The evaluator must not be reachable by the thing being
+evaluated — the same line `learning/feedback.py` holds when it refuses to file a
+lesson that would relax a constraint.
+
+### The rails, on Jesse's criterion
+
+*"Keep them as limited as possible, protect the main objective and anything that might
+kill itself when edited."* That is better than an enumerated list, because the liveness
+criterion **derives** most of the compliance rails rather than naming them: losing the
+sending domain to spam complaints or the Stripe account to a chargeback pattern is
+self-killing, so deliverability and consent fall out of it. What it does not cover is
+truthfulness to a customer, which is not fatal in the short run — that belongs under
+the objective, since a company that lies to buyers is not earning sustainably.
+
+So the immutable set is: **the objective, and the things whose breakage ends the
+company's ability to operate or to recover** — the tick loop, the task queue, the
+database, deploy and rollback, credentials, and the evaluator itself. Everything else
+is in scope, which is most of the system.
+
+### What blocks it
+
+Attribution, again. A challenger can only be judged if an outcome can be attributed to
+it, and `LearningEpisode` has exactly one foreign key. A code change, a workflow change
+or a new check has no way to be evaluated at all today. Phase 2.12's join is the
+precondition for this phase, not a neighbour of it.
+
+**And champion-challenger needs volume the company does not have** — 0 leads, 0
+signals, 0 customers, so nothing market-facing can be measured. But internal outcome
+signals exist right now: heal cycles to ship (run 18 shipped at zero; run 17 took three
+and was abandoned), first-pass blocking count, ship versus rethink, time to live. Those
+are real measures of the build chain, available at one per run, and enough to run
+challengers against this company's own judges before a single customer exists.
+
 ## Phase 3 — Product / Management (absorbs the general manager)
 
 **Rewritten 2026-09-15.** This was "a second department manager, most likely
