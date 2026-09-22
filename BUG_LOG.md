@@ -2207,3 +2207,243 @@ default lost — and its real intent (a learned value beats the default) is now
 covered explicitly.
 
 **Status**: Fixed 2026-09-16.
+
+---
+
+## 38. A lifetime idempotency key made every product buildable exactly once, ever
+
+**Found**: 2026-09-21, reading run 14's log line "holding because…" for a
+supervisor that had in fact decided to rebuild. `validate:{idea_id}` answered
+"has this idea ever been built?" when the question the key exists to answer is
+"is this build already queued?".
+
+**Severity**: silent and total for any product needing a second build. The
+decision was made, `enqueue_task` returned `None` on the conflict, nothing was
+queued, and the note downstream read as a deliberate pause. A permanently stuck
+product looked like a considered decision to wait, and stayed that way.
+
+**Root cause**: the key's scope was the entity's lifetime; the invariant being
+protected is "is this happening now". A key scoped to a lifetime cannot express a
+second, legitimate occurrence, so every later decision to redo the thing is
+dropped without a trace.
+
+**Affected**: `supervisor/product_decision.py` (`validate:`), and the same shape
+found later at `development/graph.py` (`build:{idea_id}` — entry 42).
+
+**Fix**: scoped to the decision that commissions the work —
+`validate:{product_id}:{decision_task_id}` — so one decision commissions once and
+a later decision can commission again. A commission that *is* blocked is now
+logged as blocked rather than sharing a line with "chose to do nothing".
+
+**Verification**: `tests/integration/test_product_decision.py`; the two states no
+longer render alike.
+
+**Status**: Fixed 2026-09-21 (`7c81aeb`).
+
+---
+
+## 39. Two of the three pieces of "let the reviewer see the journey" shipped, and without the third the other two were inert
+
+**Found**: 2026-09-21, by Jesse asking "will the run be able to spot the issues
+mentioned before?" — not by any check.
+
+**Severity**: the work looked done and did nothing. `sent_messages` retained every
+composed message and the browser origin allowlist was widened so a reviewer could
+follow a confirmation link. **No tool could read the mail.** The confirmation link
+exists only inside the message, so a reviewer that submitted the form had no way
+to learn the token, and the journey stopped at the form exactly as before.
+
+**Root cause**: three pieces were needed and two were built. Nothing failed,
+nothing logged, and each shipped piece was individually correct.
+
+**Affected**: `tools/messages.py` (added), `engines/development/preship.py`,
+`engines/development/graph.py`.
+
+**Fix**: `read_sent_messages`, pinned to one product with recipients redacted to
+their domain, plus `confirmation_links()` to pull the link out of a body.
+
+**Verification**: `tests/integration/test_sent_messages_and_self_test.py` — a
+reviewer reads the confirmation and finds its link. Confirmed live on run 15,
+where the pre-ship reviewer walked `read_sent_messages` → `browser_open` on the
+real confirmation URL → screenshot, unprompted.
+
+**Status**: Fixed 2026-09-21 (`f70931b`).
+
+---
+
+## 40. Five of seven recall sites could take down the work they existed to improve
+
+**Found**: 2026-09-21, auditing my own change before deploying it. An unguarded
+`recall_block` had just been added to `write_landing_page_requirements` — outside
+the `try`, in a function whose own docstring promises it degrades rather than
+blocking a build. That one line was the only thing in it that could raise.
+
+**Severity**: a memory lookup failing would have failed the landing-page build. An
+AST sweep found five of seven `recall` call sites unguarded, several in production
+for weeks.
+
+**Root cause**: the rule existed, in the right words, in the wrong place.
+`preship.py` had worked it out and written it as a comment — *"recall must never be
+the reason a review does not happen"* — and a comment does not propagate. A rule
+that has to be remembered at each new call site is one that holds until somebody is
+busy.
+
+**Affected**: `memory/store.py`, and by inheritance every caller.
+
+**Fix**: the guarantee moved into `recall()` itself, which now never raises and
+logs `memory.recall_unavailable` instead. The hit-count `UPDATE` got the same
+treatment — failing to record that a memory was useful must not cost the caller the
+memories it already holds.
+
+**Verification**: `tests/unit/test_memory.py` — a session whose every statement
+raises returns `[]` and `""`, and a failed hit-count still returns the recall.
+
+**Status**: Fixed 2026-09-21 (`9053f91`).
+
+---
+
+## 41. The standing policy was handed to a reviewer as acceptance criteria, so it graded the policy
+
+**Found**: 2026-09-21, reading why a run was parked on heal exhaustion with two
+blocking MUSTs that could never be met.
+
+**Severity**: two full repair cycles moved nothing and the product was abandoned.
+The two blocking issues were:
+
+- `MUST not met: The page does not know its own final address. It is deployed to a
+  Vercel subdomain first and a custom domain is attached afterwards, by a person` —
+  **a `PAGE_POLICY` line, word for word.** A sentence explaining why something is
+  fine, filed as a defect.
+- `MUST not met: OUT OF SCOPE: A pricing page or price display` — a thing
+  deliberately not built, reported as missing.
+
+**Root cause**: two, compounding. `render_for_prompt` emitted four kinds of
+statement — goal, graded criteria, deliberate non-goals, standing policy — as one
+undifferentiated block, and `gaps.py` handed all of it over under the heading *"The
+acceptance criteria this product was built to meet."* The reviewer was told the
+policy lines were criteria, so it graded them. Separately, `RequirementGap.tier` is
+`Literal["must", "should"]`, so a reviewer correctly instructed that out-of-scope
+violations are departures had **nowhere to put one** and used `must`, where
+everything blocks.
+
+`GAP_SYSTEM` did say *"Never invent a criterion. Judge only what you were given"* —
+an instruction in a prompt standing in for a check in code.
+
+**Affected**: `engines/development/requirements.py`, `engines/development/gaps.py`,
+`engines/development/graph.py`, `engines/development/preship.py`,
+`factory/grounding.py` (added).
+
+**Fix**: every section now states what a *departure from it* means, and `policy` is
+a parameter rather than welded to landing pages. `factory/grounding.py` places each
+reported claim against the catalogue the reviewer was actually given, and the tier
+is derived from where the claim grounds rather than taken on trust. Nothing is
+discarded — a claim grounding nowhere is still filed, just not as a failure against
+a criterion nobody wrote.
+
+Two guards stop it becoming a mute button: design `must_hold` is graded by the same
+pass, so it is in the catalogue (leaving it out would have silently downgraded a
+real "stock palette, no webfont" gap — the defect only a human ever caught), and a
+test asserts every catalogue group has a departure rule.
+
+**Verification**: `tests/unit/test_grounding.py`, `tests/unit/test_requirements.py`.
+Checked against the real parked run: all three of its issues place correctly and
+blocking goes 2 → 0.
+
+**Status**: Fixed 2026-09-21 (`b1b82fe`), completed in two more judges the same day
+(`2daf58e`) — the identical mislabel survived in the live review and the pre-ship
+review, which is the recurring "fixed where it surfaced, not where it lives" shape.
+
+---
+
+## 42. `build:{idea_id}` — the last lifetime idempotency key
+
+**Found**: 2026-09-21, auditing for other instances of entry 38 after Jesse asked
+whether the fix was complete.
+
+**Severity**: a `BUILD_MVP` that failed for a since-resolved reason could never be
+commissioned again. Same silent shape: enqueue returns `None`, nothing queues, the
+log reads like a decision.
+
+**Root cause**: identical to 38 — a key answering "has this ever happened" for an
+invariant that is "is this happening now".
+
+**Affected**: `engines/development/graph.py::_evaluate_validation`.
+
+**Fix**: `build:{product_id}:{task.id}`, scoped to the evaluation that commissions
+it.
+
+**Status**: Fixed 2026-09-21 (`2daf58e`).
+
+---
+
+## 43. A standard that moved between attempts read as a product that stopped improving
+
+**Found**: 2026-09-22, tracing why a product heal-exhausted while its acceptance
+criteria were stable. Jesse's reading was the right one: *"new requirements get
+added in a sense so the system doesn't decide the product is ready for shipment."*
+
+**Severity**: the company changing its mind about what good looks like retired the
+product it had just raised its standards for.
+
+A product was built at 20:31 and judged against five acceptance criteria plus the
+four-item generic house style. Design's manager ticks **once a day**; at 00:00 it
+woke, correctly saw a product with no guidelines of its own, and wrote seven — and
+design `must_hold` items are graded as blocking MUSTs. The bar went from nine to
+twelve between attempts, the rebuild chasing the new look dropped a content
+criterion it had already satisfied, and the blocking count did not fall.
+
+**Root cause**: `product_progress` compares blocking counts across attempts to
+decide whether a product is converging, and assumed the standard behind those
+counts holds still. When it does not, the difference is not a fact about the
+product at all — but it reads as one, and "not converging" is the signal that
+triggers `rethink` and then `abandon`. A real event (the standard moved) had no
+channel and surfaced misattributed as a different one.
+
+**Affected**: `state/repository.py`, `engines/development/release.py`.
+
+**Fix**: `ProductProgress.standard_changed` carries which standards were written
+after the last attempt, read from the rows' own timestamps so it needs no migration
+and cannot drift from what is live. `converging` returns `None` rather than `False`
+when the bar moved — no signal is what that is, and `False` is read downstream as a
+wall. The release judge is told *before* it sees the counts, because it changes what
+they mean.
+
+**Verification**: `tests/unit/test_convergence.py`.
+
+**Status**: Fixed 2026-09-22 (`9c6abc8`).
+
+---
+
+## 44. `bool(None)` told the release judge a finished product was not converging
+
+**Found**: 2026-09-22, reviewing entry 43's own change before deploying it.
+
+**Severity**: pre-existing and wrong in production. `ProductProgress.converging` is
+tri-valued on purpose — True, False, and "these two numbers cannot be compared" —
+and `release.py` read it through `bool()`. `bool(None)` is `False`, so **every
+state carrying no signal was asserted to the judge as "no better than last time —
+this is not converging"**, including a build sitting at zero blocking issues, which
+is the state a finished product is in.
+
+`RELEASE_SYSTEM` treats "the blocking set is not shrinking" as the signal to stop
+patching, so the false assertion lands directly on `rethink`/`abandon`.
+
+After entry 43 it would have been worse: a moved standard also yields `None`, so the
+judge would have received the paragraph explaining the counts are not comparable
+and, four lines later, a flat statement that the product is not converging — in the
+same prompt.
+
+**Root cause**: a three-state value read as two. The property was always correct;
+the defect was entirely in the reading — and it was invisible because the block sat
+inline in a function that needs a database and a model call to reach.
+
+**Affected**: `engines/development/release.py`.
+
+**Fix**: three states. A direction is stated only when there is one; the counts are
+given without one when there is not. The block is extracted to
+`_render_progress_facts` so it can be tested without a database.
+
+**Verification**: `tests/unit/test_convergence.py`, asserting against the rendered
+facts rather than the property.
+
+**Status**: Fixed 2026-09-22 (`e94d173`).
