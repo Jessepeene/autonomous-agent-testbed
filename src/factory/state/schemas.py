@@ -66,6 +66,13 @@ class TaskKind(StrEnum):
     ASSESS_COMPLIANCE = "assess_compliance"
     BUILD_MVP = "build_mvp"
     PATCH_PRODUCT = "patch_product"
+    #: A rewrite of one or two pieces of `Product.signup_journey` -- the confirmation
+    #: email or the page its link leads to -- in response to a specific finding.
+    #: Deliberately not PATCH_PRODUCT: neither surface is part of any product's
+    #: deployed code, so a repair engineer given that task would have no file to
+    #: open. A single structured judgement, not a spawned agent -- see
+    #: `engines/development/signup_journey.py`.
+    PATCH_SIGNUP_JOURNEY = "patch_signup_journey"
     REVIEW_BUILD = "review_build"
     DEPLOY_PRODUCT = "deploy_product"
     HARVEST_LEADS = "harvest_leads"

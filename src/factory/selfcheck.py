@@ -31,6 +31,7 @@ RECURRING_KINDS: frozenset[str] = frozenset(
         "BUILD_LANDING_PAGE",
         "EVALUATE_VALIDATION",
         "PATCH_PRODUCT",
+        "PATCH_SIGNUP_JOURNEY",
     }
 )
 

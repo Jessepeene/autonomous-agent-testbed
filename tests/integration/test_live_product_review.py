@@ -149,8 +149,10 @@ def _turn(text: str = "", calls: list[ToolCall] | None = None) -> AgentTurn:
     )
 
 
-def _verdict(defect: bool, summary: str = "", details: str = "") -> ReviewVerdict:
-    return ReviewVerdict(defect_found=defect, summary=summary, details=details)
+def _verdict(
+    defect: bool, summary: str = "", details: str = "", *, surface: str = "product"
+) -> ReviewVerdict:
+    return ReviewVerdict(defect_found=defect, summary=summary, details=details, surface=surface)
 
 
 class _StubBrowserSession:
@@ -212,6 +214,13 @@ def live_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 async def _patches(session: AsyncSession) -> list[Task]:
     rows = await session.execute(select(Task).where(Task.kind == TaskKind.PATCH_PRODUCT.value))
+    return list(rows.scalars().all())
+
+
+async def _journey_patches(session: AsyncSession) -> list[Task]:
+    rows = await session.execute(
+        select(Task).where(Task.kind == TaskKind.PATCH_SIGNUP_JOURNEY.value)
+    )
     return list(rows.scalars().all())
 
 
@@ -283,6 +292,52 @@ async def test_a_finding_queues_exactly_one_guided_patch(
     assert patches[0].product_id == product_id
     assert patches[0].payload["category"] == "guided"
     assert "404" in patches[0].payload["healing"]
+
+
+async def test_a_signup_journey_finding_is_never_sent_to_a_code_repair(
+    session: AsyncSession, tmp_path: Path, stub_browser: None, live_env: None
+) -> None:
+    """The fork `ReviewVerdict.surface` exists for. Before it, a finding about the
+    confirmation email or the page its link leads to had exactly one lever --
+    PATCH_PRODUCT, which spawns a repair engineer against the product's own
+    workspace -- and neither surface is part of that workspace at all. A repair
+    engineer given that brief would have no file to open."""
+    product_id = await _make_product(session, "review-finds-journey-defect")
+    await session.commit()
+
+    gemini = FakeProvider()
+    gemini.register_turns(
+        _turn(calls=[ToolCall(id="1", name="browser_open", arguments={"url": DEPLOY_URL})]),
+        _turn(
+            text=(
+                "Submitted the form, read the confirmation mail through "
+                "read_sent_messages, and opened the confirmation link. The page it "
+                "leads to is plain monospace text served from the factory's own "
+                "domain, with no mention of the product at all."
+            )
+        ),
+    )
+    gemini.register(
+        ReviewVerdict,
+        _verdict(
+            True,
+            "The confirmation page reads like a system message, not the product",
+            "Opened the link from the confirmation mail. It is bare monospace "
+            "text with no product name and no branding.",
+            surface="signup_journey",
+        ),
+    )
+
+    result = await dev_graph.run(
+        _ctx(gemini, workspace_root=tmp_path), session, _review_task(product_id)
+    )
+    assert "signup-journey" in result
+
+    assert await _patches(session) == [], "must never reach the product's own workspace"
+    journey_patches = await _journey_patches(session)
+    assert len(journey_patches) == 1
+    assert journey_patches[0].product_id == product_id
+    assert "confirmation page" in journey_patches[0].payload["finding_summary"]
 
 
 async def test_a_review_that_ran_out_of_steps_still_yields_its_verdict(

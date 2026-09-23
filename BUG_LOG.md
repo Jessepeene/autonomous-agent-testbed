@@ -58,6 +58,7 @@ time it's fixed, not batched up afterward.**
 44. [`bool(None)` told the release judge a finished product was not converging](#44-boolnone-told-the-release-judge-a-finished-product-was-not-converging)
 45. [An underpowered validation retired a product on evidence its own settings comment calls noise](#45-an-underpowered-validation-retired-a-product-on-evidence-its-own-settings-comment-calls-noise)
 46. [The underpowered-validation fix still retired the product, contradicting a rule the codebase already had](#46-the-underpowered-validation-fix-still-retired-the-product-contradicting-a-rule-the-codebase-already-had)
+47. [Every live-review finding was routed to a repair engineer with no access to the file actually at fault](#47-every-live-review-finding-was-routed-to-a-repair-engineer-with-no-access-to-the-file-actually-at-fault)
 
 ---
 
@@ -2542,5 +2543,51 @@ escalation, no re-queued rung); the old lifetime key is shown dropping a second 
 the new one is shown not to. `tests/integration/test_stalled_validation.py` unaffected
 — its three pre-existing failures reproduce identically against the unmodified
 scheduler.
+
+**Status**: Fixed 2026-09-23.
+
+---
+
+## 47. Every live-review finding was routed to a repair engineer with no access to the file actually at fault
+
+**Found**: 2026-09-23, scoping the reactive fix for Phase 2.9's ownership gap (the
+confirmation email/page having no per-product owner). Before writing the fix, checked
+what would actually happen if a reviewer ever *did* flag the confirmation journey as
+the artifact from the previous session's scoping proposed. It would have failed.
+
+**Severity**: latent, never yet triggered live, and would have failed silently in a
+specific way. `queue_review_patch` sent every `ReviewVerdict` -- regardless of what it
+was actually about -- to `PATCH_PRODUCT`, which spawns a repair engineer against the
+product's own git workspace. The confirmation email and the page its link leads to are
+rendered by the factory's own shared API (`api/app.py`), not deployed with any
+product's code at all. A repair engineer handed that brief would have had no file to
+open for the thing it was told to fix -- the same "engineer cannot tell whether the
+report is stale or the fix is unshipped" contradiction this exact function's own
+comment already names for a different case, one layer further along.
+
+It had not happened yet only because nothing gave a reviewer a way to say a finding
+was about the journey rather than the page -- `ReviewVerdict` had no field for it.
+
+**Root cause**: one contract, one dispatch path, for two things that need different
+fixes. The reviewer's own objective already asks it to walk the confirmation mail and
+the page behind it (Phase 2.9's "seeing" half); nothing downstream of that could
+distinguish what it found there from a finding about the deployed page's own code.
+
+**Affected**: `tools/product_review.py`, `engines/development/graph.py`.
+
+**Fix**: `ReviewVerdict.surface: Literal["product", "signup_journey"]`, defaulting to
+`"product"` so every existing finding keeps its current behaviour unchanged.
+`queue_review_patch` forks after filing the issue (the durable record stays shared):
+`"product"` keeps going to `PATCH_PRODUCT` exactly as before; `"signup_journey"` goes
+to a new `PATCH_SIGNUP_JOURNEY` task, handled by
+`engines/development/signup_journey.py` -- a structured judgement, not a spawned
+agent, since there is no code to run and no filesystem to act in. The verdict
+extraction prompt (`_REVIEW_VERDICT_SYSTEM`) was updated in the same commit; a schema
+field nobody is told to set is a field that never gets set.
+
+**Verification**: `tests/integration/test_live_product_review.py` -- a finding with
+`surface="signup_journey"` queues exactly one `PATCH_SIGNUP_JOURNEY` task and zero
+`PATCH_PRODUCT` tasks; every existing `PATCH_PRODUCT` test kept passing unchanged,
+confirming the default preserves current behaviour.
 
 **Status**: Fixed 2026-09-23.

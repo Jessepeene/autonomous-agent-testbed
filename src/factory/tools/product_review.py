@@ -21,6 +21,7 @@ tool would need.
 from __future__ import annotations
 
 import time
+from typing import Literal
 
 from pydantic import Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -74,6 +75,20 @@ class ReviewVerdict(Contract):
     location: str = Field(default="")
     kind: str = Field(default="bug")
     severity: str = Field(default="medium")
+    #: Which surface the defect actually lives on. `"product"` is the deployed page
+    #: itself -- its own code, in its own workspace, fixable by a repair agent
+    #: editing it. `"signup_journey"` is the confirmation email or the page its link
+    #: leads to, which are not part of any product's deployed code at all -- they
+    #: are rendered by the factory's own shared API (`factory/signup_journey.py`),
+    #: identical for every product until a finding here changes just this one's.
+    #:
+    #: The distinction earns its place because the two are not fixable the same
+    #: way: a `PATCH_PRODUCT` task spawns a repair engineer against the product's
+    #: workspace, which has no access to and no reason to expect the actual file
+    #: at fault. Before this field existed, a finding here would have been
+    #: unfixable by construction -- `queue_review_patch` had exactly one kind of
+    #: patch to queue, and it was the wrong one.
+    surface: Literal["product", "signup_journey"] = "product"
 
 
 async def queue_review_patch(
@@ -139,6 +154,18 @@ async def queue_review_patch(
             first_seen=issue.first_seen_at.isoformat(),
         )
 
+    # The fork this whole field exists for. A finding about the deployed page goes
+    # to a repair engineer with access to the product's workspace, same as always.
+    # A finding about the confirmation email or the page its link leads to is not
+    # in that workspace at all -- it is rendered by the factory's own shared API
+    # (`factory/signup_journey.py`) -- so a `PATCH_PRODUCT` task here would hand a
+    # repair engineer a brief about a file it cannot see and has no reason to
+    # expect exists. See `ReviewVerdict.surface`.
+    if verdict.surface == "signup_journey":
+        return await _queue_signup_journey_patch(
+            session, product_id=product_id, verdict=verdict, issue_id=issue.id
+        )
+
     bucket = int(time.time()) // PATCH_BUCKET_SECONDS
     # Where it was seen leads the brief, because that is what the engineer receiving
     # it cannot otherwise work out. A repair agent handed "checkout returns 422" and
@@ -183,3 +210,47 @@ async def queue_review_patch(
         "product_review.patch_requested", product_id=product_id, task_id=task_id, issue=issue.id
     )
     return task_id, f"issue {issue.id} queued for repair"
+
+
+async def _queue_signup_journey_patch(
+    session: AsyncSession, *, product_id: str, verdict: ReviewVerdict, issue_id: str
+) -> tuple[str | None, str]:
+    """The `signup_journey` half of `queue_review_patch`'s fork.
+
+    One bucket per product per day, same reasoning as the code-patch path: a
+    reviewer that finds two problems with the confirmation journey should describe
+    both in one request, not queue two rewrites that each overwrite the other's
+    work in `Product.signup_journey`. Handled by
+    `engines/development/signup_journey.py::patch_signup_journey` -- a single
+    structured judgement, not a spawned agent, because there is no code to run and
+    no filesystem to act in: the whole job is deciding what one or two short
+    pieces of text should say.
+    """
+    bucket = int(time.time()) // PATCH_BUCKET_SECONDS
+    task_id = await repository.enqueue_task(
+        session,
+        kind=TaskKind.PATCH_SIGNUP_JOURNEY,
+        engine=EngineName.DEVELOPMENT,
+        idempotency_key=f"patch-journey:{product_id}:{bucket}",
+        payload={
+            "product_id": product_id,
+            "finding_summary": verdict.summary.strip()[:2000],
+            "finding_details": verdict.details.strip()[:2000],
+            "finding_location": verdict.location.strip(),
+        },
+        product_id=product_id,
+        priority=60,
+    )
+    if task_id is None:
+        return None, f"issue {issue_id} recorded; a signup-journey patch is already queued today"
+
+    await repository.assign_issue_fix(
+        session, issue_id, task_id=task_id, assigned_to="signup_journey_patch"
+    )
+    log.info(
+        "product_review.signup_journey_patch_requested",
+        product_id=product_id,
+        task_id=task_id,
+        issue=issue_id,
+    )
+    return task_id, f"issue {issue_id} queued for a signup-journey patch"

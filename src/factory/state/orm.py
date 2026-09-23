@@ -244,6 +244,23 @@ class Product(Base):
     #: to keep honest between them. `workspace_undeployed` above is the fallback for
     #: products deployed before this existed, where the answer is genuinely unknown.
     deployed_content_hash: Mapped[str | None] = mapped_column(String(64))
+    #: Per-product overrides for the two customer-facing surfaces this factory
+    #: renders itself rather than deploying with the product: the confirmation
+    #: email and the page its link leads to. Empty (`{}`) for every product until a
+    #: reviewer actually flags the generic version -- see
+    #: `engines/development/signup_journey.py`. Known keys: `confirmation_email_
+    #: subject`, `confirmation_email_body`, `confirmation_page_text`. A key's
+    #: absence means "use today's literal text"; nothing here is ever required.
+    #:
+    #: Deliberately does not cover `/u/{token}` (GDPR erasure/unsubscribe). That
+    #: page's job is to be correct, not persuasive, its content is not tied to any
+    #: one product (an unsubscribe token can resolve through outreach, unrelated to
+    #: validation signals at all), and the one thing worth protecting here is that a
+    #: bug in template rendering can never be mistaken for a bug in whether erasure
+    #: happened. A rail, left alone on purpose.
+    signup_journey: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
 
     __table_args__ = (Index("ix_products_status", "status"),)
 
@@ -1212,7 +1229,6 @@ class LearningEpisode(Base):
         CheckConstraint("outcome IN ('success','failure')", name="episode_outcome_valid"),
         Index("ix_learning_episodes_param", "tunable_parameter_id", "created_at"),
     )
-
 
 
 class Decision(Base):

@@ -1711,7 +1711,13 @@ async def insert_validation_signal(
     return str(row) if row is not None else None
 
 
-async def confirm_validation_signal(session: AsyncSession, token: str) -> str | None:
+@dataclass(frozen=True, slots=True)
+class ConfirmedSignal:
+    email: str
+    product_id: str
+
+
+async def confirm_validation_signal(session: AsyncSession, token: str) -> ConfirmedSignal | None:
     """Resolve a double-opt-in confirmation click. Idempotent via ``coalesce``,
     not a ``WHERE confirmed_at IS NULL`` guard: a second click still matches the
     row and re-runs the UPDATE, but ``confirmed_at``/``confirmation_method``
@@ -1719,9 +1725,13 @@ async def confirm_validation_signal(session: AsyncSession, token: str) -> str | 
     a later click. Same email comes back either way, so a user double-clicking
     or a mail client prefetching the link can't raise an error.
 
-    Returns the confirmed row's email (for ``/u/{token}`` to also resolve this
-    token as an erasure route -- see ``api/app.py::unsubscribe``), or ``None``
-    if the token is unknown.
+    Returns the confirmed row's email and product (for ``/u/{token}`` to also
+    resolve this token as an erasure route, and for ``/confirm/{token}`` to render
+    that product's own confirmation page rather than the factory-wide default --
+    see ``api/app.py``), or ``None`` if the token is unknown. `product_id` was
+    added alongside `Product.signup_journey`; before it, this could only ever
+    return an email, so a page one click away from the product it was about had no
+    way to look anything up about that product at all.
     """
     stmt = (
         update(ValidationSignal)
@@ -1733,10 +1743,29 @@ async def confirm_validation_signal(session: AsyncSession, token: str) -> str | 
                 else_=ValidationSignal.confirmation_method,
             ),
         )
-        .returning(ValidationSignal.email)
+        .returning(ValidationSignal.email, ValidationSignal.product_id)
     )
-    row = (await session.execute(stmt)).scalar_one_or_none()
-    return str(row) if row is not None else None
+    row = (await session.execute(stmt)).one_or_none()
+    return ConfirmedSignal(email=str(row[0]), product_id=str(row[1])) if row is not None else None
+
+
+async def update_signup_journey(session: AsyncSession, product_id: str, **fields: str) -> None:
+    """Merge new pieces of a product's signup journey into what it already has.
+
+    A merge, not a replace: `engines/development/signup_journey.py`'s patch
+    responds to one specific finding and only ever sets the field or two that
+    finding was about, so a fix for the confirmation page must never silently
+    erase an earlier fix to the confirmation email. `None` values are dropped
+    before this is called (the caller's job, since only it knows which fields the
+    finding actually touched) -- every keyword argument reaching here is written.
+    """
+    if not fields:
+        return
+    product = await session.get(Product, product_id)
+    if product is None:
+        return
+    product.signup_journey = {**product.signup_journey, **fields}
+    await session.flush()
 
 
 async def validation_signal_email_for_token(session: AsyncSession, token: str) -> str | None:

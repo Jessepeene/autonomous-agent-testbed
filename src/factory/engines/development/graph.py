@@ -168,6 +168,15 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
         return await _generate_design_brief(ctx, session, task)
     if kind is TaskKind.REVIEW_LIVE_PRODUCT:
         return await _review_live_product(ctx, session, task)
+    if kind is TaskKind.PATCH_SIGNUP_JOURNEY:
+        # A structured judgement over a product row, not code -- no workspace, no
+        # sandbox, same category as REVIEW_LIVE_PRODUCT and EVALUATE_VALIDATION
+        # above. Placed before the sandbox check for the same reason those are:
+        # refusing this because Docker is down would leave a filed finding
+        # unaddressed over an outage that has nothing to do with it.
+        from factory.engines.development.signup_journey import patch_signup_journey
+
+        return await patch_signup_journey(ctx, session, task)
     if kind is TaskKind.ANSWER_QUESTION:
         # Another department is parked waiting on this. Above the sandbox check
         # because answering reads the record and touches no workspace -- refusing
@@ -759,7 +768,13 @@ same one instead of being filed a second time, so prefer the exact string the \
 reviewer used over a description of it. Leave empty only if they truly named none.
 - kind: bug, ui, content, regression, improvement, or feature_request.
 - severity: critical, high, medium, or low. Critical means the product cannot be \
-paid for or cannot be used at all.\
+paid for or cannot be used at all.
+- surface: "product" for anything on the deployed page itself. "signup_journey" \
+only when the reviewer's account places the defect in the confirmation email it \
+was sent, or the page the confirmation link led to -- these are rendered by the \
+factory, not deployed with the product, and are fixed by a completely different \
+route. If the reviewer never opened the confirmation mail or its link, this is \
+always "product".\
 """
 
 

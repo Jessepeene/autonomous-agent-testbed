@@ -1873,16 +1873,50 @@ Three pieces.
   gate and what evidence would show the change helped. Adding a *method* is one of these
   entries, which is why method-agnosticism is not a separate programme.
 
-### 3. Phase 2.9's other half — the signup journey belongs to the product
+### 3. Phase 2.9's other half — built 2026-09-23, reactive
 
-The confirmation mail (`api/app.py`) and both plain-text pages — confirm and unsubscribe
-— are constants no agent can author. Run 15's reviewer opened that exact page,
-screenshotted it, and reported nothing, because it had no lever: the page is not in the
-product's workspace.
+Three real options were scoped and put to Jesse with a visual comparison (bundle it
+into every landing-page build; give it its own commissioned ownership like
+`DESIGN_GUIDELINES`; write it only when a reviewer actually flags the generic
+version). *"Make it reactive."* Cost paid by zero products until the first real
+finding, and it mirrors exactly how the underlying problem was found in the first
+place — not a rule generating work in advance, but a person actually using the
+product and noticing the confirmation page looked wrong.
 
-Smallest honest fix: the product stores its own templates and the API renders from them,
-falling back to today's text when absent. That makes the journey reviewable *and*
-patchable without making every product's signup a bespoke risk.
+**`Product.signup_journey`** (migration 0045) — a small JSONB override, empty for
+every product until changed: `confirmation_email_subject`, `confirmation_email_body`,
+`confirmation_page_text`. Deliberately excludes `/u/{token}` (GDPR erasure) — that
+page's job is to be correct, not persuasive, is not scoped to one product at all
+(an unsubscribe token resolves through outreach as often as through a validation
+signal), and the one thing worth protecting there is that a template bug can never be
+mistaken for a bug in whether erasure actually happened. A rail, left alone on purpose
+— the artifact's own callout, carried into the build rather than only into the pitch.
+
+**Rendering is pure and separate from writing.** `factory/signup_journey.py` renders;
+`engines/development/signup_journey.py` writes. `confirm_validation_signal()` used to
+return only an email — changed to return the product too, since a page one click away
+from a product had no way to look anything up about it. The confirmation link and the
+erasure link are always composed fresh from the real token, never something a stored
+override can hold a stale copy of.
+
+**Checking before building surfaced a real, latent bug** (BUG_LOG 47): every live-
+review finding, regardless of what it was about, went to `PATCH_PRODUCT` — a repair
+engineer against the product's own workspace. Neither the confirmation email nor its
+page is deployed with any product's code; a reviewer that had flagged either would
+have handed a repair engineer a brief for a file that does not exist in the place it
+was told to look. `ReviewVerdict.surface` (`"product"` | `"signup_journey"`, default
+`"product"`) is the fork; `queue_review_patch` routes to a new
+`PATCH_SIGNUP_JOURNEY` task instead, handled by a single structured judgement rather
+than a spawned agent — there is no code to run and no filesystem to act in.
+
+**The risk named in the artifact, held as a real policy.** `SIGNUP_JOURNEY_POLICY`
+governs every rewrite regardless of which finding prompted it: no fabricated
+evidence, no internal scaffolding, nothing promised this company cannot guarantee,
+and the erasure link is never something the model is allowed to write itself. This is
+the first place agent-authored text reaches a real person who gave a real email
+address through a channel that is not the reviewed, gated landing page — the policy
+exists because that is a different risk texture, named here rather than inherited
+by accident from wherever the code happened to be written.
 
 ### 4. Phase 2.6 — inbound replies
 
@@ -1945,7 +1979,7 @@ And the two are currently handled by **one branch**:
 
 ```python
 if decision.decision in ("rethink", "abandon"):
-    interrupts.request(...)   # → a human
+    interrupts.request(...)  # → a human
     set_product_status(PLANNED)
 ```
 

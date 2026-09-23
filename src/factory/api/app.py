@@ -235,17 +235,23 @@ async def confirm_interest(token: str) -> Response:
     (anyone who guesses or receives a token can hit it), just far less
     valuable to spam since it can only ever confirm rows that already exist.
     """
+    from factory.signup_journey import render_confirmation_page_text
+
     async with session_scope() as session:
-        email = await repository.confirm_validation_signal(session, token)
-    if email is None:
-        raise HTTPException(status_code=404, detail="unknown or expired confirmation link")
-    return Response(
-        content=(
-            "Thanks — your interest has been confirmed. If you'd rather not be "
-            f"contacted about this again, visit /u/{token} to have your details deleted."
-        ),
-        media_type="text/plain",
+        confirmed = await repository.confirm_validation_signal(session, token)
+        if confirmed is None:
+            raise HTTPException(status_code=404, detail="unknown or expired confirmation link")
+        product = await repository.get_product(session, confirmed.product_id)
+
+    # This product's own confirmation text if a reviewer has ever flagged the
+    # generic version, the same text every product got before that otherwise. A
+    # product that has since been deleted (rare, but the row can outlive it in
+    # principle) falls back the same way a product with no override does.
+    text = render_confirmation_page_text(
+        product.signup_journey if product is not None else {},
+        unsubscribe_path=f"/u/{token}",
     )
+    return Response(content=text, media_type="text/plain")
 
 
 #: Address suffix reserved for the pre-ship browser review's own form submission.
@@ -356,17 +362,19 @@ async def interest(
     # blacklist gate, so an erased address can never receive one either.
     if require_confirmation and signal_id is not None and confirmation_token is not None:
         from factory.engines.marketing.email import send_email
+        from factory.signup_journey import render_confirmation_email
 
         base = (settings.unsubscribe_base_url or "").rstrip("/")
         confirm_link = f"{base}/confirm/{confirmation_token}" if base else None
         if confirm_link:
+            # This product's own subject/body if a reviewer has ever flagged the
+            # generic version, the same text every product got before that
+            # otherwise. See `Product.signup_journey`'s docstring.
+            mail = render_confirmation_email(product.signup_journey, confirm_link=confirm_link)
             await send_email(
                 to=submission.email,
-                subject="Please confirm your interest",
-                body=(
-                    "Thanks for your interest — please confirm by visiting the link "
-                    f"below. If you didn't request this, you can ignore it.\n\n{confirm_link}"
-                ),
+                subject=mail.subject,
+                body=mail.body,
                 settings=settings,
                 # So a retained message can be read back against the product it
                 # was about, rather than sitting in an undifferentiated pile.
