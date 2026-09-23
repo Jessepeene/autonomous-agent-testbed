@@ -446,7 +446,10 @@ product to look at rather than round-robin.
 
 ## Phase 2.5 — what it costs to be blocked
 
-**Status**: identified 2026-09-15 from the Design department's first live runs.
+**Status**: **built.** `factory/comms.py` carries the whole shape -- `ask`,
+`park_until_answered`, `answers_for`, `raise_blocked_question`, `deliver`. The
+status line below was never updated after it shipped; identified 2026-09-15 from
+the Design department's first live runs.
 Scoped here, not built.
 
 ### Start from how a human team does this
@@ -909,7 +912,9 @@ plumbing works repeats that exactly.**
 
 ## Phase 2.8 — facts, not stages (added 2026-09-16)
 
-**Status**: proposed. This is what has to be true for Phase 3 to be an architecture
+**Status**: **built** -- `factory/facts.py`, `supervisor/product_decision.py` and
+`supervisor/attention.py` are this phase. What follows is what has to be true for
+Phase 3 to be an architecture
 rather than a longer pipeline.
 
 Jesse, shown a proposal to add a Compliance → Design handoff with a build-side gate:
@@ -1115,7 +1120,12 @@ is the former. "Design before development" is the latter, and stays the decider'
 
 ## Phase 2.9 — let the reviewer see the whole journey (added 2026-09-21)
 
-**Status**: scoped, not built. Found by Jesse signing up to his own live product.
+**Status**: **half built.** The *seeing* half shipped (`93c69e0`, `f70931b`,
+`892a891`): a reviewer now reads the mail it sent, follows the confirmation link
+and opens the page behind it. The *owning* half did not -- the confirmation mail
+and both plain-text pages are still constants in `api/app.py`, factory
+infrastructure identical for every product, which no agent can author or change.
+See "the last of Phase 2" below. Found by Jesse signing up to his own live product.
 
 Run 12 shipped a genuinely good page — Fraunces and Public Sans, a bakery palette,
 zero repair cycles. Then Jesse submitted his email, clicked the confirmation link,
@@ -1729,6 +1739,85 @@ creates no new information, and with zero customers there is still almost nothin
 learn from. It makes things learnable **that currently cannot learn at all**. And
 crediting every ancestor decision is *evidence, not proof*: a decision in the chain is
 not necessarily a cause, and the record should not pretend otherwise.
+
+## The last of Phase 2 — what remains, in build order (scoped 2026-09-23)
+
+Written after auditing every 2.x status line against the code rather than trusting it,
+which found three stale ones: 2.5 and 2.8 are **built**, and 2.9 is **half** built. The
+original 2a–2d are substantially done too — the `RESULT:` sentinel is parsed
+(`agents/runtime.py`), `comms.py` carries blocked reports and parked questions, and
+`capability:` memory gives workers notes. What is genuinely left is five items.
+
+### 0. Return on a decision — the method-neutral metric
+
+**Smallest, and it unblocks the rest.** Both halves of the subtraction are already on
+disk and nothing computes the difference: `llm_calls.cost_usd` carries the price of
+every call as of the moment it ran and is tagged with `task_id`; `outcomes.value_cents`
+carries what came back. Since 2.14, a task chains to the decisions above it.
+
+So: `attribution.decision_return(decision_id)` — sum the cost of every task in that
+decision's subtree, against the value of every outcome crediting it. That is the first
+figure this company has ever had that survives a change of method, and it is the unit a
+general manager actually reasons in.
+
+Two honest limits to state in the code rather than discover later: LLM spend is not the
+only cost (Vercel, Mailgun, domains are not attributed to anything), and a decision's
+subtree overstates its claim, since being upstream of a cost is not the same as having
+caused it.
+
+### 1. Phase 2.12 — make the judges learnable
+
+Three pieces, in order:
+
+- **Put judges on the mutation allowlist.** Today it holds seven keys and every one is
+  a maker. The bar lives in `LANDING_PAGE_REQUIREMENTS_SYSTEM` and `RELEASE_SYSTEM`, and
+  no outcome can move either.
+- **A metric that measures a decision, not an artifact.** For the shipping bar it is
+  *signal validity*: did shipping this produce usable information? Forty visitors and
+  zero signups on a working page is a successful experiment with a negative result; the
+  same numbers on a broken form is a wasted one. **The data already exists** — the
+  pre-ship review's `_failed_requests` on the primary action is exactly "did the form
+  work", and `reach` is already counted. Nothing joins them.
+- **Give the release judge a cost of delay.** It is told to weigh it and handed no fact
+  about it. `manager_response_times` is the pattern: a measurement, not a constant.
+
+### 2. Phase 2.13 — improving itself, detection before repair
+
+- **Phase A, read-only.** Encode the five recurring defect shapes as checks the system
+  runs against its own source, reporting findings and changing nothing. No write access,
+  no rails at risk, and it attacks the half of this month's bugs that were invisible
+  rather than hard. It also makes the bug rate measurable again, which is the Phase 3
+  gate.
+- **Phase B, propose only.** A failing test plus a diff that a human merges — how you
+  onboard a junior engineer to a build system, not commit access.
+- **Generalise the registry** from `MUTABLE_KEYS` to entries carrying a subject kind, a
+  gate and what evidence would show the change helped. Adding a *method* is one of these
+  entries, which is why method-agnosticism is not a separate programme.
+
+### 3. Phase 2.9's other half — the signup journey belongs to the product
+
+The confirmation mail (`api/app.py`) and both plain-text pages — confirm and unsubscribe
+— are constants no agent can author. Run 15's reviewer opened that exact page,
+screenshotted it, and reported nothing, because it had no lever: the page is not in the
+product's workspace.
+
+Smallest honest fix: the product stores its own templates and the API renders from them,
+falling back to today's text when absent. That makes the journey reviewable *and*
+patchable without making every product's signup a bespoke risk.
+
+### 4. Phase 2.6 — inbound replies
+
+Never built; there is no inbound webhook at all. Blocked on the Mailgun inbound route,
+which is Jesse's to configure. Until then the company can see sends, bounces and
+complaints, and never a reply.
+
+### What is deliberately not in this list
+
+2b's second half — letting a recipient *question* a finding rather than only comply or
+fail — stays deferred until there is data showing it is needed. And the whole list is
+gated behind the same wall as everything else: with 0 leads and 0 customers, items 0
+and 1 can only be exercised against internal signals (heal cycles to ship, first-pass
+blocking count, ship versus rethink), which is enough to start and not enough to finish.
 
 ## Phase 3 — Product / Management (absorbs the general manager)
 
