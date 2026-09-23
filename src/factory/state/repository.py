@@ -8,6 +8,7 @@ and the minimisation boundary for leads.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import re
 import secrets
 from collections.abc import Mapping, Sequence
@@ -30,6 +31,7 @@ from factory.state.orm import (
     ChannelExperiment,
     CustomCredential,
     Customer,
+    Decision,
     DunningEvent,
     EntityVerdictRow,
     HealAttempt,
@@ -202,6 +204,46 @@ async def manager_response_times(
             median_seconds=median(deltas) if deltas else None,
         )
     return out
+
+
+async def repair_cycle_time(session: AsyncSession) -> Responsiveness:
+    """How long it actually takes to come back around to the next release judgement
+    after choosing `fix_first` or `rethink`.
+
+    Same discipline as `manager_response_times`: measured, not asserted.
+    `RELEASE_SYSTEM` is told to weigh the cost of not shipping and given no fact
+    bearing on it; this is that fact for "one more cycle" -- the number a decision to
+    keep patching is actually trading against.
+
+    Computed in Python over `release`-kind `Decision` rows rather than a SQL window
+    function: at today's volume that is dozens of rows at most, and a query anyone
+    can read without reasoning about partitions is worth more than a marginal
+    round-trip saved on data this small. Revisit if this table ever holds enough
+    rows for the difference to matter.
+    """
+    rows = (
+        await session.execute(
+            select(Decision.subject_id, Decision.choice, Decision.created_at)
+            .where(Decision.kind == "release", Decision.subject_kind == "product")
+            .order_by(Decision.subject_id, Decision.created_at)
+        )
+    ).all()
+
+    by_subject: dict[str, list[tuple[str, datetime]]] = {}
+    for subject_id, choice, created_at in rows:
+        by_subject.setdefault(subject_id, []).append((choice, created_at))
+
+    deltas: list[float] = []
+    for history in by_subject.values():
+        for (choice, when), (_, next_when) in itertools.pairwise(history):
+            if choice in ("fix_first", "rethink"):
+                deltas.append((next_when - when).total_seconds())
+
+    return Responsiveness(
+        kind="repair_cycle",
+        observations=len(deltas),
+        median_seconds=median(deltas) if deltas else None,
+    )
 
 
 async def enqueue_task(

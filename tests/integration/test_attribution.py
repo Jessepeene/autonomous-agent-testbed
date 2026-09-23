@@ -357,3 +357,98 @@ async def test_the_subtree_walk_terminates_on_a_cycle(session: AsyncSession) -> 
     )
     await session.flush()
     assert set(await attribution.descendants(session, "t-a")) == {"t-a", "t-b"}
+
+
+# ------------------------------------------- what the release judge is told it costs
+
+
+async def test_product_spend_to_date_sums_every_task_this_product_has_ever_had(
+    session: AsyncSession,
+) -> None:
+    """Not a subtree walk from one decision -- a release judgement needs the total
+    across every rebuild and every repair cycle, and Task.product_id already answers
+    that directly rather than through a guess at which decision commissioned it."""
+    from factory.state.orm import Task
+
+    for kind, cost in (("build_landing_page", 0.50), ("patch_product", 0.30)):
+        session.add(
+            Task(
+                id=(tid := new_id()),
+                kind=kind,
+                engine=EngineName.DEVELOPMENT.value,
+                status="done",
+                priority=100,
+                payload={},
+                product_id="p-spend",
+                idempotency_key=f"test:{tid}",
+            )
+        )
+        await session.flush()
+        await _spend(session, tid, cost)
+
+    # An unrelated product's spend must not leak in.
+    other_task = "t-other-product"
+    session.add(
+        Task(
+            id=other_task,
+            kind="patch_product",
+            engine=EngineName.DEVELOPMENT.value,
+            status="done",
+            priority=100,
+            payload={},
+            product_id="p-unrelated",
+            idempotency_key="test:other",
+        )
+    )
+    await session.flush()
+    await _spend(session, other_task, 99.0)
+
+    assert await attribution.product_spend_to_date(session, "p-spend") == 80
+    assert await attribution.product_spend_to_date(session, "p-never-touched") == 0
+
+
+async def test_repair_cycle_time_measures_only_fix_first_and_rethink_gaps(
+    session: AsyncSession,
+) -> None:
+    """The fact `RELEASE_SYSTEM` was never given: what one more cycle actually costs
+    in wall-clock time, measured from the company's own history rather than
+    invented -- same discipline as `manager_response_times`."""
+    from datetime import UTC, datetime, timedelta
+
+    from factory.state.orm import Decision
+
+    base = datetime(2026, 9, 1, tzinfo=UTC)
+    # (subject_id, choice, when) -- record_decision always stamps "now", so
+    # created_at is overwritten right after each insert to give the ladder a real,
+    # orderable history rather than four rows within the same millisecond.
+    rows = [
+        ("p-a", "fix_first", base),
+        ("p-a", "ship", base + timedelta(hours=2)),
+        ("p-b", "rethink", base),
+        ("p-b", "abandon", base + timedelta(hours=6)),
+    ]
+    for subject_id, choice, when in rows:
+        decision_id = await attribution.record_decision(
+            session,
+            kind="release",
+            subject_kind="product",
+            subject_id=subject_id,
+            choice=choice,
+            rationale="test",
+            made_by_engine=EngineName.DEVELOPMENT.value,
+        )
+        decision = await session.get(Decision, decision_id)
+        assert decision is not None
+        decision.created_at = when
+    await session.flush()
+
+    got = await repository.repair_cycle_time(session)
+    assert got.observations == 2
+    assert got.median_seconds == pytest.approx((2 * 3600 + 6 * 3600) / 2)
+
+
+async def test_repair_cycle_time_is_silent_with_no_history(session: AsyncSession) -> None:
+    got = await repository.repair_cycle_time(session)
+    assert got.observations == 0
+    assert got.median_seconds is None
+    assert "nobody has asked" in got.describe()

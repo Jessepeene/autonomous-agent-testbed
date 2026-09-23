@@ -88,6 +88,53 @@ def _render_progress_facts(progress: repository.ProductProgress) -> list[str]:
     return facts
 
 
+async def _render_cost_of_delay_facts(
+    session: AsyncSession, product_id: str, *, heal_attempts: int
+) -> list[str]:
+    """What another cycle actually costs, as measured facts rather than an
+    instruction to weigh one.
+
+    `RELEASE_SYSTEM` is told to "weigh what is actually wrong against the cost of
+    not shipping" and, until this, was handed nothing bearing on that side of the
+    scale at all -- every other fact in this prompt is about what is wrong. Money
+    already spent and typical cycle time are not judgements, they are what a
+    decision to ask for one more fix_first is actually trading against; the judge
+    stays free to weigh them however it thinks right. Silent when there is nothing
+    to say yet -- a first attempt with zero spend recorded is a true state, not a
+    gap in this function.
+    """
+    # This function must never be the reason a release judgement does not happen --
+    # same posture `decide_release`'s own docstring already states for the model
+    # call itself, and the same one `preship.py` holds for its recall. Caught live:
+    # a unit test exercising a fully deterministic slice of this pipeline passes
+    # `session=None`, on the reasonable assumption that a path with no model call
+    # and no requirements needs no database either -- true until this function
+    # added one. Degrading to no facts is honest; crashing a judgement over an
+    # optional fact about cost is not.
+    try:
+        facts: list[str] = []
+        spent_cents = await attribution.product_spend_to_date(session, product_id)
+        if spent_cents:
+            facts.append(
+                f"Spent on this product so far, across every attempt: ${spent_cents / 100:.2f}."
+            )
+
+        # Global rather than per-product: at today's volume, "how long does a
+        # repair cycle on *this* product take" would be one or two points, not a
+        # median worth reporting. A company-wide figure is the honest answer to
+        # "how long does asking for one more fix_first actually take", the same
+        # reasoning `manager_response_times` uses for asking another department.
+        if heal_attempts > 0:
+            cycle = await repository.repair_cycle_time(session)
+            facts.append(f"Asking for one more repair cycle: {cycle.describe()}.")
+        return facts
+    except Exception as exc:
+        log.warning(
+            "release.cost_of_delay_unavailable", product_id=product_id, detail=str(exc)[:200]
+        )
+        return []
+
+
 RELEASE_SYSTEM = """\
 You decide whether a product is released. You are not a checklist -- the findings \
 below are evidence for a judgement, not a verdict you are restating.
@@ -95,7 +142,10 @@ below are evidence for a judgement, not a verdict you are restating.
 The question is whether this is good enough to put in front of a real person today, \
 given what it is for. Weigh what is actually wrong against the cost of not \
 shipping: a validation landing page exists to find out whether anyone wants the \
-idea, and a page that never goes live answers nothing.
+idea, and a page that never goes live answers nothing. When you are told what has \
+been spent so far and what one more repair cycle typically costs, those are real \
+measured facts about the other side of that scale, not a nudge toward any \
+particular answer -- weigh them however you judge right.
 
 Your options:
 
@@ -188,6 +238,7 @@ async def decide_release(
     # progress from a wall, and "the blocking set went 6 -> 4 -> 4 and these two
     # criteria have failed on every pass" can.
     facts += ["", f"Repair attempts on this product so far: {heal_attempts}."]
+    facts += await _render_cost_of_delay_facts(session, product_id, heal_attempts=heal_attempts)
     facts += _render_progress_facts(progress)
     if progress.stuck:
         facts += [

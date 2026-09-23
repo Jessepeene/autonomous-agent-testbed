@@ -90,7 +90,7 @@ def test_fix_first_carries_what_specifically() -> None:
 
 
 def test_unmet_requirements_are_named_not_summarised() -> None:
-    """"It does not meet the requirements" is unactionable. Which ones is the
+    """ "It does not meet the requirements" is unactionable. Which ones is the
     difference between a repair brief and a complaint."""
     decision = _decision(
         decision="fix_first",
@@ -129,3 +129,22 @@ class TestTheRailsDoNotMove:
         assert overruled.decision == "fix_first"
         assert "Overruled by the release rails" in overruled.rationale
         assert overruled.fix_first
+
+
+@pytest.mark.asyncio
+async def test_cost_of_delay_facts_degrade_rather_than_crash_the_judgement() -> None:
+    """`decide_release`'s own docstring already promises this for the model call:
+    "failing to reach a judgement must not become an outage." This function is the
+    one place that promise was not yet kept.
+
+    Caught live: a unit test exercising a fully deterministic slice of the build
+    pipeline passes `session=None`, on the reasonable assumption that a path with no
+    model call and no requirements needs no database either -- true until this
+    function added one. `session=None` here stands in for that same assumption
+    failing; a real session that has simply lost its connection degrades the same
+    way, through the same `except`.
+    """
+    from factory.engines.development.release import _render_cost_of_delay_facts
+
+    facts = await _render_cost_of_delay_facts(None, "prod-1", heal_attempts=2)  # type: ignore[arg-type]
+    assert facts == []

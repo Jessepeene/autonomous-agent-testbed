@@ -1796,11 +1796,44 @@ Three pieces.
   could never queue its own re-evaluation; the enqueue would return `None`, silently,
   and the product would sit at `VALIDATING` forever. Scoped to the sending task now.
 
-- **Put judges on the mutation allowlist.** Today it holds seven keys and every one is
-  a maker. The bar lives in `LANDING_PAGE_REQUIREMENTS_SYSTEM` and `RELEASE_SYSTEM`, and
-  no outcome can move either.
-- **Give the release judge a cost of delay.** It is told to weigh it and handed no fact
-  about it. `manager_response_times` is the pattern: a measurement, not a constant.
+- **Give the judges measured evidence, not a mutable standard — corrected 2026-09-23.**
+  This item was scoped, wrongly, as "put judges on the mutation allowlist" — the same
+  treatment `LANDING_PAGE_SYSTEM` gets: versioned, champion-challenger tested against an
+  outcome metric, promoted or rolled back. Building it as written would have put
+  `RELEASE_SYSTEM`'s own standard behind the wheel of the traffic it directs, which is
+  exactly what Phase 2.13 already rules out — *"the evaluator must not be reachable by
+  the thing being evaluated."* A version of the release judge that ships more
+  permissively "wins" on almost any downstream metric, since it manufactures more of the
+  very outcomes used to score it, and there is no honest way to tell that apart from a
+  version that got genuinely better at judging. `learning/allowlist.py`'s own docstring
+  already says as much for the reason: every mutable key is *"commercially-lossy, never
+  safety-critical,"* and judge/gate prompts (LIA, Bug Council, the orchestrator) are
+  *"permanently excluded, by omission."* `RELEASE_SYSTEM` and
+  `LANDING_PAGE_REQUIREMENTS_SYSTEM` are that same kind of prompt and belong in that same
+  exclusion, not beside them on the list.
+
+  What the judges actually needed, and what "make the judges learnable" was reaching
+  for: real measured facts to weigh, with their standard left untouched — the exact
+  pattern `Responsiveness` already set for "what does asking another department cost."
+  Built:
+
+  - **`attribution.product_spend_to_date`** — total LLM cost across every attempt this
+    product has ever had, a direct `Task.product_id` sum rather than a decision-subtree
+    walk, since a release judgement needs the whole history, not one commissioning
+    decision's share of it.
+  - **`repository.repair_cycle_time`** — median wall-clock time from a `fix_first` or
+    `rethink` release decision to the next one, company-wide (per-product would be one
+    or two points at today's volume, not a median). The same discipline
+    `manager_response_times` holds: measured, never asserted, silent when there is
+    nothing to report yet.
+
+  Both are handed to `RELEASE_SYSTEM` as facts it is free to weigh however it judges
+  right — *"a real measured fact about the other side of the scale, not a nudge toward
+  any particular answer"* — never as an instruction. Guarded to the same standard as the
+  rest of this pipeline: wrapped so a session that cannot serve these queries degrades to
+  no facts shown rather than crashing the judgement (caught by a unit test passing
+  `session=None`, exercising exactly the deterministic slice `decide_release`'s own
+  docstring already promises never depends on a database).
 
 ### 2. Phase 2.13 — improving itself, detection before repair
 

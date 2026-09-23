@@ -29,6 +29,7 @@ from factory.state.orm import (
     LLMCall,
     Outcome,
     OutcomeEvidence,
+    Task,
     TaskEvent,
     new_id,
 )
@@ -332,3 +333,23 @@ async def decision_return(session: AsyncSession, decision_id: str) -> DecisionRe
         tasks=len(subtree),
         outcomes=int(counted or 0),
     )
+
+
+async def product_spend_to_date(session: AsyncSession, product_id: str) -> int:
+    """Total LLM cost, in cents, of every task ever run against this product.
+
+    Not a subtree walk from one decision -- a release judgement needs "what has this
+    product cost so far, in total", and finding "the one decision that commissioned
+    it" to walk from would be a guess about which `Decision` row that was.
+    `Task.product_id` already answers the question directly and exactly, across
+    every repair cycle and every rebuild this product has ever had.
+    """
+    spent = (
+        await session.execute(
+            select(func.coalesce(func.sum(LLMCall.cost_usd), 0.0))
+            .select_from(LLMCall)
+            .join(Task, Task.id == LLMCall.task_id)
+            .where(Task.product_id == product_id)
+        )
+    ).scalar_one()
+    return round(float(spent) * 100)
