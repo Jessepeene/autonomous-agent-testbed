@@ -1837,11 +1837,36 @@ Three pieces.
 
 ### 2. Phase 2.13 — improving itself, detection before repair
 
-- **Phase A, read-only.** Encode the five recurring defect shapes as checks the system
-  runs against its own source, reporting findings and changing nothing. No write access,
-  no rails at risk, and it attacks the half of this month's bugs that were invisible
-  rather than hard. It also makes the bug rate measurable again, which is the Phase 3
-  gate.
+- **Phase A, read-only. First shape built 2026-09-23:** `factory/selfcheck.py::
+  find_lifetime_scoped_keys`, a standing AST scan for BUG_LOG 38/42/46's exact shape —
+  a task kind known to recur (`BUILD_MVP`, `BUILD_LANDING_PAGE`, `EVALUATE_VALIDATION`,
+  `PATCH_PRODUCT`) enqueued under a key naming only the entity, not the occurrence.
+  Calibrated against the live codebase before being trusted: every current call site
+  for those four kinds was read by hand first, confirmed to already carry a second
+  interpolation (a task id, an AB test id, a heal-cycle bucket) from each historical
+  fix, and a deliberately-once kind (`ASSESS_COMPLIANCE`, correctly keyed on just
+  `{idea_id}`) confirmed *not* to trip it — the recurring-kind list is curated, not
+  inferred, because whether a kind's work recurs is a fact about what the work is, not
+  something a key string alone can answer. `tests/unit/test_idempotency_key_shape.py`
+  runs it in CI now; a fourth instance of this shape fails the build the moment it is
+  written, wherever it is written.
+
+  The other four shapes (a value nothing reads; an enum member missing from a table
+  meant to cover all of them; two derivations of one question; a tri-state read as a
+  boolean) are scoped, not built. Each needs the same calibration pass — mypy
+  structurally cannot catch the tri-state one, since collapsing `Optional[bool]` via
+  truthiness is sometimes intentional; a blanket enum-exhaustiveness scan would flag
+  every deliberately-partial mapping in the codebase; "two derivations of one
+  question" is not mechanically detectable in general. Building four checkers without
+  that rigor to hit a count would be exactly the quick fix this phase exists to avoid.
+
+  Wiring this (or its successors) into a task the factory runs on itself
+  periodically, with findings reported somewhere a human sees them, is the next
+  concrete step and is deliberately not built yet — a real integration decision (which
+  maintenance slug, what happens to a finding) that deserves its own scoping rather
+  than being rushed in alongside the checker itself. Today it runs as a CI gate, which
+  already restores the bug rate's measurability for whichever of these five shapes
+  have working checkers.
 - **Phase B, propose only.** A failing test plus a diff that a human merges — how you
   onboard a junior engineer to a build system, not commit access.
 - **Generalise the registry** from `MUTABLE_KEYS` to entries carrying a subject kind, a
