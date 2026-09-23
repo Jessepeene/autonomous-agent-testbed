@@ -72,6 +72,7 @@ from factory.state.schemas import (
     TaskKind,
     ValidatedIdea,
 )
+from factory.supervisor import lead_sourcing
 from factory.supervisor.concurrency import (
     LockUnavailable,
     defer_for_lock,
@@ -537,64 +538,52 @@ async def _evaluate_validation(ctx: FactoryContext, session: AsyncSession, task:
         )
         return f"development: validation for {product_id} passed ({signals}/{sent}), building"
 
-    # retire_product (not a bare set_product_status) so this path also gets PII
-    # retention -- see purge_product_pii -- exactly like the heal-exhaustion
-    # retirement path. RETIRED itself is shared between the two (Product carries no
-    # reason field), so the memory row below is the durable trail that lets a future
-    # audit tell them apart, matching this codebase's instinct to never leave a
-    # terminal decision unexplained.
     if not conclusive:
-        # The company-level cause, raised once however many products hit it -- the
-        # dedup is on the subject, and this subject names the company rather than the
-        # product on purpose. A product retired for want of reach is a symptom; the
-        # thing a human can actually act on is that this factory cannot currently put
-        # an idea in front of enough people to learn anything from it.
-        await interrupts.request(
+        # **Never retire for want of reach.** "Unless they have concrete evidence the
+        # product will not work they won't retire it" -- Jesse, and the codebase
+        # already agreed with him for the zero-leads case (the stalled-validation
+        # sweep in supervisor/scheduler.py never calls retire_product either). This
+        # is that same ladder, reached from the moment a validation window closes
+        # underpowered instead of the moment an hourly sweep notices zero leads.
+        # Retire is a human's word only -- see hitl/interrupts.py's
+        # `_act_on_lead_sourcing_reply`, the one place REJECT actually retires.
+        rung = await lead_sourcing.pursue_or_escalate(
             session,
-            reason=InterruptReason.LEAD_SOURCING_STALLED,
-            subject="Validations are running underpowered",
-            detail=(
+            product,
+            context=(
                 f"'{product.name}' reached the end of its validation window having "
-                f"contacted {sent} people. This company treats "
-                f"{ctx.settings.validation_min_sample_size} as the minimum for a "
-                "response rate to mean anything, so the run was recorded as "
-                "inconclusive rather than as a negative result: nothing was learned "
-                "about the idea, and nothing was charged against the page that was "
-                "written for it. "
-                "Until outreach can reach that many people, every validation will end "
-                "this way and the factory will retire ideas it never tested."
-            ),
-            headline="📭 Not enough reach to test anything",
-            reply_hint=(
-                "No reply needed to unblock this product -- it has already been "
-                "retired. Reply when lead sourcing can supply real volume."
+                f"contacted {sent} people, below the "
+                f"{ctx.settings.validation_min_sample_size} this company treats as "
+                "the minimum for a response rate to mean anything. Nothing was "
+                "learned about the idea and nothing was charged against the page "
+                "that was written for it -- the run was recorded as inconclusive, "
+                "not as a negative result."
             ),
         )
+        log.info(
+            "development.validation_inconclusive",
+            product_id=product_id,
+            sent=sent,
+            signals=signals,
+            rung=rung,
+        )
+        return f"development: validation for {product_id} inconclusive ({sent} sent), {rung}"
 
+    # retire_product (not a bare set_product_status) so this path also gets PII
+    # retention -- see purge_product_pii -- exactly like the heal-exhaustion
+    # retirement path. Reached only here now: a real, adequately-powered negative
+    # result, which is the concrete evidence retiring is supposed to require.
     await repository.retire_product(session, product_id)
     await memory_store.remember(
         session,
         content=(
-            (
-                f"Product {product.name} was retired without being tested: only {sent} "
-                f"contacted, below the {ctx.settings.validation_min_sample_size} needed "
-                "for a response rate to be readable. Nothing here is evidence about the "
-                "idea or the page -- only about how far this company's reach got."
-            )
-            if not conclusive
-            else (
-                f"Product {product.name} did not clear the validation gate: "
-                f"{signals}/{sent} interest signals ({response_rate:.1%}), below the "
-                f"{ctx.settings.validation_min_response_rate:.1%} bar on "
-                f"{ctx.settings.validation_min_sample_size}+ sent required. Retired "
-                "without a real build ever being attempted."
-            )
+            f"Product {product.name} did not clear the validation gate: "
+            f"{signals}/{sent} interest signals ({response_rate:.1%}), below the "
+            f"{ctx.settings.validation_min_response_rate:.1%} bar on "
+            f"{ctx.settings.validation_min_sample_size}+ sent required. Retired "
+            "without a real build ever being attempted."
         ),
-        # A FACT when the experiment never ran, a FAILURE when it ran and the answer
-        # was no. The scope is this product's own, which nothing reads after
-        # retirement -- but the kind is what a future audit reads, and calling an
-        # untested idea a failure is how a company talks itself out of a market.
-        kind=memory_store.MemoryKind.FACT if not conclusive else memory_store.MemoryKind.FAILURE,
+        kind=memory_store.MemoryKind.FAILURE,
         scope=memory_store.scope_for(product_id=product_id),
         origin="development:evaluate_validation",
     )

@@ -32,8 +32,8 @@ from factory.logging import get_logger
 from factory.settings import EngineName
 from factory.state import repository
 from factory.state.db import session_scope
-from factory.state.orm import new_id
 from factory.state.schemas import InterruptReason, TaskKind
+from factory.supervisor import lead_sourcing
 from factory.supervisor.context import FactoryContext
 
 log = get_logger(__name__)
@@ -277,63 +277,23 @@ class Scheduler:
                 older_than=timedelta(hours=ctx.settings.validation_stalled_hours),
                 limit=5,
             ):
-                if not await repository.has_retried_lead_sourcing(session, product.id):
-                    # First strike: try once more, exactly like a person finding
-                    # the internet down would first check whether it is back up
-                    # before bothering anyone.
-                    await repository.enqueue_task(
-                        session,
-                        kind=TaskKind.HARVEST_LEADS,
-                        engine=EngineName.MARKETING,
-                        idempotency_key=f"leads:validate:{product.id}:retry",
-                        payload={"product_id": product.id},
-                        product_id=product.id,
-                        priority=120,
-                    )
-                elif not await repository.has_attempted_channel_scout(session, product.id):
-                    # Second strike: the retry didn't help either, but that's not
-                    # yet a reason to ask a human -- try a different distribution
-                    # channel first. `_channel_scout_review` (marketing/graph.py)
-                    # reads `last_lead_sourcing_summary` so the scout knows *why*
-                    # the current channel came up empty, not just that it did.
-                    await repository.enqueue_task(
-                        session,
-                        kind=TaskKind.CHANNEL_SCOUT_REVIEW,
-                        engine=EngineName.MARKETING,
-                        idempotency_key=f"channel-scout:stall:{product.id}",
-                        payload={"product_id": product.id},
-                        product_id=product.id,
-                        priority=100,
-                    )
-                else:
-                    # Third strike: a retry and an automatic channel-scout review
-                    # both failed to unstick this -- this is not something more
-                    # waiting or another automatic channel can fix on its own.
-                    # A fresh id, not product.id[:8]: stalled_validations() already
-                    # excludes any product with an open interrupt, so this raise is
-                    # never a duplicate of a still-open one -- but product.id is
-                    # stable across this product's whole life, and would collide
-                    # with an earlier, now-resolved escalation for the same product
-                    # (see 0017_interrupt_open_subject_partial.py).
-                    await interrupts.request(
-                        session,
-                        reason=InterruptReason.LEAD_SOURCING_STALLED,
-                        subject=f"{product.name[:80]} can't source leads ({new_id()[:8]})",
-                        detail=(
-                            "Two lead-sourcing attempts and an automatic channel-"
-                            "scout review all found nothing for this validating "
-                            "product. This usually means a lead-provider "
-                            "credential (Hunter/Apollo) is present but being "
-                            "rejected, not that it's genuinely missing -- worth "
-                            "checking the provider account directly."
-                        ),
-                        headline="\U0001f511 Account problem — can't source leads",
-                        reply_hint=(
-                            "Reply anything to retry sourcing leads, or REJECT to "
-                            "retire this product."
-                        ),
-                        product_id=product.id,
-                    )
+                # The ladder itself -- retry, try a channel, then ask a human, never
+                # retire automatically -- is shared with the validation gate's own
+                # "not enough sends to read a rate" case (development/graph.py). Same
+                # underlying fact, noticed at a different moment; see
+                # supervisor/lead_sourcing.py for why they must not be two policies.
+                await lead_sourcing.pursue_or_escalate(
+                    session,
+                    product,
+                    context=(
+                        "Zero leads have ever been sourced for this validating "
+                        "product, after a retry and an automatic channel-scout "
+                        "review. This usually means a lead-provider credential "
+                        "(Hunter/Apollo) is present but being rejected, not that "
+                        "it's genuinely missing -- worth checking the provider "
+                        "account directly."
+                    ),
+                )
 
             # CHANNEL_SCOUT's reliability net -- the Orchestrator can spawn it
             # directly (it is in role_catalogue()); this is what still finds a

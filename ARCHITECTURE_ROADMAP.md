@@ -1767,17 +1767,38 @@ caused it.
 
 ### 1. Phase 2.12 — make the judges learnable
 
-Three pieces, in order:
+Three pieces.
+
+- **Signal validity for the validation gate — built 2026-09-23.** The gate's own
+  settings comment already said it: *"below this many leads contacted, a response
+  rate is statistically meaningless."* It was folded into `passed` anyway, so an
+  underpowered run charged the landing-page prompt with a failure, taught Discovery
+  the niche was bad, and retired the product — three learning paths fed by evidence
+  the code itself calls noise. `conclusive` is now held apart from `passed`;
+  inconclusive runs record an `Outcome` outside every trial's arithmetic and write a
+  `FACT`, never a `FAILURE`, at Discovery's scope.
+
+  This surfaced a second question, and Jesse's own read of it was the right one:
+  *"unless they have concrete evidence the product will not work they won't retire
+  it, right?"* The codebase already agreed with him — for exactly one trigger. The
+  stalled-validation sweep (zero leads, checked hourly) retries lead sourcing, then
+  tries a different channel, then asks a human; it never calls `retire_product`
+  itself, only a human's explicit REJECT does. The validation gate's own inconclusive
+  branch disagreed with that, retiring directly. Both are the same fact —
+  not enough reach for a valid read — noticed at two different moments, so
+  `supervisor/lead_sourcing.py::pursue_or_escalate` is now the one ladder both call.
+  Retire is a human's word, full stop, from every path that can reach it.
+
+  Fixing this exposed a second bug already waiting behind it: `marketing/graph.py`
+  queued the re-evaluation under `evaluate-validation:{product_id}` — a lifetime key,
+  the same shape as BUG_LOG 38 and 42. Once the first evaluation came back
+  inconclusive and started a retry instead of retiring, a second real outreach batch
+  could never queue its own re-evaluation; the enqueue would return `None`, silently,
+  and the product would sit at `VALIDATING` forever. Scoped to the sending task now.
 
 - **Put judges on the mutation allowlist.** Today it holds seven keys and every one is
   a maker. The bar lives in `LANDING_PAGE_REQUIREMENTS_SYSTEM` and `RELEASE_SYSTEM`, and
   no outcome can move either.
-- **A metric that measures a decision, not an artifact.** For the shipping bar it is
-  *signal validity*: did shipping this produce usable information? Forty visitors and
-  zero signups on a working page is a successful experiment with a negative result; the
-  same numbers on a broken form is a wasted one. **The data already exists** — the
-  pre-ship review's `_failed_requests` on the primary action is exactly "did the form
-  work", and `reach` is already counted. Nothing joins them.
 - **Give the release judge a cost of delay.** It is told to weigh it and handed no fact
   about it. `manager_response_times` is the pattern: a measurement, not a constant.
 

@@ -49,6 +49,15 @@ time it's fixed, not batched up afterward.**
 35. [The repair agent had no way to make a small edit, and the logs could not say what it ran](#35-the-repair-agent-had-no-way-to-make-a-small-edit-and-the-logs-could-not-say-what-it-ran)
 36. [The live reviewer filed fake signups into the demand signal it was measuring](#36-the-live-reviewer-filed-fake-signups-into-the-demand-signal-it-was-measuring)
 37. [The analytics beacon never worked in any browser, and the gate that saw it recorded a pass](#37-the-analytics-beacon-never-worked-in-any-browser-and-the-gate-that-saw-it-recorded-a-pass)
+38. [A lifetime idempotency key made every product buildable exactly once, ever](#38-a-lifetime-idempotency-key-made-every-product-buildable-exactly-once-ever)
+39. [Two of the three pieces of "let the reviewer see the journey" shipped, and without the third the other two were inert](#39-two-of-the-three-pieces-of-let-the-reviewer-see-the-journey-shipped-and-without-the-third-the-other-two-were-inert)
+40. [Five of seven recall sites could take down the work they existed to improve](#40-five-of-seven-recall-sites-could-take-down-the-work-they-existed-to-improve)
+41. [The standing policy was handed to a reviewer as acceptance criteria, so it graded the policy](#41-the-standing-policy-was-handed-to-a-reviewer-as-acceptance-criteria-so-it-graded-the-policy)
+42. [`build:{idea_id}` — the last lifetime idempotency key](#42-buildidea_id--the-last-lifetime-idempotency-key)
+43. [A standard that moved between attempts read as a product that stopped improving](#43-a-standard-that-moved-between-attempts-read-as-a-product-that-stopped-improving)
+44. [`bool(None)` told the release judge a finished product was not converging](#44-boolnone-told-the-release-judge-a-finished-product-was-not-converging)
+45. [An underpowered validation retired a product on evidence its own settings comment calls noise](#45-an-underpowered-validation-retired-a-product-on-evidence-its-own-settings-comment-calls-noise)
+46. [The underpowered-validation fix still retired the product, contradicting a rule the codebase already had](#46-the-underpowered-validation-fix-still-retired-the-product-contradicting-a-rule-the-codebase-already-had)
 
 ---
 
@@ -2447,3 +2456,91 @@ given without one when there is not. The block is extracted to
 facts rather than the property.
 
 **Status**: Fixed 2026-09-22 (`e94d173`).
+
+---
+
+## 45. An underpowered validation retired a product on evidence its own settings comment calls noise
+
+**Found**: 2026-09-23, scoping Phase 2.12's shipping-bar metric. `validation_min_sample_size`'s
+own comment already said it: "below this many leads contacted, a response rate is
+statistically meaningless." The gate computed that check and then ignored its own
+answer, folding it straight into `passed`.
+
+**Severity**: three learning paths poisoned by every underpowered run. A product that
+contacted four people and got no signups was: recorded as a failure episode against
+`LANDING_PAGE_SYSTEM`, charging the page writer for an experiment that never ran;
+written as a `FAILURE` memory at `engine:discovery` scope — the scope Discovery
+actually reads — teaching it the niche was bad; and retired, as though the market had
+answered. Four people asked and none interested is not a weak idea. It is not an
+answer.
+
+**Root cause**: `conclusive` (was the sample big enough to mean anything) and `passed`
+(did it clear the bar) were the same boolean. Distinguishing them was necessary but not
+sufficient — see entry 46.
+
+**Affected**: `engines/development/graph.py::_evaluate_validation`.
+
+**Fix**: `conclusive` held separately. An inconclusive run records an `Outcome` with
+`succeeded=None` — visible, outside every trial's numerator and denominator — and
+writes a `FACT`, not a `FAILURE`, saying plainly it means nothing about the niche.
+
+**Verification**: `tests/integration/test_validation_gate.py` — twenty asked and none
+interested still records a failure and still teaches Discovery, the guard against this
+fix becoming a mute button on real negative results.
+
+**Status**: Fixed 2026-09-23 (`16b88e7`).
+
+---
+
+## 46. The underpowered-validation fix still retired the product, contradicting a rule the codebase already had
+
+**Found**: 2026-09-23, immediately after entry 45 shipped. Jesse: *"unless they have
+concrete evidence the product will not work they won't retire it, right? Or doesn't
+that answer the question?"* It does, and checking the code showed the fix above had
+only changed what was recorded on the way to the same retirement.
+
+**Severity**: entry 45's own fix was half of the actual bug. Recording an inconclusive
+run honestly and then retiring the product anyway teaches every future reader of that
+history the same false thing the memory records were supposed to stop teaching: that
+this outcome was final.
+
+**Root cause**: the codebase already held the right principle, for exactly one
+trigger. `supervisor/scheduler.py`'s stalled-validation sweep (zero leads, checked
+hourly) retries lead sourcing, then tries a different distribution channel, then asks
+a human — and never calls `retire_product` itself; only a human's explicit REJECT
+reply does (`hitl/interrupts.py::_act_on_lead_sourcing_reply`). The validation gate's
+own inconclusive branch, reached one week later at the close of the validation window
+instead of by an hourly sweep, was the same fact — not enough reach for a valid read —
+observed at a different moment, and it disagreed with itself by retiring directly.
+
+Fixing it surfaced a second, independent bug in the same neighbourhood: re-triggering
+outreach after a retry could never get a fresh evaluation queued.
+`marketing/graph.py` enqueued the re-evaluation under `evaluate-validation:{product_id}`
+— a lifetime key answering "has this product's validation ever been evaluated" rather
+than "is a re-evaluation already queued for this send" — the identical shape to
+entries 38 and 42. Once the first evaluation came back inconclusive and started
+retrying instead of retiring, a second real outreach batch's attempt to queue its own
+re-evaluation would return `None`, silently, and the product would sit at `VALIDATING`
+forever with signals trickling in that nothing ever tallied again.
+
+**Affected**: `supervisor/scheduler.py`, `engines/development/graph.py`,
+`engines/marketing/graph.py`, `supervisor/lead_sourcing.py` (new).
+
+**Fix**: the three-rung ladder (retry → different channel → ask a human) extracted
+into `supervisor/lead_sourcing.py::pursue_or_escalate`, shared by both trigger points
+so there is exactly one place that knows retire is not an automatic response to
+insufficient data. The validation gate calls it instead of `retire_product` on an
+inconclusive read; `retire_product` now fires only on a real, adequately-powered
+negative result. The re-evaluation key is scoped to the sending task,
+`evaluate-validation:{product_id}:{task.id}`.
+
+**Verification**: `tests/integration/test_validation_gate.py` — a below-sample-size
+read with a rate that "would pass on rate alone" no longer retires and queues a real
+retry; four sequential inconclusive reads advance retry → channel-scout → escalate and
+never retire; a fifth read while an interrupt is still open changes nothing (no second
+escalation, no re-queued rung); the old lifetime key is shown dropping a second send,
+the new one is shown not to. `tests/integration/test_stalled_validation.py` unaffected
+— its three pre-existing failures reproduce identically against the unmodified
+scheduler.
+
+**Status**: Fixed 2026-09-23.

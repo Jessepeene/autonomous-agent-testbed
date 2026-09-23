@@ -270,7 +270,15 @@ async def _outreach(ctx: FactoryContext, session: AsyncSession, task: Task) -> s
             session,
             kind=TaskKind.EVALUATE_VALIDATION,
             engine=EngineName.DEVELOPMENT,
-            idempotency_key=f"evaluate-validation:{resolved_id}",
+            # Scoped to this send, not to the product's lifetime. A bare
+            # `evaluate-validation:{resolved_id}` answers "has this product's
+            # validation ever been evaluated" -- so once the first evaluation ran
+            # and came back inconclusive (development/graph.py now retries lead
+            # sourcing rather than retiring), the *second* real outreach batch's
+            # attempt to queue a re-evaluation would return None, silently, and the
+            # product would sit at VALIDATING forever with signals trickling in
+            # that nothing ever tallies again. Same key shape as BUG_LOG 38 and 42.
+            idempotency_key=f"evaluate-validation:{resolved_id}:{task.id}",
             payload={"product_id": resolved_id},
             product_id=resolved_id,
             not_before=not_before,

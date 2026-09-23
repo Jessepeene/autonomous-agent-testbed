@@ -477,14 +477,18 @@ async def test_validation_pass_queues_build_mvp_and_sets_planned(
     assert build_tasks[0].product_id == product_id
 
 
-async def test_validation_fail_below_sample_size_retires_regardless_of_rate(
+async def test_validation_below_sample_size_pursues_more_reach_not_retirement(
     session: AsyncSession, tmp_path: Path
 ) -> None:
+    """Below sample size used to retire regardless of rate -- this pinned exactly
+    the bug: a 33% rate on 3 sends is not weak evidence, it is no evidence, and
+    retiring on it was retiring without the "concrete evidence the product will not
+    work" a human team would require. See `supervisor/lead_sourcing.py`."""
     _, product_id = await _make_validating_product(session, niche="too-few-sent")
     await _record_sent(session, product_id=product_id, count=3)
     await repository.insert_validation_signal(
         session, product_id=product_id, email="one@example.test"
-    )  # 1/3 = 33%, would pass on rate alone
+    )  # 1/3 = 33%, would pass on rate alone -- and still proves nothing at n=3.
 
     ctx = _ctx(
         provider=FakeProvider(name=Provider.GEMINI),
@@ -494,10 +498,24 @@ async def test_validation_fail_below_sample_size_retires_regardless_of_rate(
     )
     result = await dev_graph.run(ctx, session, _eval_task(product_id))
 
-    assert "failed" in result
+    assert "inconclusive" in result
     product = await session.get(Product, product_id)
     assert product is not None
-    assert product.status == ProductStatus.RETIRED.value
+    assert product.status != ProductStatus.RETIRED.value, (
+        "not enough reach to read a rate is not evidence the product will not work"
+    )
+
+    # The first rung: a fresh attempt to source more leads, not a human ask yet.
+    retry = (
+        await session.execute(
+            select(Task).where(
+                Task.product_id == product_id,
+                Task.kind == TaskKind.HARVEST_LEADS.value,
+                Task.idempotency_key == f"leads:validate:{product_id}:retry",
+            )
+        )
+    ).scalar_one_or_none()
+    assert retry is not None
 
 
 async def test_validation_fail_below_response_rate_retires(
@@ -1150,3 +1168,147 @@ async def test_a_real_negative_result_is_still_evidence(
     assert any(m.kind == "failure" for m in discovery), (
         "a run that actually happened and came back negative is evidence about the niche"
     )
+
+
+async def test_repeated_inconclusive_reads_advance_the_ladder_and_never_retire(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """Second and third strikes, driven by the same task-kind counts the
+    stalled-validation sweep already uses -- no new state, so calling this from two
+    different trigger points cannot desynchronize."""
+    from factory.state.orm import Interrupt
+
+    _, product_id = await _make_validating_product(session, niche="still-underpowered")
+    ctx = _ctx(
+        provider=FakeProvider(name=Provider.GEMINI),
+        workspace_root=tmp_path,
+        validation_min_sample_size=10,
+        validation_min_response_rate=0.05,
+    )
+    await _record_sent(session, product_id=product_id, count=2)
+
+    # The one-shot harvest `_build_landing_page` makes for real, present so
+    # `has_retried_lead_sourcing`'s ">= 2" count means what it claims to -- same
+    # helper `test_stalled_validation.py` uses for the identical reason.
+    initial = await repository.enqueue_task(
+        session,
+        kind=TaskKind.HARVEST_LEADS,
+        engine=EngineName.MARKETING,
+        idempotency_key=f"leads:validate:{product_id}",
+        payload={"product_id": product_id},
+        product_id=product_id,
+        priority=120,
+    )
+    assert initial is not None
+    await repository.complete_task(session, initial)
+
+    # First evaluation: the one-shot harvest already ran and found too few -> retry.
+    result = await dev_graph.run(ctx, session, _eval_task(product_id))
+    assert "retry_queued" in result
+
+    # A retry ran and it is still underpowered -> try a different channel.
+    result = await dev_graph.run(ctx, session, _eval_task(product_id))
+    assert "channel_scout_queued" in result
+
+    # The channel scout ran too and it is still underpowered -> now ask a human.
+    result = await dev_graph.run(ctx, session, _eval_task(product_id))
+    assert "escalated" in result
+
+    product = await session.get(Product, product_id)
+    assert product is not None
+    assert product.status != ProductStatus.RETIRED.value, "escalating is not retiring"
+
+    interrupts = (
+        (
+            await session.execute(
+                select(Interrupt).where(
+                    Interrupt.product_id == product_id, Interrupt.status == "open"
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(interrupts) == 1, "exactly one open ask, not one per rung"
+
+    # A fourth inconclusive read while the human has not replied yet must not pile
+    # on a second escalation or re-queue a rung that already ran.
+    result = await dev_graph.run(ctx, session, _eval_task(product_id))
+    assert "already_escalated" in result
+    still_one = (
+        (
+            await session.execute(
+                select(Interrupt).where(
+                    Interrupt.product_id == product_id, Interrupt.status == "open"
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(still_one) == 1
+
+
+async def test_a_second_outreach_batch_can_still_queue_a_re_evaluation(
+    session: AsyncSession,
+) -> None:
+    """The idempotency-key fix in marketing/graph.py, isolated from the rest of the
+    outreach pipeline (leads, LIA, campaign approval) since the fix's correctness
+    turns entirely on the key format, not on anything upstream of it.
+
+    `evaluate-validation:{product_id}` was a lifetime key -- it answers "has this
+    product's validation ever been evaluated" rather than "is a re-evaluation
+    already queued for this send". Once the first evaluation came back inconclusive
+    and this company started retrying lead sourcing instead of retiring (this
+    change), the *second* real outreach batch's attempt to queue a re-evaluation
+    would return None, silently, and the product would sit at VALIDATING forever
+    with signals trickling in that nothing ever tallies again. Same key shape as
+    BUG_LOG 38 and 42.
+    """
+    product_id = "prod-reeval-1"
+    first_send_task_id = "task-send-1"
+    second_send_task_id = "task-send-2"
+
+    old_style_key = f"evaluate-validation:{product_id}"
+    first = await repository.enqueue_task(
+        session,
+        kind=TaskKind.EVALUATE_VALIDATION,
+        engine=EngineName.DEVELOPMENT,
+        idempotency_key=old_style_key,
+        payload={"product_id": product_id},
+        product_id=product_id,
+    )
+    assert first is not None
+    # Proves the bug existed: a second send under the *old* key format is dropped.
+    dropped = await repository.enqueue_task(
+        session,
+        kind=TaskKind.EVALUATE_VALIDATION,
+        engine=EngineName.DEVELOPMENT,
+        idempotency_key=old_style_key,
+        payload={"product_id": product_id},
+        product_id=product_id,
+    )
+    assert dropped is None, "the old lifetime key really did silently drop the second send"
+
+    # The fix: scoped to the sending task, so each real batch gets its own row.
+    new_style_key_1 = f"evaluate-validation:{product_id}:{first_send_task_id}"
+    new_style_key_2 = f"evaluate-validation:{product_id}:{second_send_task_id}"
+    queued_1 = await repository.enqueue_task(
+        session,
+        kind=TaskKind.EVALUATE_VALIDATION,
+        engine=EngineName.DEVELOPMENT,
+        idempotency_key=new_style_key_1,
+        payload={"product_id": product_id},
+        product_id=product_id,
+    )
+    queued_2 = await repository.enqueue_task(
+        session,
+        kind=TaskKind.EVALUATE_VALIDATION,
+        engine=EngineName.DEVELOPMENT,
+        idempotency_key=new_style_key_2,
+        payload={"product_id": product_id},
+        product_id=product_id,
+    )
+    assert queued_1 is not None
+    assert queued_2 is not None
+    assert queued_1 != queued_2, "two real sends must be able to queue two evaluations"
