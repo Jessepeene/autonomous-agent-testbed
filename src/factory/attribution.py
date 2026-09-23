@@ -18,12 +18,20 @@ in the history of this result", never as proof.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from factory.logging import get_logger
-from factory.state.orm import Decision, Outcome, OutcomeEvidence, TaskEvent, new_id
+from factory.state.orm import (
+    Decision,
+    LLMCall,
+    Outcome,
+    OutcomeEvidence,
+    TaskEvent,
+    new_id,
+)
 
 log = get_logger(__name__)
 
@@ -190,3 +198,137 @@ async def outcome_counts(
         stmt = stmt.limit(limit)
     rows = list((await session.execute(stmt)).scalars().all())
     return sum(1 for r in rows if r), len(rows)
+
+
+#: How wide a decision's consequences may be walked. A guard on cost, not a policy:
+#: the subtree of a decision that commissioned a build is dozens of tasks, and a bug
+#: that made the chain circular must not turn a read into a table scan.
+MAX_SUBTREE = 500
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionReturn:
+    """What a decision cost this company, against what came back from it.
+
+    **The first figure here that survives a change of method.** Every metric the
+    learning loop optimises today is a SaaS funnel proxy -- idea survival, page
+    interest, outreach conversion -- and each stops meaning anything the moment the
+    company does something that is not a landing page. Cost against value does not:
+    a freelance engagement, a productised service and a subscription all reduce to it,
+    which is what lets a general manager hold them side by side and ask one question.
+
+    Three limits, stated here rather than left to be discovered by somebody reading a
+    number as more than it is:
+
+    - **Cost is a lower bound.** `llm_calls` is the only spend attributed to a task.
+      Hosting, mail, domains and a human's time are real costs of a decision and appear
+      nowhere, so a decision that looks cheap may only be cheap in the one currency this
+      company happens to meter.
+    - **The subtree over-claims.** Everything downstream of a decision is counted
+      against it, and being upstream of a cost is not the same as having caused it. A
+      decision to build is charged for a repair loop it did not choose.
+    - **Value arrives late and cost arrives immediately.** A decision read too early
+      looks worse than it is, which is the single most likely way this number gets
+      misused.
+    """
+
+    decision_id: str
+    cost_cents: int
+    value_cents: int
+    #: How many tasks the cost was drawn from, and how many outcomes the value was.
+    #: Present so a reader can tell "this decision returned nothing" from "nothing has
+    #: happened yet" -- the distinction the whole instrumentation principle turns on.
+    tasks: int
+    outcomes: int
+
+    @property
+    def net_cents(self) -> int:
+        return self.value_cents - self.cost_cents
+
+    @property
+    def measured(self) -> bool:
+        """Whether anything bearing on this decision has actually been observed.
+
+        Not `tasks`: a decision's subtree always contains at least the task it was made
+        in, so counting that made every decision look measured the moment it existed --
+        which is exactly the "nothing yet" and "returned nothing" collapse this property
+        was added to prevent. Spend and outcomes are observations; existing is not.
+        """
+        return bool(self.cost_cents or self.outcomes)
+
+
+async def descendants(session: AsyncSession, task_id: str) -> list[str]:
+    """Every task this one led to, including itself.
+
+    The mirror of `ancestors`, and the reason `caused_by_task_id` had to be populated
+    before any of this was possible: a decision's consequences are exactly the subtree
+    of the task it was made in.
+    """
+    frontier = [task_id]
+    seen = {task_id}
+    while frontier:
+        rows = (
+            (
+                await session.execute(
+                    select(TaskEvent.task_id).where(
+                        TaskEvent.caused_by_task_id.in_(frontier),
+                        TaskEvent.task_id.is_not(None),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        frontier = [r for r in set(rows) if r is not None and r not in seen]
+        for r in frontier:
+            seen.add(r)
+        if len(seen) >= MAX_SUBTREE:
+            log.warning("attribution.subtree_truncated", task_id=task_id, size=len(seen))
+            break
+    return list(seen)
+
+
+async def decision_return(session: AsyncSession, decision_id: str) -> DecisionReturn:
+    """Cost against value for one decision.
+
+    Cost is summed over the decision's whole task subtree; value over every outcome
+    that names it as evidence. Both sides already existed on disk and nothing joined
+    them -- `llm_calls.cost_usd` has carried the price of every call since long before
+    this, and `outcomes.value_cents` since migration 0044.
+    """
+    decision = await session.get(Decision, decision_id)
+    if decision is None or not decision.made_by_task_id:
+        return DecisionReturn(decision_id, 0, 0, 0, 0)
+
+    subtree = await descendants(session, decision.made_by_task_id)
+    # Rounded to cents at the edge rather than carried as a float: money is compared,
+    # summed and shown, and a float that is nearly an integer is a bug waiting for a
+    # report to disagree with a total.
+    spent = (
+        await session.execute(
+            select(func.coalesce(func.sum(LLMCall.cost_usd), 0.0)).where(
+                LLMCall.task_id.in_(subtree)
+            )
+        )
+    ).scalar_one()
+    earned, counted = (
+        await session.execute(
+            select(
+                func.coalesce(func.sum(Outcome.value_cents), 0),
+                func.count(Outcome.id),
+            )
+            .join(OutcomeEvidence, OutcomeEvidence.outcome_id == Outcome.id)
+            .where(
+                OutcomeEvidence.subject_kind == "decision",
+                OutcomeEvidence.subject_id == decision_id,
+            )
+        )
+    ).one()
+
+    return DecisionReturn(
+        decision_id=decision_id,
+        cost_cents=round(float(spent) * 100),
+        value_cents=int(earned or 0),
+        tasks=len(subtree),
+        outcomes=int(counted or 0),
+    )

@@ -231,3 +231,129 @@ async def test_work_enqueued_inside_a_task_records_its_parent(session: AsyncSess
     task = await session.get(Task, task_id)
     assert task is not None
     assert task.payload[causality.CAUSE_KEY] == "t-parent"
+
+
+# ------------------------------------------- what a decision cost, against what it returned
+
+
+async def _spend(session: AsyncSession, task_id: str, usd: float) -> None:
+    from factory.state.orm import LLMCall
+
+    session.add(
+        LLMCall(
+            id=new_id(),
+            provider="anthropic",
+            model="claude-opus-5",
+            task_type="analysis",
+            task_id=task_id,
+            cost_usd=usd,
+        )
+    )
+    await session.flush()
+
+
+async def test_a_decision_is_charged_for_everything_it_set_in_motion(
+    session: AsyncSession,
+) -> None:
+    """The first figure here that survives a change of method.
+
+    Every metric the learning loop optimises is a SaaS funnel proxy and stops meaning
+    anything the moment the company does something that is not a landing page. Cost
+    against value does not: a freelance engagement and a subscription both reduce to
+    it, which is what lets a general manager compare them at all.
+    """
+    await _chain(session, "t-decide", "t-build", "t-review")
+    decision = await attribution.record_decision(
+        session,
+        kind="product_next",
+        subject_kind="product",
+        subject_id="p-1",
+        choice="deployment",
+        rationale="Nothing exists to put in front of anyone yet.",
+        made_by_engine=EngineName.SUPERVISOR.value,
+        made_by_task_id="t-decide",
+    )
+    # Spend at every depth of the subtree, and some on an unrelated task.
+    await _spend(session, "t-decide", 0.40)
+    await _spend(session, "t-build", 1.10)
+    await _spend(session, "t-review", 0.25)
+    await _spend(session, "t-unrelated", 99.00)
+
+    await attribution.record_outcome(
+        session,
+        kind="revenue",
+        value_cents=4900,
+        task_id="t-review",
+        credit_decisions=True,
+    )
+
+    got = await attribution.decision_return(session, decision)
+    assert got.cost_cents == 175, "charged for its whole subtree and nothing else"
+    assert got.value_cents == 4900
+    assert got.net_cents == 4725
+    assert got.tasks == 3
+    assert got.measured is True
+
+
+async def test_nothing_yet_is_distinguishable_from_returned_nothing(
+    session: AsyncSession,
+) -> None:
+    """The instrumentation principle applied to this number. A decision made a minute
+    ago and one that genuinely earned nothing both read as zero, and treating them
+    alike is how a judgement gets made on the absence of evidence."""
+    await _chain(session, "t-fresh")
+    decision = await attribution.record_decision(
+        session,
+        kind="release",
+        subject_kind="product",
+        subject_id="p-1",
+        choice="ship",
+        rationale="Meets what it must do.",
+        made_by_engine=EngineName.DEVELOPMENT.value,
+        made_by_task_id="t-fresh",
+    )
+    fresh = await attribution.decision_return(session, decision)
+    assert fresh.net_cents == 0
+    assert fresh.measured is False, "one task, no spend, no outcome -- nothing observed"
+
+    await _spend(session, "t-fresh", 0.02)
+    spent = await attribution.decision_return(session, decision)
+    assert spent.measured is True
+    assert spent.net_cents == -2, "cost arrives before value, and the number says so"
+
+
+async def test_a_decision_with_no_task_returns_an_empty_reading(
+    session: AsyncSession,
+) -> None:
+    """Some decisions are recorded outside any task. That is a real state and must not
+    raise on a read path a dashboard will call."""
+    decision = await attribution.record_decision(
+        session,
+        kind="release",
+        subject_kind="product",
+        subject_id="p-1",
+        choice="ship",
+        rationale="Recorded without a task.",
+        made_by_engine=EngineName.DEVELOPMENT.value,
+        made_by_task_id=None,
+    )
+    got = await attribution.decision_return(session, decision)
+    assert (got.cost_cents, got.value_cents, got.measured) == (0, 0, False)
+
+
+async def test_the_subtree_walk_terminates_on_a_cycle(session: AsyncSession) -> None:
+    """Same guard as `ancestors`, in the other direction: a bug that made the chain
+    circular must not turn a read into a table scan."""
+    await _chain(session, "t-a", "t-b")
+    session.add(
+        TaskEvent(
+            id=new_id(),
+            task_id="t-a",
+            event="engine.start",
+            engine=EngineName.DEVELOPMENT.value,
+            detail={},
+            caused_by_task_id="t-b",
+        )
+    )
+    await session.flush()
+    assert set(await attribution.descendants(session, "t-a")) == {"t-a", "t-b"}
