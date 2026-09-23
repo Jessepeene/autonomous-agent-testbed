@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from factory import comms
+from factory import attribution, comms
 from factory import issues as issues_mod
 from factory.agents.roles import RoleName
 from factory.agents.spawner import SpawnRequest, spawn
@@ -396,10 +396,19 @@ async def _evaluate_validation(ctx: FactoryContext, session: AsyncSession, task:
     sent = await repository.count_outreach_sent(session, product_id)
     signals = await repository.tally_validation_signals(session, product_id)
     response_rate = (signals / sent) if sent else 0.0
-    passed = (
-        sent >= ctx.settings.validation_min_sample_size
-        and response_rate >= ctx.settings.validation_min_response_rate
-    )
+
+    # **Did the experiment run at all?** Held separately from whether it passed,
+    # because folding the two together is how this company has been teaching itself
+    # from experiments it never ran. `validation_min_sample_size`'s own comment says
+    # it: "below this many leads contacted, a response rate is statistically
+    # meaningless" -- and a meaningless rate was still recorded as a failure against
+    # the landing-page prompt, still written as a FAILURE memory at Discovery's scope
+    # telling it the niche was bad, and still retired the product. Three learning paths
+    # poisoned by a result the settings file already calls noise.
+    #
+    # Four people asked and none interested is not a weak idea. It is not an answer.
+    conclusive = sent >= ctx.settings.validation_min_sample_size
+    passed = conclusive and response_rate >= ctx.settings.validation_min_response_rate
 
     # A response rate this gate would otherwise trust as broad real interest can
     # still be one submitter clicking through several times -- proven live, see
@@ -435,12 +444,30 @@ async def _evaluate_validation(ctx: FactoryContext, session: AsyncSession, task:
                 product_id=product_id,
             )
 
-    if product.landing_page_prompt_version:
+    detail: dict[str, object] = {
+        "sent": sent,
+        "signals": signals,
+        "response_rate": response_rate,
+    }
+    if not conclusive:
+        # Recorded, never scored. `succeeded=None` keeps the run visible and keeps it
+        # out of every trial's numerator and denominator -- an underpowered experiment
+        # is evidence about this company's reach, not about the page that was written.
+        await attribution.record_outcome(
+            session,
+            kind="validation_inconclusive",
+            succeeded=None,
+            subject_kind="product",
+            subject_id=product_id,
+            detail=detail,
+            task_id=task.id,
+        )
+    elif product.landing_page_prompt_version:
         await learning_prompts.record_outcome(
             session,
             tunable_parameter_id=product.landing_page_prompt_version,
             success=passed,
-            detail={"sent": sent, "signals": signals, "response_rate": response_rate},
+            detail=detail,
             task_id=task.id,
         )
 
@@ -453,14 +480,31 @@ async def _evaluate_validation(ctx: FactoryContext, session: AsyncSession, task:
     # learned from validation losses, never from what actually worked.
     idea = await session.get(Idea, product.idea_id)
     if idea is not None:
-        await memory_store.remember(
-            session,
-            content=(
+        # Discovery reads this scope, so what is written here shapes which niches it
+        # proposes next. An underpowered run must not arrive as a verdict on the
+        # niche: it is a FACT about how far this company's reach got, and naming it
+        # that way is the difference between Discovery learning the market and
+        # Discovery learning our own lead pipeline.
+        if not conclusive:
+            content = (
+                f"Validation for the niche '{idea.target_niche}' did not run far enough "
+                f"to mean anything: only {sent} contacted, below the "
+                f"{ctx.settings.validation_min_sample_size} "
+                "this company treats as the minimum for a response rate to be readable. "
+                "This says nothing about whether the niche wants it."
+            )
+            kind = memory_store.MemoryKind.FACT
+        else:
+            content = (
                 f"Validation outcome for the niche '{idea.target_niche}': "
                 f"{signals}/{sent} confirmed interest signals ({response_rate:.1%}). "
                 f"{'Cleared' if passed else 'Did not clear'} the gate."
-            ),
-            kind=memory_store.MemoryKind.LESSON if passed else memory_store.MemoryKind.FAILURE,
+            )
+            kind = memory_store.MemoryKind.LESSON if passed else memory_store.MemoryKind.FAILURE
+        await memory_store.remember(
+            session,
+            content=content,
+            kind=kind,
             scope=memory_store.scope_for(engine=EngineName.DISCOVERY),
             origin="development:evaluate_validation",
         )
@@ -499,17 +543,58 @@ async def _evaluate_validation(ctx: FactoryContext, session: AsyncSession, task:
     # reason field), so the memory row below is the durable trail that lets a future
     # audit tell them apart, matching this codebase's instinct to never leave a
     # terminal decision unexplained.
+    if not conclusive:
+        # The company-level cause, raised once however many products hit it -- the
+        # dedup is on the subject, and this subject names the company rather than the
+        # product on purpose. A product retired for want of reach is a symptom; the
+        # thing a human can actually act on is that this factory cannot currently put
+        # an idea in front of enough people to learn anything from it.
+        await interrupts.request(
+            session,
+            reason=InterruptReason.LEAD_SOURCING_STALLED,
+            subject="Validations are running underpowered",
+            detail=(
+                f"'{product.name}' reached the end of its validation window having "
+                f"contacted {sent} people. This company treats "
+                f"{ctx.settings.validation_min_sample_size} as the minimum for a "
+                "response rate to mean anything, so the run was recorded as "
+                "inconclusive rather than as a negative result: nothing was learned "
+                "about the idea, and nothing was charged against the page that was "
+                "written for it. "
+                "Until outreach can reach that many people, every validation will end "
+                "this way and the factory will retire ideas it never tested."
+            ),
+            headline="📭 Not enough reach to test anything",
+            reply_hint=(
+                "No reply needed to unblock this product -- it has already been "
+                "retired. Reply when lead sourcing can supply real volume."
+            ),
+        )
+
     await repository.retire_product(session, product_id)
     await memory_store.remember(
         session,
         content=(
-            f"Product {product.name} did not clear the validation gate: "
-            f"{signals}/{sent} interest signals ({response_rate:.1%}), below the "
-            f"{ctx.settings.validation_min_response_rate:.1%} bar on "
-            f"{ctx.settings.validation_min_sample_size}+ sent required. Retired "
-            "without a real build ever being attempted."
+            (
+                f"Product {product.name} was retired without being tested: only {sent} "
+                f"contacted, below the {ctx.settings.validation_min_sample_size} needed "
+                "for a response rate to be readable. Nothing here is evidence about the "
+                "idea or the page -- only about how far this company's reach got."
+            )
+            if not conclusive
+            else (
+                f"Product {product.name} did not clear the validation gate: "
+                f"{signals}/{sent} interest signals ({response_rate:.1%}), below the "
+                f"{ctx.settings.validation_min_response_rate:.1%} bar on "
+                f"{ctx.settings.validation_min_sample_size}+ sent required. Retired "
+                "without a real build ever being attempted."
+            )
         ),
-        kind=memory_store.MemoryKind.FAILURE,
+        # A FACT when the experiment never ran, a FAILURE when it ran and the answer
+        # was no. The scope is this product's own, which nothing reads after
+        # retirement -- but the kind is what a future audit reads, and calling an
+        # untested idea a failure is how a company talks itself out of a market.
+        kind=memory_store.MemoryKind.FACT if not conclusive else memory_store.MemoryKind.FAILURE,
         scope=memory_store.scope_for(product_id=product_id),
         origin="development:evaluate_validation",
     )

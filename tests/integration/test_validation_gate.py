@@ -1064,3 +1064,89 @@ async def test_different_ips_are_independent_buckets(monkeypatch: pytest.MonkeyP
 
     assert first.status_code == 404
     assert second.status_code == 404
+
+
+async def test_an_underpowered_run_is_not_evidence_about_the_idea(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """The signal-validity distinction, and the three learning paths it was poisoning.
+
+    `validation_min_sample_size`'s own comment says it: below this many contacted, a
+    response rate is statistically meaningless. The gate folded that into `passed`
+    anyway, so four people asked and none interested was recorded as a failure against
+    the landing-page prompt, written as a FAILURE at Discovery's scope telling it the
+    niche was bad, and retired the product — three learning paths fed a result the
+    settings file already calls noise.
+
+    Four asked and none interested is not a weak idea. It is not an answer.
+    """
+    from factory.state.orm import Memory, Outcome
+
+    _, product_id = await _make_validating_product(session, niche="underpowered-case")
+    await _record_sent(session, product_id=product_id, count=4)
+
+    ctx = _ctx(
+        provider=FakeProvider(name=Provider.GEMINI),
+        workspace_root=tmp_path,
+        validation_min_sample_size=10,
+        validation_min_response_rate=0.05,
+    )
+    await dev_graph.run(ctx, session, _eval_task(product_id))
+    await session.flush()
+
+    # 1. Recorded, and deliberately unscored -- it must not reach a trial's arithmetic.
+    inconclusive = (
+        (await session.execute(select(Outcome).where(Outcome.kind == "validation_inconclusive")))
+        .scalars()
+        .all()
+    )
+    assert len(inconclusive) == 1
+    assert inconclusive[0].succeeded is None, "an unrun experiment has no success value"
+
+    # 2. Discovery reads its own scope, and must not be told the niche is bad.
+    discovery = (
+        (await session.execute(select(Memory).where(Memory.scope == "engine:discovery")))
+        .scalars()
+        .all()
+    )
+    assert discovery, "the run is still recorded"
+    assert all(m.kind != "failure" for m in discovery), (
+        "an underpowered run must not arrive at Discovery as a verdict on the niche"
+    )
+    assert any("did not run far enough" in m.content for m in discovery)
+
+
+async def test_a_real_negative_result_is_still_evidence(
+    session: AsyncSession, tmp_path: Path
+) -> None:
+    """The other half, and the guard against the fix becoming a mute button: enough
+    people asked and none interested is a real answer, and must still teach."""
+    from factory.state.orm import Memory, Outcome
+
+    _, product_id = await _make_validating_product(session, niche="real-negative")
+    await _record_sent(session, product_id=product_id, count=20)
+
+    ctx = _ctx(
+        provider=FakeProvider(name=Provider.GEMINI),
+        workspace_root=tmp_path,
+        validation_min_sample_size=10,
+        validation_min_response_rate=0.05,
+    )
+    await dev_graph.run(ctx, session, _eval_task(product_id))
+    await session.flush()
+
+    unscored = (
+        (await session.execute(select(Outcome).where(Outcome.kind == "validation_inconclusive")))
+        .scalars()
+        .all()
+    )
+    assert unscored == [], "20 asked is a real experiment; it gets scored like one"
+
+    discovery = (
+        (await session.execute(select(Memory).where(Memory.scope == "engine:discovery")))
+        .scalars()
+        .all()
+    )
+    assert any(m.kind == "failure" for m in discovery), (
+        "a run that actually happened and came back negative is evidence about the niche"
+    )
