@@ -14,6 +14,67 @@ taught, which applies to every remaining phase.
 
 ---
 
+## The bigger goal, and where everything below actually sits (added 2026-09-23)
+
+Every phase in this file — 1 through the last of Phase 2, Phase 3, Phase 4 — was
+written inside one frame: this factory, its five engines, the SaaS products it
+ships. None of them once mentions the thing all of it is actually for. That was a
+real gap, not a simplification, and it is worth being exact about why it happened
+and what it means for reading everything that follows.
+
+This is the actual objective, verbatim, and it has not changed since Jesse stated it:
+
+> An autonomous, AI-driven business organization whose sole high-level objective is
+> to maximize sustainable long-term profit. Rather than prescribing a specific
+> business model, the system operates as a General Manager that can independently
+> research markets, identify opportunities, choose between freelancing, services,
+> SaaS, digital products, or other revenue streams, execute projects, acquire
+> customers, manage finances, and build tools or modify its own workflows when
+> necessary. It uses specialized AI agents and coding environments to carry out
+> tasks, while an external persistent memory system stores its mission, strategies,
+> experiments, decisions, financial results, and lessons learned. An immutable
+> objective, hierarchical decision structure, and recurring strategic review cycle
+> ensure that the organization maintains its long-term direction, learns from
+> real-world feedback, and continuously reassesses how to generate profit without
+> being constrained to a predetermined path.
+
+And this is why a SaaS factory exists at all, rather than building that directly:
+
+> First we test, keep our original goal: the SaaS factory. From that we learn, and
+> when it's able to do this we can go further — test it building its own tools,
+> browsing the internet, making its own goals.
+
+**Read everything below as work done inside a test harness, not as the goal.** The
+SaaS factory was chosen because it is the fastest way to exercise four things the
+real objective actually needs — judgement-based decisions instead of hardcoded
+rules, learning from real outcomes instead of vibes, finding and fixing defects in
+itself, and escalating at a genuine boundary instead of faking through it. Phase 1's
+department managers, Phase 2's dozen sub-phases, Phase 3's product ownership, Phase
+4's remaining departments: every one of them is proving one of those four things
+*on* a SaaS product, not building a company that only ever makes SaaS products.
+
+**Checked against the founding paragraph directly, three things are not covered by
+anything numbered below, and each is a real gap rather than a phase nobody got to
+yet:**
+
+- **The objective is not actually immutable.** It is held by discipline — everyone
+  in this conversation agreeing not to touch it — not by architecture. Nothing in
+  the code would notice or stop it drifting.
+- **There is no recurring strategic review.** Every review in this system is
+  per-product (`decide_release`) or per-department (a manager's own tick). Nothing
+  ever asks the question at the level of the whole company: are we making progress
+  toward the actual objective, and should we be doing something else entirely?
+- **There is no path to "choose between revenue streams... without a predetermined
+  path."** Phase 2.13 scoped the mechanism (a method is a registry entry, the same
+  shape as a mutable prompt) but a method is still, today, exactly one thing: build
+  and validate a SaaS idea.
+
+Phase 5 is that work. It is not a continuation of the SaaS factory's own department
+structure — it is the layer that decides whether the SaaS factory, or anything else
+below it, is still the right thing to be doing.
+
+---
+
 ## The problem this exists to solve
 
 This factory calls itself an organisation — Discovery, Compliance, Development,
@@ -2052,6 +2113,117 @@ Not finished after Phase 3. What remains, in no fixed order:
   today. Product owning the question does not by itself make the answer researched,
   and the difference between "inferred from one sentence" and "observed" must stay
   visible (Phase 2.7).
+
+## Phase 5 — the layer above the organisation (added 2026-09-23)
+
+**Status**: scoped, not built. This is the work "The bigger goal" section above
+points at — the three things checked against the founding paragraph and found
+missing from everything numbered 1 through 4. None of it is SaaS-factory work; all
+of it is the same regardless of what the company eventually decides to sell.
+
+Sharpened by an external research survey Jesse brought to this conversation
+(*"Designing a Persistent Autonomous AI Economic Entity"*) — read in full and
+checked against what this project had already found empirically. Roughly half of
+that document independently re-derives things this project arrived at from real
+failures rather than theory: Goodhart's-Law proxy optimization is "you get what you
+instrument" (Phase 2.12); "LLMs cannot self-correct without external feedback" is
+the reason the evaluator must never be reachable by the thing being evaluated
+(Phase 2.13's asymmetry); "Agentic Witnessing" is `AUDITOR`'s live-browser review
+and why `ReviewVerdict` is extracted from prose rather than self-reported. That
+convergence is worth noting once and moving on from — it is evidence the approach
+is sound, not a reason to import the rest of the document.
+
+**The rest of it does not transfer, on purpose.** Its economic layer assumes the
+entity has no human behind it — ERC-4337 crypto wallets and autonomously-formed
+Delaware LLCs exist there because *"traditional banking systems rely on human
+identity verification, presenting an insurmountable barrier for digital
+entities."* Ours has a human behind it, deliberately, permanently — see the
+account-authority discussion this same day: a contract needs an accountable party,
+and keeping that party human is a rail, not a limitation to engineer around. None
+of Sections 14, most of 15, or the "autonomous legal wrapping" stage of that
+document's own blueprint belongs here.
+
+### 5a. An objective that is actually immutable, not just agreed
+
+Today the objective is a paragraph everyone in this conversation has read and no
+code has ever seen. Nothing would notice if it drifted, because nothing checks
+against it.
+
+The fix is small and does not need the machinery the research survey reaches for
+(cryptographic root keys, external policy engines in a language like Cedar). It
+needs exactly one property: the objective lives in **one row, written once, read by
+every strategic review, and reachable by no code path that could silently change
+it.** Not a `Decision` — nothing decides it — and not a settings value, which
+this codebase's own agents can already propose edits to via `PATCH_PRODUCT`-style
+mechanisms elsewhere. A table with one live row and a `superseded_at` column,
+exactly like `requirements`, so a change is possible but is never silent: it always
+produces a new row, an old one that stops being current, and a "the objective
+changed" fact that a strategic review cannot fail to see.
+
+### 5b. The recurring strategic review
+
+**Never built. Every review in this system today is per-product or per-department.**
+Nothing ever reads the company's own state as a whole and asks whether the
+objective is being served.
+
+**Triggered on a condition, not a clock** — the same preference this project has
+held throughout (a decision worth taking again is keyed on the world changing, not
+on time passing; see Phase 2.8's `unmet_signature`). The research survey's own
+framing is sharper than anything scoped here before it: trigger on *"depletion of a
+compute budget, or consecutive failures of a milestone"* — concretely, N consecutive
+`rethink`/`abandon` release decisions across products, or the existing periodic
+revenue-reconciliation task's own window closing. Both are conditions this system
+already tracks; neither needs a new clock invented for it.
+
+**What it reads**: not one product's issues. The company-level dossier —
+`attribution.decision_return()` aggregated across every decision in the window, the
+founding-paragraph scorecard itself (which clauses are ✅/🟡/⛔, and whether that
+has moved since the last review), and `check_business_health`'s concerns, which
+Phase 3 already earmarked as "standing context rather than a discarded count" and
+which have nowhere to land until this exists.
+
+**What it is allowed to conclude — a three-way split, not a verdict.** The research
+survey names a distinction this project has not made explicit: an **execution
+problem** (a bug — feed `factory/selfcheck.py` or `BUG_LOG.md`), a **failed
+strategy** (a hypothesis proven wrong — mark the relevant learned parameter for
+rollback, same as `trials.py` already does one level down), and an **incorrect
+foundational assumption** (something about the current *method* is wrong, not just
+the current execution of it — the one case that should ever touch 5c below). Three
+different kinds of finding, three different owners; collapsing them into one
+"rethink" verdict at the company level would be the identical mistake Phase 3
+already found and fixed at the product level.
+
+**Undetermined is a real answer here too.** Phase 2.12 built the discipline that an
+underpowered validation is not evidence, one way or the other — `succeeded=None`,
+never forced into a verdict. A strategic review reading noisy, low-volume company
+data (which is exactly today's data: 0 leads, 1 live product) must have the same
+option. A review that cannot tell whether a number moved for a real reason or for
+lack of any data yet should say so, explicitly, rather than manufacture a
+conclusion to look thorough.
+
+**A concrete test worth adopting, not just the review itself.** The research
+survey's *"Evaluator Stress Test"* — deliberately present the company with an easy,
+unprofitable, off-mission opportunity and confirm it is correctly declined — is a
+genuine red-team for the learning loop rather than for one product's judgement.
+Cheap to build once 5a's objective and a real profit metric both exist to check the
+decision against; worth keeping on this list rather than building early against
+proxies that would not actually test the right thing.
+
+### 5c. Method as something the company may change about itself
+
+Scoped already, not duplicated here: Phase 2.13's registry — *"may this change,
+and what evidence would show the change helped"* — already names a method as one
+more entry in the same set as a mutable prompt or a workflow. What is missing is
+not a new mechanism, it is the first entry that is not SaaS: freelance work,
+services, or a digital product added to the registry the same way a prompt change
+would be, evaluated the same way, with the same evidence bar.
+
+This is deliberately last, not first. Phase 2.13's own asymmetry principle —
+*"adding a check is cheap, removing one is a rail-level change"* — applies the
+same way to adding a method: cheap only once 5a and 5b exist to notice if a new
+method starts eroding the objective rather than serving it. A second business
+model chosen before the company can tell a good decision from a bad one is not
+progress toward the goal; it is the same measurement gap Phase 2.12 found, doubled.
 
 ---
 
