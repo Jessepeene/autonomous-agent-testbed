@@ -2225,6 +2225,47 @@ method starts eroding the objective rather than serving it. A second business
 model chosen before the company can tell a good decision from a bad one is not
 progress toward the goal; it is the same measurement gap Phase 2.12 found, doubled.
 
+### Correction, 2026-09-24: construction is not selection, and neither gets pre-built
+
+5c undersells what "adding a method" actually costs, and Jesse's question sharpened
+it: *"the layer that controls the SaaS factory should also be able to build systems
+like the SaaS factory — in a sense it's you and me, except we are very specific on
+this thing."*
+
+Freelance work or services are not a different value for one mutable field — they
+need a different organisation. No Discovery (nobody validates a niche; someone finds
+a gig). No cold-outreach Marketing engine. A Development engine that delivers
+against a spec rather than owning a product's own database. Different rails, since
+a client contract carries different exposure than a subscription. **Choosing a
+method and constructing one are different capabilities**, and 5c only ever scoped
+the first.
+
+The correction is not "so scope the second one now." That is the exact mistake this
+file already made once and reversed (Phase 2.8, 2026-09-17): *"a human team never
+asks 'what is missing?'… they start from a goal and step back once."* A shelf of
+pre-designed organisations — a freelance department, a services department, sitting
+built and waiting for 5b to pick one — has the same defect as a flat list of unmet
+needs: designed against a guess about the future rather than a real trigger, by
+nobody the design would actually be for, and exactly where a rail goes missing
+unnoticed, since nothing live is yet testing it.
+
+**So: no organisation gets built ahead of the review that would justify it.** What
+Phase 5 needs is not a constructor standing by — it is that when 5b actually
+concludes the current method is failing the objective, constructing the next one is
+first-class work, not a fallback. The same process this document is itself a record
+of: a goal stated once, departments scoped one at a time against it, rails named as
+rails before anything is built. Done *then*, for whatever 5b actually points at —
+never in advance, and never for a method nobody has yet had a reason to try.
+
+And whether a given method needs that construction at all is not this document's
+to decide in advance either. Some fit inside the departments that already exist —
+the original, lighter case 5c described, one more registry entry evaluated the
+same way a prompt change would be. Others don't. Which is which is a judgement
+against the actual opportunity, not a rule fixed here — the same kind of call
+Phase 3 already owns for a single product's effort, scaled up to a method. Fixing
+it in advance, even as a spectrum with named tiers, would be this same mistake
+happening a third time, one level up again.
+
 ---
 
 ## Department build order (added 2026-09-15)
