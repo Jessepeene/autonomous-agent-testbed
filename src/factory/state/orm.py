@@ -1573,6 +1573,41 @@ class Requirement(Base):
     )
 
 
+class Objective(Base):
+    """What this company exists to do, held one live row at a time.
+
+    Phase 5a (`ARCHITECTURE_ROADMAP.md`). Today the objective is a paragraph
+    everyone in a conversation has read and no code has ever seen -- held by
+    discipline, not architecture, so nothing would notice if it drifted.
+
+    Deliberately not a `Decision` (nothing decides it -- it is stated, not
+    concluded from evidence) and deliberately not a settings value (this
+    codebase's own agents can already propose edits to settings-shaped things
+    elsewhere; the objective must not be one more of those). Same
+    supersede-not-overwrite shape as `Requirement`: a change is possible, but it
+    is never silent -- it always produces a new row, an old one that stops
+    being current, and a fact a strategic review cannot fail to see.
+
+    Nothing in this module, or anywhere an engine or agent can reach, writes to
+    this table. The only writer is `scripts/set_objective.py`, run by a human
+    directly -- the same "a code change a human reviews" standard
+    `agents/roles.py` holds capability grants to.
+    """
+
+    __tablename__ = "objectives"
+
+    id: Mapped[str] = _pk()
+    statement: Mapped[str] = mapped_column(Text, nullable=False)
+    set_by: Mapped[str] = mapped_column(String(64), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    #: Superseded rather than rewritten -- see the class docstring. A strategic
+    #: review reads whether this is set, not just what it currently says.
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class IdeaEvidence(Base):
     """The raw signals an idea was actually drawn from, kept.
 

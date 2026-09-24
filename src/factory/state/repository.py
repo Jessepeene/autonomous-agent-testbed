@@ -44,6 +44,7 @@ from factory.state.orm import (
     LedgerEntry,
     LLMCall,
     MarketingFreeze,
+    Objective,
     OutreachLog,
     PageView,
     Product,
@@ -3417,6 +3418,34 @@ async def live_requirements(
         Requirement.subject_id == subject_id,
         Requirement.superseded_at.is_(None),
     )
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def record_objective(
+    session: AsyncSession, *, statement: str, set_by: str, reason: str | None = None
+) -> str:
+    """Supersede the current objective and record a new one. Phase 5a.
+
+    Not exported to `factory.tools.*` and not called from any engine or agent path
+    -- deliberately. The only caller in this codebase is `scripts/set_objective.py`,
+    run by a human directly. An import of this function from anywhere under
+    `factory.engines`, `factory.agents` or `factory.tools` is itself the bug this
+    table exists to make impossible quietly.
+    """
+    await session.execute(
+        update(Objective).where(Objective.superseded_at.is_(None)).values(superseded_at=_now())
+    )
+    row = Objective(statement=statement, set_by=set_by, reason=reason)
+    session.add(row)
+    await session.flush()
+    return row.id
+
+
+async def live_objective(session: AsyncSession) -> Objective | None:
+    """What this company currently exists to do, or `None` before it has ever been
+    set. A strategic review (Phase 5b, not yet built) reads this rather than a
+    paragraph in a conversation, and reads whether it is `None` as its own fact."""
+    stmt = select(Objective).where(Objective.superseded_at.is_(None))
     return (await session.execute(stmt)).scalar_one_or_none()
 
 
