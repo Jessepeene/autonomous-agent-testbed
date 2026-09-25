@@ -33,6 +33,7 @@ from factory.settings import EngineName
 from factory.state import repository
 from factory.state.db import session_scope
 from factory.state.schemas import InterruptReason, TaskKind
+from factory.strategic_review import should_trigger as strategic_review_should_trigger
 from factory.supervisor import lead_sourcing
 from factory.supervisor.context import FactoryContext
 
@@ -293,6 +294,26 @@ class Scheduler:
                         "it's genuinely missing -- worth checking the provider "
                         "account directly."
                     ),
+                )
+
+            # Phase 5b: the one review that reads the company as a whole rather than
+            # one product. Checked every tick (cheap -- a handful of counts, same
+            # spirit as the stalled-validation net above), but the actual trigger is
+            # a condition, not this cadence: a run of consecutive rethink/abandon
+            # release decisions across products. Keyed on the newest decision in
+            # that streak, not on a fixed string -- the key changes only when a new
+            # qualifying decision actually lands, which is what makes re-enqueuing
+            # a no-op rather than a duplicate for as long as nothing about the
+            # streak has changed since the last time this fired.
+            streak = await strategic_review_should_trigger(session)
+            if streak is not None:
+                await repository.enqueue_task(
+                    session,
+                    kind=TaskKind.STRATEGIC_REVIEW,
+                    engine=EngineName.SUPERVISOR,
+                    idempotency_key=f"strategic-review:{streak[0].id}",
+                    payload={},
+                    priority=30,
                 )
 
             # CHANNEL_SCOUT's reliability net -- the Orchestrator can spawn it

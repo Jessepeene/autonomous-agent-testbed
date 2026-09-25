@@ -141,6 +141,12 @@ class TaskKind(StrEnum):
     #: about what to keep needs a model, and neither should be able to delay or
     #: silently skip the other. See `learning/feedback.py`.
     LEARN_FROM_FEEDBACK = "learn_from_feedback"
+    #: Phase 5b. Every review elsewhere in this company is per-product or
+    #: per-department; this is the one that reads the company's own state as a whole
+    #: and asks whether the objective is being served. Triggered on a condition (a
+    #: run of consecutive `rethink`/`abandon` release decisions), never a clock. See
+    #: `factory/strategic_review.py`.
+    STRATEGIC_REVIEW = "strategic_review"
 
 
 class TaskStatus(StrEnum):
@@ -251,6 +257,12 @@ class InterruptReason(StrEnum):
     #: diluting that label with technical failures is what made a human stop
     #: trusting it.
     TASK_EXHAUSTED = "task_exhausted"
+    #: Phase 5b's strategic review concluded something at the level of the whole
+    #: company, not one product -- and there is no autonomous owner yet for any of
+    #: its three findings (Phase 3/4/5c don't exist), so it always reaches a human,
+    #: the same way `ProductNext` did before Phase 3 existed to receive `rethink`.
+    #: See `factory/strategic_review.py`.
+    STRATEGIC_REVIEW = "strategic_review"
 
 
 class ComplianceStatus(StrEnum):
@@ -1128,6 +1140,41 @@ class ProductNext(ManagerDecision):
     #: accident -- a step nobody ran and a step somebody decided to defer look
     #: identical afterwards unless the reason was written down.
     holding: str = Field(default="")
+
+
+class StrategicReviewVerdict(Contract):
+    """What this company's own state, taken as a whole, says about whether the
+    objective is being served. Phase 5b -- the question nothing in this system has
+    ever asked before, because every review elsewhere is about one product or one
+    department.
+
+    Not `ManagerDecision`: this commissions nothing itself. It is read by a human
+    until Phase 3/4/5c give each finding a real owner -- see
+    `factory/strategic_review.py`.
+
+    **A three-way split, not a verdict**, because the three kinds of finding have
+    different owners and collapsing them into one "something is wrong" would be the
+    same mistake `ProductNext`'s `rethink`/`abandon` split already fixed one level
+    down: `execution_problem` is a bug (feed it to `BUG_LOG.md`/`selfcheck.py`),
+    `failed_strategy` is a hypothesis this company tried and market reality proved
+    wrong (a parameter to roll back, same as a losing trial), `wrong_assumption` is
+    the one case that should ever touch what method this company uses at all.
+
+    **`undetermined` is a real answer, not a missing one.** Phase 2.12 built the
+    discipline that an underpowered validation is not evidence either way; a
+    strategic review reading noisy, low-volume company data -- which is exactly
+    today's data, 0 customers -- must have the same option rather than manufacture
+    a conclusion to look thorough.
+    """
+
+    #: What the dossier shows, written before the finding it leads to -- same
+    #: discipline as `ManagerDecision.assessment`.
+    assessment: str = Field(min_length=20)
+    finding: Literal["execution_problem", "failed_strategy", "wrong_assumption", "undetermined"]
+    #: Why this finding and not one of the other three. Read by the human this
+    #: escalates to, and by the next review as the record of what was already
+    #: concluded from a state that may not have changed since.
+    rationale: str = Field(min_length=20)
 
 
 class VisualFinding(Contract):

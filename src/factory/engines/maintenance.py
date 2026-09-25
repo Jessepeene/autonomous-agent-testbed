@@ -63,6 +63,12 @@ async def run(ctx: FactoryContext, session: AsyncSession, task: Task) -> str:
 
         return await learn(ctx, session, task)
 
+    # Phase 5b: the one judgement about the whole company rather than one product.
+    if task.kind == TaskKind.STRATEGIC_REVIEW.value:
+        from factory.strategic_review import run_strategic_review
+
+        return await run_strategic_review(ctx, session, task)
+
     slug = str(task.payload.get("slug", "maintenance"))
 
     # These four are either fully deterministic or need the two-step structured
