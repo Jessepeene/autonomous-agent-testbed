@@ -270,6 +270,41 @@ def test_json_schema_strips_unsupported_keywords() -> None:
     assert schema["additionalProperties"] is False
 
 
+def test_json_schema_never_carries_a_class_docstring_into_the_request() -> None:
+    """Found 2026-09-26: `model_json_schema()` emits a model's own docstring as
+    `description`, and it was reaching the model verbatim on every structured call
+    -- an entire unreviewed second prompt, since a docstring is written for the
+    next engineer reading the source and nobody auditing `SYSTEM`/`PROMPT` strings
+    would think to check a class's `\"\"\"...\"\"\"`. `ProductNext`'s docstring is a
+    real, especially rich example: several paragraphs of narrative referencing
+    other class names and this codebase's own history."""
+    from factory.state.schemas import ProductNext
+
+    assert ProductNext.__doc__ and len(ProductNext.__doc__) > 200  # the leak existed
+    schema = json_schema_for(ProductNext)
+    assert "description" not in schema
+    assert "Compliance approved an idea" not in repr(schema)
+
+
+def test_json_schema_strips_description_from_nested_models_too() -> None:
+    """The same leak, one level down -- a nested model's own docstring reachable
+    via `$defs`, which a top-level-only check would miss entirely."""
+    from pydantic import BaseModel, Field
+
+    class _Nested(BaseModel):
+        """A nested model's docstring, which must never reach a model either."""
+
+        tag: str = Field(description="a field-level description, also stripped")
+
+    class _Outer(BaseModel):
+        """The outer model's own docstring."""
+
+        nested: _Nested
+
+    schema = json_schema_for(_Outer)
+    assert "description" not in repr(schema)
+
+
 # --- sandbox ----------------------------------------------------------------
 
 

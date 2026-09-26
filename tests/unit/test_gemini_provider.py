@@ -24,6 +24,7 @@ from factory.llm.providers.gemini_provider import (
     _thinking_budget,
     _to_gemini_content,
 )
+from factory.llm.schema import strip_descriptions
 from factory.settings import Settings, TaskType
 
 
@@ -75,6 +76,21 @@ def test_strip_additional_properties_is_a_no_op_on_a_clean_schema() -> None:
     schema = {"type": "object", "properties": {"name": {"type": "string"}}}
     _strip_additional_properties(schema)
     assert schema == {"type": "object", "properties": {"name": {"type": "string"}}}
+
+
+def test_strip_descriptions_removes_a_contract_class_docstring() -> None:
+    """Found 2026-09-26: Gemini has its own schema-cleaning pass, separate from
+    `json_schema_for` (Anthropic/DeepSeek's), and it never touched `description` --
+    so this provider leaked every contract's docstring into the live request even
+    after the shared pipeline was fixed. `_strip_additional_properties` is about
+    keys Gemini rejects; `strip_descriptions` is about a key Gemini accepts fine,
+    which is exactly why nothing here would have caught its absence."""
+    from factory.state.schemas import ProductNext
+
+    schema = ProductNext.model_json_schema()
+    assert "description" in schema  # the docstring leak, confirmed present first
+    strip_descriptions(schema)
+    assert "description" not in repr(schema)
 
 
 class _ComplexItem(BaseModel):

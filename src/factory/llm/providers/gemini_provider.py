@@ -30,6 +30,7 @@ from factory.llm.providers.base import (
     Turn,
     Usage,
 )
+from factory.llm.schema import strip_descriptions
 from factory.logging import get_logger
 from factory.settings import Settings, TaskType, get_settings
 
@@ -235,6 +236,12 @@ class GeminiProvider:
         instruction = f"{cache_prefix}\n\n{system}" if cache_prefix else system
         schema_dict = schema.model_json_schema()
         _strip_additional_properties(schema_dict)
+        # Not a Gemini quirk like the line above -- Gemini accepts `description`
+        # perfectly well, which is exactly why it must be stripped: it is the
+        # contract class's own docstring (and any field's `Field(description=...)`),
+        # written for the next engineer reading the source, not reviewed as a
+        # prompt. See `llm/schema.py`'s module docstring for how this was found.
+        strip_descriptions(schema_dict)
         config_kwargs: dict[str, Any] = {
             "system_instruction": instruction,
             "response_mime_type": "application/json",
