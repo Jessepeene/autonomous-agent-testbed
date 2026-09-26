@@ -358,6 +358,81 @@ another department consumes, a row another role reads, a prompt another agent ac
 defect found on 2026-09-15 was a component computing the wrong answer internally.
 Every single one sat at a joint.
 
+## Neutral prompting (applies to every phase, added 2026-09-26)
+
+Jesse's question, checking the discipline this project already tries to hold:
+*"we don't accidentally point the LLM in a certain direction by using specific
+examples and such."* Two real instances, one already fixed and one found while
+looking -- and they are opposite failure modes of the same rule: **everything a
+model actually reads should be there because someone chose it, reviewed it as an
+instruction, and stated it at the right level of generality.** Neither of the two
+below broke that by being written carelessly; both broke it by something true
+elsewhere (documentation should explain *why*; an example should be concrete) being
+true in the wrong place.
+
+### An example that was too narrow, found and half-fixed before today
+
+`HOUSE_STYLE.must_avoid` (`development/requirements.py`) named the Tailwind
+slate/gray ramp's exact hex values as a banned palette, because a human had to
+catch a page built from exactly that ramp by eye -- "it looks machine-generated"
+was true, checkable, and invisible to every automated judge until it was named.
+But the page that triggered the investigation used **Bootstrap**, not Tailwind, and
+the ban as first written would have missed it: a model reads a specific example as
+permission for everything the example does not literally say. This was later
+generalised to *"the Tailwind slate/gray ramp ... or any other framework's stock
+palette"* -- but only that one entry. Its siblings in the same list kept the same
+defect: *"-apple-system, Inter or Space Grotesk as the only typeface"* names three
+safe defaults and implicitly clears a fourth; *"three feature cards in a row with
+an icon above each"* clears four cards, or three with a checkmark instead of an
+icon. Generalised the same way as the palette entry, 2026-09-26 (`must_avoid` in
+both `development/requirements.py` and `scaffold/generator.py`, kept in sync).
+
+**The fix is never to remove the concrete example.** A rule stated only as an
+abstraction ("avoid generic design") gives a model nothing to recognise. The fix is
+always to keep the example *and* add the generalisation it was always standing in
+for -- "X, or any other Y" -- so the example teaches the shape of the failure
+instead of describing one specific instance of it.
+
+### A leak nobody would have found by reading prompts
+
+Checking every `SYSTEM`/prompt string in the codebase would have missed this
+entirely, because it is not in any of them. `ctx.llm.parse(schema, ...)` sends
+`schema.model_json_schema()` to the provider as the structured-output schema, and
+Pydantic's `model_json_schema()` emits a model's own class **docstring** as the
+schema's `description` -- verbatim, to the model, on every single call. Confirmed
+live: `StrategicReviewVerdict`'s and `ProductNext`'s docstrings, each several
+paragraphs written for the next engineer reading the source -- citing phase
+numbers, other class names, file paths (`"Phase 3/4/5c"`, `` `ManagerDecision` ``,
+`BUG_LOG.md`) -- were reaching the model as part of the request, an entire
+unreviewed second prompt hiding behind something that does not look like a prompt
+at all. Neither provider even rejects it, which is exactly why nothing had ever
+surfaced the way a rejected request would have.
+
+Fixed the same day, at the one place both structured-output pipelines build a
+schema (`llm/schema.py`'s `strip_descriptions`, called from `json_schema_for` for
+Anthropic/DeepSeek and separately from Gemini's own schema-cleaning pass, which is
+differently shaped and does not otherwise touch `description`). The rule going
+forward: **a docstring documents code for the next engineer; if a model needs to be
+told something, it goes in `system`/`prompt`, in words written and reviewed as a
+prompt.** A schema's `description` is never a place instruction is allowed to live,
+so nothing needs auditing there going forward -- it is simply never sent.
+
+### The standing check, for every future prompt or contract
+
+Two different questions, both worth asking before trusting a new LLM call:
+
+- **For a rule with an example**: does the example teach the general shape of what
+  to avoid, or does it teach the model to avoid exactly and only what was named?
+  If removing the specific instance would leave nothing recognisable, keep it --
+  and check that a generalising clause sits next to it, the way "or any other
+  framework's stock palette" now does for every sibling in the same list.
+- **For anything a `Contract` subclass carries**: is every word that could reach
+  the model something someone actually wrote as an instruction, or is some of it
+  documentation that happens to be readable by whatever reads the schema? A
+  docstring is not neutral just because nobody meant it as a prompt --
+  `model_json_schema()` does not know the difference, and now nothing downstream
+  has to check by hand.
+
 ## Phase 1.5 — the record (prerequisite for Phase 2 and Phase 3)
 
 Not originally a phase, and it should have been. Phases 2 and 4 both reduce to

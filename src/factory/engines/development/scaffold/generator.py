@@ -171,10 +171,11 @@ it, keep running text near 65 characters wide.
   **Do not ship any of these**, because they are what a generated page looks like and \
 every one is a default rather than a decision: the Tailwind slate/gray ramps \
 (#f8fafc, #64748b, #e2e8f0, #cbd5e1, #0f172a, #1e293b) or any other framework's \
-stock palette; a dark navy or purple-to-blue gradient hero; `-apple-system`/Inter/ \
-Space Grotesk as the only typeface; emoji as section markers; every section centered; \
+stock palette; a dark navy or purple-to-blue gradient hero, or any other stock \
+gradient treatment; `-apple-system`/Inter/Space Grotesk or any other 'safe default' \
+sans as the only typeface; emoji as section markers; every section centered; \
 the same rounded corner and card treatment repeated down the page; three feature \
-cards in a row with an icon above each.
+cards in a row with an icon above each, or any other generic feature-grid layout.
 
   Pick your neutrals rather than inheriting them — a grey nudged slightly toward the \
 accent hue reads as chosen, a stock mid-grey reads as untouched. Spend boldness in \

@@ -411,12 +411,15 @@ HOUSE_STYLE = DesignGuidelines(
     must_avoid=[
         "The Tailwind slate/gray ramp (#f8fafc, #64748b, #e2e8f0, #cbd5e1, #0f172a, "
         "#1e293b) or any other framework's stock palette",
-        "A dark navy or purple-to-blue gradient hero",
-        "-apple-system, Inter or Space Grotesk as the only typeface",
+        "A dark navy or purple-to-blue gradient hero, or any other stock gradient "
+        "treatment",
+        "-apple-system, Inter, Space Grotesk, or any other 'safe default' sans as "
+        "the only typeface",
         "Emoji used as section markers",
         "Every section centered",
         "The same rounded-corner card treatment repeated down the page",
-        "Three feature cards in a row with an icon above each",
+        "Three feature cards in a row with an icon above each, or any other "
+        "generic feature-grid layout",
     ],
 )
 
