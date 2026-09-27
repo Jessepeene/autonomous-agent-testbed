@@ -40,7 +40,7 @@ _GENERALISATION_MIGRATION_PATH = (
     Path(__file__).resolve().parents[2]
     / "alembic"
     / "versions"
-    / "0047_discriminator_example_generalisation.py"
+    / "0047_discriminator_examples.py"
 )
 
 

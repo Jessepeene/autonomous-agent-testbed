@@ -2,7 +2,7 @@
 an already-bootstrapped database keeps serving it -- not just a freshly bootstrapped
 one.
 
-Revision ID: 0047_discriminator_example_generalisation
+Revision ID: 0047_discriminator_examples
 Revises: 0046_objective
 Create Date: 2026-09-27
 
@@ -33,7 +33,7 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
-revision: str = "0047_discriminator_example_generalisation"
+revision: str = "0047_discriminator_examples"
 down_revision: str | None = "0046_objective"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
