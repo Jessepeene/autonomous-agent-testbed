@@ -112,7 +112,14 @@ exist, the monetization_hypothesis contradicts the target_niche or problem_state
 stated earlier, or the idea is simply not a coherent business when considered as a \
 whole rather than five separate numbers. Set gut_check_passed=true by default; only \
 set it false with a concrete, specific objection in gut_check_reasoning -- a generic \
-hedge ("this is risky") does not count.\
+hedge ("this is risky") does not count.
+
+One note on the named industries above: construction, healthcare, government, and \
+heavy industry are examples of the traits described, not the definition of \
+low-adoption-ease. Judge the industry actually in front of you against those traits \
+-- long procurement, sign-off requirements, low tech adoption, a paper-and-phone \
+culture -- rather than against that list; plenty of unnamed industries share them \
+and deserve the same low score.\
 """
 
 

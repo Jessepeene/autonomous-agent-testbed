@@ -36,6 +36,12 @@ _APPENDICES_MIGRATION_PATH = (
     / "versions"
     / "0028_tier0_prompt_appendices.py"
 )
+_GENERALISATION_MIGRATION_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "alembic"
+    / "versions"
+    / "0047_discriminator_example_generalisation.py"
+)
 
 
 def _load(path: Path, name: str) -> ModuleType:
@@ -57,6 +63,15 @@ def later_appendices_migration() -> ModuleType:
     module docstring. Needed here only to compose the full no-drift check
     below across both migrations combined."""
     return _load(_APPENDICES_MIGRATION_PATH, "_migration_0028")
+
+
+@pytest.fixture(scope="module")
+def generalisation_migration() -> ModuleType:
+    """0047 is the next migration after 0028 to touch this same key -- see its own
+    module docstring. Needed here for the same reason 0028's fixture is: the
+    no-drift check below composes every migration that has ever touched this
+    prompt, not just the first two."""
+    return _load(_GENERALISATION_MIGRATION_PATH, "_migration_0047")
 
 
 # --- _matches: detecting an untouched row --------------------------------------
@@ -163,22 +178,28 @@ def test_old_default_weights_do_not_sum_to_one_plus_defensibility(migration: Mod
 
 
 def test_new_discriminator_system_matches_the_live_code_constant(
-    migration: ModuleType, later_appendices_migration: ModuleType
+    migration: ModuleType,
+    later_appendices_migration: ModuleType,
+    generalisation_migration: ModuleType,
 ) -> None:
     """The migration carries its own copy of the post-Phase-4 prompt text (Alembic
     migrations must not import application code that might itself change later)
     -- this is the guard that the copy can never silently drift from the real
     constant `discovery/graph.py` actually serves.
 
-    0023 is no longer the last migration to touch this key -- 0028 later
-    appended a Tier 0 holistic-check paragraph (system-wide verification
-    plan) -- so the true invariant is now "0023's text plus every later
-    appendix equals today's live constant," not "0023's text alone still
-    does." Composing the two here keeps this a real no-drift guard instead of
-    a stale assumption that quietly stopped being checked.
+    0023 is no longer the last migration to touch this key -- 0028 appended a
+    Tier 0 holistic-check paragraph (system-wide verification plan), and 0047
+    later appended a generalising clause to the adoption-ease examples (Neutral
+    prompting, 2026-09-27) -- so the true invariant is now "0023's text plus
+    every later appendix equals today's live constant," not "0023's text alone
+    still does." Composing all three here keeps this a real no-drift guard
+    instead of a stale assumption that quietly stopped being checked the moment
+    a second, and now a third, migration touched this key.
     """
     assert (
-        migration._NEW_DISCRIMINATOR_SYSTEM + later_appendices_migration._DISCRIMINATOR_APPENDIX
+        migration._NEW_DISCRIMINATOR_SYSTEM
+        + later_appendices_migration._DISCRIMINATOR_APPENDIX
+        + generalisation_migration._GENERALISATION_APPENDIX
         == DISCRIMINATOR_SYSTEM
     )
 

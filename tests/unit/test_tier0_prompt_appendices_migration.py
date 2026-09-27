@@ -19,6 +19,12 @@ from factory.engines.marketing.outreach import SYSTEM_PROMPT as OUTREACH_SYSTEM_
 _MIGRATION_PATH = (
     Path(__file__).resolve().parents[2] / "alembic" / "versions" / "0028_tier0_prompt_appendices.py"
 )
+_GENERALISATION_MIGRATION_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "alembic"
+    / "versions"
+    / "0047_discriminator_example_generalisation.py"
+)
 
 
 @pytest.fixture(scope="module")
@@ -30,14 +36,32 @@ def migration() -> ModuleType:
     return module
 
 
+@pytest.fixture(scope="module")
+def generalisation_migration() -> ModuleType:
+    """0047 is the next migration after this one to touch the discriminator key --
+    needed here so the suffix check below accounts for every migration that has
+    touched it since, not just this one."""
+    spec = importlib.util.spec_from_file_location(
+        "_migration_0047", _GENERALISATION_MIGRATION_PATH
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_discriminator_appendix_is_a_real_suffix_of_the_live_constant(
-    migration: ModuleType,
+    migration: ModuleType, generalisation_migration: ModuleType
 ) -> None:
     """The exact invariant this migration exists for: appending this text to
     whatever a database still has active must reproduce today's real prompt --
     checked here the other way around, that the live constant actually ends
-    with this exact appendix."""
-    assert DISCRIMINATOR_SYSTEM.endswith(migration._DISCRIMINATOR_APPENDIX)
+    with this exact appendix, immediately followed by whatever 0047 later
+    appended after it. This migration's own text is no longer the final suffix
+    by itself once a later one exists; the combination still must be."""
+    assert DISCRIMINATOR_SYSTEM.endswith(
+        migration._DISCRIMINATOR_APPENDIX + generalisation_migration._GENERALISATION_APPENDIX
+    )
 
 
 def test_outreach_appendix_is_a_real_suffix_of_the_live_constant(migration: ModuleType) -> None:

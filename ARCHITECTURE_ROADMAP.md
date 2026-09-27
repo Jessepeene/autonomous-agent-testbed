@@ -433,6 +433,40 @@ Two different questions, both worth asking before trusting a new LLM call:
   `model_json_schema()` does not know the difference, and now nothing downstream
   has to check by hand.
 
+### Audited against both checks, 2026-09-27
+
+Every `SYSTEM`/`POLICY`/`PROMPT` string in the codebase, on request -- not a sample.
+One more real instance of the first failure mode, in a place worth being exact
+about: `learning/feedback.py`'s refusal to let a lesson loosen a rail named five
+things (do-not-contact, erasure, spend limit, campaign approval, truthfulness),
+written 2026-09-21, before Phase 2.13 (2026-09-22) and Phase 5a (2026-09-24) named
+the rest of what this company now holds as a rail -- credentials, the objective, the
+task queue, the database, deploy and rollback. A reply arguing to loosen any of
+those would not have tripped `touches_a_rail`, since none of them were named. Same
+mechanism as the palette ban, applied to a safety list instead of a style one, and
+arguably worse for it: fixed the same way, with both the missing names and a
+closing "and any other hard limit... whether or not it is named here", plus an
+explicit instruction to treat uncertainty as a rail rather than resolve it in the
+reply's favour. `DISCRIMINATOR_SYSTEM`'s "construction, healthcare, government, and
+heavy industry" industry list, judged borderline (the general criteria are stated in
+full before the examples), was closed the same way for consistency rather than left
+as a judgement call nobody would revisit.
+
+Everything else read -- `RELEASE_SYSTEM`, `GAP_SYSTEM`, `PAGE_POLICY`,
+`LIA_SYSTEM_PROMPT`, the orchestrator's routing prompt, both Discovery prompts, both
+role prompts in `agents/roles.py`, `design_brief.py`, `outreach.py`,
+`marketing/leads.py`, all three of `marketing/providers/website.py`'s, `comms.py`'s
+`ASKING_GUIDANCE`, `hitl/interrupts.py`'s plain-language explainer, and
+`learning/maintenance.py`'s extractor -- held up. Several go further than merely
+neutral: `RELEASE_SYSTEM` names `rethink`/`abandon` as "real options and
+under-used ones" specifically to counter the conservative bias a reviewer with no
+stake in shipping would otherwise have; `DEMAND_SYSTEM` states the failure mode in
+both directions ("be willing to say thin or insufficient... but do not be
+reflexively negative either"); `marketing/providers/website.py`'s query generator
+already closes its own platform blocklist with "or similar platforms/aggregators".
+Worth noting as the pattern that makes a prompt worth trusting, not just the defect
+that makes one worth fixing.
+
 ## Phase 1.5 — the record (prerequisite for Phase 2 and Phase 3)
 
 Not originally a phase, and it should have been. Phases 2 and 4 both reduce to
