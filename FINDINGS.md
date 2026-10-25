@@ -4,6 +4,22 @@ Drafted from `BUG_LOG.md` — 57 real, logged production incidents, 37 days
 (2026-08-18 to 2026-09-24). Every sentence below is checked against the actual
 log entry it cites; nothing here is embellished or invented.
 
+## Takeaways
+
+1. A silent validation failure and a silent token-budget collision both look
+   identical to "nothing happened."
+2. A check that can't distinguish "verified" from "never checked" will
+   eventually report the second as the first, and look healthy doing it.
+3. Verifying something by doing it needs a way to do it that can't be
+   mistaken for the real thing.
+4. A wrong escalation label costs trust in every future use of that label,
+   not just the one time it was wrong.
+5. The same interface is not the same behavior — vendor differences show up
+   in token accounting, supported parameters, and schema shape, not just
+   answers.
+6. A key that silently drops a legitimate repeat is worse than one that
+   raises on conflict.
+
 ## 1. AI output silently lost (#9, #49, #50)
 
 Three different ways the same class of failure showed up: a model produced a
