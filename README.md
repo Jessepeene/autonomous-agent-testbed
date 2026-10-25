@@ -71,7 +71,10 @@ free-text parsing anywhere in the system.
 
 Leads come from **B2B data providers** (Hunter.io, Apollo.io), with an operator
 CSV drop retained as a manual override. Each adapter reduces the provider
-response to five PII fields plus provenance before it travels any further.
+response to five PII fields plus provenance before it travels any further. Lead
+sourcing was built and wired in, but the `leads` table never held a single row
+in this system's entire run — no product ever reached the stage of actually
+contacting anyone.
 
 ## Guardrails that live in code, not in prompts
 
