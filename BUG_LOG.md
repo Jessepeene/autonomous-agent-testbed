@@ -33,16 +33,16 @@ time it's fixed, not batched up afterward.**
 19. [A tunable prompt's live DB row silently never gets a code-side rewrite once bootstrapped](#19-a-tunable-prompts-live-db-row-silently-never-gets-a-code-side-rewrite-once-bootstrapped)
 20. [40 identical provider-outage escalations mislabeled as legal review, spamming past the dedup guard](#20-40-identical-provider-outage-escalations-mislabeled-as-legal-review-spamming-past-the-dedup-guard)
 21. [Live-product auditing only ran when the factory was idle](#21-live-product-auditing-only-ran-when-the-factory-was-idle)
-22. [An issue filed `open` never closed, so convergence could only ever read "not converging"](#22-an-issue-filed-open-never-closed-so-convergence-could-only-ever-read-not-converging)
-23. [`max_length` on model-written prose silently discarded whole responses, for the 4th and 5th time](#23-max_length-on-model-written-prose-silently-discarded-whole-responses-for-the-4th-and-5th-time)
-24. [The release decision inherited an 8,192-token budget that thinking ate before it could answer](#24-the-release-decision-inherited-an-8192-token-budget-that-thinking-ate-before-it-could-answer)
-25. [A cosmetic finding the release judge had accepted twice counted as a wall and escalated the product](#25-a-cosmetic-finding-the-release-judge-had-accepted-twice-counted-as-a-wall-and-escalated-the-product)
-26. [A static landing page shipped `requirements.txt`, so Vercel built it as a Python app and failed](#26-a-static-landing-page-shipped-requirementstxt-so-vercel-built-it-as-a-python-app-and-failed)
-27. [The repair agent was told `readyState=ERROR` and nothing else](#27-the-repair-agent-was-told-readystateerror-and-nothing-else)
-28. [`converging` read zero blockers as a wall, escalating a build that had just been approved to ship](#28-converging-read-zero-blockers-as-a-wall-escalating-a-build-that-had-just-been-approved-to-ship)
-29. [Every new product ships behind Vercel's SSO login wall — the residual gap from #5, as predicted](#29-every-new-product-ships-behind-vercels-sso-login-wall--the-residual-gap-from-5-as-predicted)
-30. [No CORS anywhere: every interest form on every page ever shipped failed in the browser](#30-no-cors-anywhere-every-interest-form-on-every-page-ever-shipped-failed-in-the-browser)
-31. [Validation pages never got a design brief — the call sat below the early return](#31-validation-pages-never-got-a-design-brief--the-call-sat-below-the-early-return)
+22. [The Orchestrator escalated daily because nothing told it what `spend_limit_cents` meant](#22-the-orchestrator-escalated-daily-because-nothing-told-it-what-spend_limit_cents-meant)
+23. [Every defect was a first encounter — one bug filed four times in 24 days](#23-every-defect-was-a-first-encounter--one-bug-filed-four-times-in-24-days)
+24. [The circuit breaker paused a healthy provider for failing schema validation](#24-the-circuit-breaker-paused-a-healthy-provider-for-failing-schema-validation)
+25. [A null `content` field on an HTTP 200 stopped every engine for fifteen minutes](#25-a-null-content-field-on-an-http-200-stopped-every-engine-for-fifteen-minutes)
+26. [A department manager that asked a question and commissioned nothing dropped the question](#26-a-department-manager-that-asked-a-question-and-commissioned-nothing-dropped-the-question)
+27. [The Design department's first real work was generated, rejected by the database, and regenerated twice more](#27-the-design-departments-first-real-work-was-generated-rejected-by-the-database-and-regenerated-twice-more)
+28. [A workspace name an agent invented became a real directory, so guessing worked](#28-a-workspace-name-an-agent-invented-became-a-real-directory-so-guessing-worked)
+29. [A daily maintenance task that could not succeed by construction](#29-a-daily-maintenance-task-that-could-not-succeed-by-construction)
+30. [Parking a task marked it done a line later, which would have silently disabled the whole comms channel](#30-parking-a-task-marked-it-done-a-line-later-which-would-have-silently-disabled-the-whole-comms-channel)
+31. [The builder was judged for four weeks against design direction it was never given](#31-the-builder-was-judged-for-four-weeks-against-design-direction-it-was-never-given)
 32. [The landing page published its own internal provenance to customers](#32-the-landing-page-published-its-own-internal-provenance-to-customers)
 33. [Convergence compared the current state against itself, so every `fix_first` walled on attempt one](#33-convergence-compared-the-current-state-against-itself-so-every-fix_first-walled-on-attempt-one)
 34. [Six repair failures, one cause: nothing knew whether the workspace matched what was deployed](#34-six-repair-failures-one-cause-nothing-knew-whether-the-workspace-matched-what-was-deployed)
@@ -59,10 +59,19 @@ time it's fixed, not batched up afterward.**
 45. [An underpowered validation retired a product on evidence its own settings comment calls noise](#45-an-underpowered-validation-retired-a-product-on-evidence-its-own-settings-comment-calls-noise)
 46. [The underpowered-validation fix still retired the product, contradicting a rule the codebase already had](#46-the-underpowered-validation-fix-still-retired-the-product-contradicting-a-rule-the-codebase-already-had)
 47. [Every live-review finding was routed to a repair engineer with no access to the file actually at fault](#47-every-live-review-finding-was-routed-to-a-repair-engineer-with-no-access-to-the-file-actually-at-fault)
-
+48. [An issue filed `open` never closed, so convergence could only ever read "not converging"](#48-an-issue-filed-open-never-closed-so-convergence-could-only-ever-read-not-converging)
+49. [`max_length` on model-written prose silently discarded whole responses, for the 4th and 5th time](#49-max_length-on-model-written-prose-silently-discarded-whole-responses-for-the-4th-and-5th-time)
+50. [The release decision inherited an 8,192-token budget that thinking ate before it could answer](#50-the-release-decision-inherited-an-8192-token-budget-that-thinking-ate-before-it-could-answer)
+51. [A cosmetic finding the release judge had accepted twice counted as a wall and escalated the product](#51-a-cosmetic-finding-the-release-judge-had-accepted-twice-counted-as-a-wall-and-escalated-the-product)
+52. [A static landing page shipped `requirements.txt`, so Vercel built it as a Python app and failed](#52-a-static-landing-page-shipped-requirementstxt-so-vercel-built-it-as-a-python-app-and-failed)
+53. [The repair agent was told `readyState=ERROR` and nothing else](#53-the-repair-agent-was-told-readystateerror-and-nothing-else)
+54. [`converging` read zero blockers as a wall, escalating a build that had just been approved to ship](#54-converging-read-zero-blockers-as-a-wall-escalating-a-build-that-had-just-been-approved-to-ship)
+55. [Every new product ships behind Vercel's SSO login wall — the residual gap from #5, as predicted](#55-every-new-product-ships-behind-vercels-sso-login-wall--the-residual-gap-from-5-as-predicted)
+56. [No CORS anywhere: every interest form on every page ever shipped failed in the browser](#56-no-cors-anywhere-every-interest-form-on-every-page-ever-shipped-failed-in-the-browser)
+57. [Validation pages never got a design brief — the call sat below the early return](#57-validation-pages-never-got-a-design-brief--the-call-sat-below-the-early-return)
 ---
 
-## 22. An issue filed `open` never closed, so convergence could only ever read "not converging"
+## 48. An issue filed `open` never closed, so convergence could only ever read "not converging"
 
 **Found**: 2026-09-14, from a `heal_exhausted` escalation on product
 `06829d03` — its second that morning — on a landing page that was passing
@@ -118,7 +127,7 @@ pass for both deterministic checks with an empty found-set.
 
 ---
 
-## 23. `max_length` on model-written prose silently discarded whole responses, for the 4th and 5th time
+## 49. `max_length` on model-written prose silently discarded whole responses, for the 4th and 5th time
 
 **Found**: 2026-09-14, reading `/srv/factory-logs/factory.jsonl` after noticing
 4 `release.undecided` out of 9 release judgements.
@@ -162,9 +171,9 @@ names the offending model and fields; 1,257 unit tests pass.
 
 ---
 
-## 24. The release decision inherited an 8,192-token budget that thinking ate before it could answer
+## 50. The release decision inherited an 8,192-token budget that thinking ate before it could answer
 
-**Found**: 2026-09-14, same log sweep as #23 — the other half of the 4
+**Found**: 2026-09-14, same log sweep as #49 — the other half of the 4
 `release.undecided`.
 
 **Severity**: The deciding call in the build silently fails and the caller falls
@@ -190,17 +199,17 @@ has to act on; 8,192 was never sized for it.
 **Fix**: `max_tokens=32_000` at the call site, where the caller knows the shape
 of the call, matching `find_requirement_gaps`.
 
-**Verified**: shipped alongside #22 and #23; the release judgement is the thing
+**Verified**: shipped alongside #48 and #49; the release judgement is the thing
 being watched on the next live build.
 
 ---
 
-## 25. A cosmetic finding the release judge had accepted twice counted as a wall and escalated the product
+## 51. A cosmetic finding the release judge had accepted twice counted as a wall and escalated the product
 
-**Found**: 2026-09-14, while verifying that the fix for #22 would actually let
+**Found**: 2026-09-14, while verifying that the fix for #48 would actually let
 product `06829d03` proceed. It would not have.
 
-**Severity**: Would have silently defeated #22's fix on the very product it was
+**Severity**: Would have silently defeated #48's fix on the very product it was
 written for. Any product accumulating one recurring cosmetic finding escalates
 forever, regardless of whether anything is actually blocked.
 
@@ -238,7 +247,7 @@ a wall, so the signal the filter must not destroy is pinned.
 
 ---
 
-## 26. A static landing page shipped `requirements.txt`, so Vercel built it as a Python app and failed
+## 52. A static landing page shipped `requirements.txt`, so Vercel built it as a Python app and failed
 
 **Found**: 2026-09-14, by pulling the Vercel build log by hand after the first
 run that ever reached a deploy.
@@ -271,9 +280,9 @@ HTML, an MVP with `app/main.py` still ships its `requirements.txt`.
 
 ---
 
-## 27. The repair agent was told `readyState=ERROR` and nothing else
+## 53. The repair agent was told `readyState=ERROR` and nothing else
 
-**Found**: 2026-09-14, same deploy failure as #26 — I had to query the Vercel
+**Found**: 2026-09-14, same deploy failure as #52 — I had to query the Vercel
 API by hand to learn what the system could not tell me.
 
 **Severity**: Unfixable-by-construction. This detail becomes the *entire* brief
@@ -294,11 +303,11 @@ the caller already had.
 
 **Verified**: the endpoint and payload shape were confirmed live against the
 failed deployment before the code was written; it is what produced the quoted
-error in #26.
+error in #52.
 
 ---
 
-## 28. `converging` read zero blockers as a wall, escalating a build that had just been approved to ship
+## 54. `converging` read zero blockers as a wall, escalating a build that had just been approved to ship
 
 **Found**: 2026-09-14, in the first run where every earlier fix held.
 
@@ -330,7 +339,7 @@ converging.
 
 ---
 
-## 29. Every new product ships behind Vercel's SSO login wall — the residual gap from #5, as predicted
+## 55. Every new product ships behind Vercel's SSO login wall — the residual gap from #5, as predicted
 
 **Found**: 2026-09-14, by curling the first URL this factory ever successfully
 deployed end to end. It returned 200 — of `<title>Login – Vercel</title>`.
@@ -353,7 +362,7 @@ so every `*.vercel.app` URL 302s to `vercel.com/sso-api`.
 
 The lesson worth keeping is not about Vercel. A known defect with a known
 one-line fix, written down in the place the team reads, still shipped — because
-"someone will remember to do this next time" is not a control. Same shape as #23,
+"someone will remember to do this next time" is not a control. Same shape as #49,
 where a rule in a docstring did not stop two schemas from breaking it.
 
 **Fix**: `_disable_sso_protection` — `PATCH /v9/projects/{name}` with
@@ -381,7 +390,7 @@ fixture now keeps `httpx.AsyncClient.patch` off the network for the whole file.
 
 ---
 
-## 30. No CORS anywhere: every interest form on every page ever shipped failed in the browser
+## 56. No CORS anywhere: every interest form on every page ever shipped failed in the browser
 
 **Found**: 2026-09-14, by Jesse, who opened the first product this factory shipped
 and tried the form. "Form doesn't work."
@@ -426,7 +435,7 @@ recorded `POST /interest/{id} -> 200`, `FAILURES: 0`.
 
 ---
 
-## 31. Validation pages never got a design brief — the call sat below the early return
+## 57. Validation pages never got a design brief — the call sat below the early return
 
 **Found**: 2026-09-14, by Jesse. "No design brief."
 
@@ -461,7 +470,7 @@ sees the page linking the forum thread the idea was scraped from.
 
 with nothing saying what the field is for. It is internal Discovery provenance. A
 field labelled "evidence", handed to a copywriter with no framing, is material —
-the model was not wrong to use it. Same shape as #23 and #29: the thing that was
+the model was not wrong to use it. Same shape as #49 and #55: the thing that was
 missing was never in the model, it was in what the model was told.
 
 **Fix**: the field is now labelled as internal provenance explicitly not for the
@@ -503,7 +512,7 @@ _heal()           -> product_progress() reads the latest release.decided
 Both numbers came from the same moment. The comparison was against itself and
 therefore false unconditionally.
 
-**Why the morning fix was not a fix.** Entry #28 made `converging` return `None`
+**Why the morning fix was not a fix.** Entry #54 made `converging` return `None`
 when `blocking_now == 0`, after watching a build with zero gaps and a `ship`
 decision escalate on `0 < 0`. That was a real observation and the wrong
 conclusion: zero was simply where a universal fault happened to be *visible*. The
