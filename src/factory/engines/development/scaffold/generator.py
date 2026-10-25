@@ -648,7 +648,8 @@ def read_workspace(workspace: str, settings: Settings | None = None) -> dict[str
         if any(part in WORKSPACE_SKIP_DIRS for part in path.parts):
             continue
         try:
-            sources[str(path.relative_to(root))] = path.read_text(encoding="utf-8")
+            key = str(path.relative_to(root)).replace("\\", "/")
+            sources[key] = path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
             continue
     return sources
