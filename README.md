@@ -1,25 +1,14 @@
 # autonomous-agent-testbed
 
-**Research question**: can an autonomous LLM system operate under real stakes —
-real money, real deployments, live on the public internet — if its safety rules
+**Research question**: can an autonomous LLM system operate under real stakes,
+real money, real deployments, live on the public internet if its safety rules
 are enforced in code rather than prompts?
 
-**Honest outcome**: it ran in production for 37 days (2026-08-18 to 2026-09-24).
-In that time it built at least 4 products (3 still exist in the final database;
-one earlier one, `manifestaudit.com`, is documented throughout the project's own
-history but has no row left in the database this repo's numbers are drawn from).
-It earned **€0** — no product ever reached a paying customer. It made 95,271
-model calls for $94.74 across three providers, reached 9 release decisions —
-6 of which its own gates blocked outright (`fix_first`/`rethink`/`abandon`) —
-and produced 57 logged production incidents (`BUG_LOG.md`), against 1,392 unit
-tests passing in CI. Outbound email was built and gated but never enabled: no
-real email was ever sent (the only 2 composed messages were self-tests to an
-unmailable `.invalid` address), and no real person ever submitted a form (the
-only 2 sign-ups on record were self-tests too). It is now being taken offline.
+**Honest outcome**: it ran in production for 37 days (2026-08-18 to 2026-09-24). In that time it built at least 4 products (3 still exist in the final database). It earned €0: no product ever reached a paying customer. It made 95,271 model calls for $94.74 across three providers (DeepSeek, Claude and Gemini). It reached 9 release decisions, 6 of which its own gates blocked from shipping as-is. It produced 57 logged production incidents (BUG_LOG.md). The codebase has 1,392 unit tests, passing in CI. Outbound email was built and gated but never enabled: no real email was ever sent (the only 2 composed messages were self-tests to an unmailable .invalid address), and no real person ever submitted a form (the only 2 sign-ups on record were self-tests too). It is now offline.
 
-All of the above is measured, not estimated — see `docs/results-2026.md` for
-the exact SQL run against the production database and the date it was
-collected.
+All of the above is measured: see docs/results-2026.md for the exact SQL run against the production database and the date it was collected.
+
+My conclusion: the parts enforced in code held up; the parts left to model judgement are where results varied most. Giving agents more autonomy made outcomes less predictable, and spend stayed this low only because a hard daily budget cap bounded it. Without such a cap, autonomous agents can run up costs quickly. There's real potential here, but there are big hurdles to overcome before a system like this can run unattended.
 
 ## How this was built
 
@@ -157,5 +146,4 @@ python -m factory.main --once      # one supervisor tick
 ## Current status
 
 Offline research case. Ran in production 2026-08-18 to 2026-09-24, then
-deliberately paused (zero LLM spend since). Being decommissioned; this repo is
-what's left once it is.
+decommissioned.
