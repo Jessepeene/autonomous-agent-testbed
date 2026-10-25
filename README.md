@@ -51,11 +51,21 @@ python -m factory.preflight        # tells you exactly what is missing and how t
 docker compose up -d postgres
 alembic upgrade head
 python -m factory.main --once      # one supervisor tick
-pytest -q
+pytest tests/unit -q
 ```
 
 `FACTORY_DRY_RUN=1` (the default) stubs every outbound side effect: no email is sent,
 no deploy runs, no card is charged. Turn it off only after the guardrail test suite
 has passed against real credentials.
+
+### Testing
+
+- **`pytest tests/unit -q`** — no external services. This is what CI
+  (`.github/workflows/tests.yml`) runs on every push and PR.
+- **`pytest tests/integration -q`** — needs a real Postgres (`docker compose up -d
+  postgres && alembic upgrade head` first). Not run in CI.
+- **End-to-end** (an actual supervisor tick against real engines) additionally needs
+  Docker available to the process, for the sandbox runner that executes generated
+  code. Run locally only.
 
 See `DEPLOYMENT.md` for VPS setup.

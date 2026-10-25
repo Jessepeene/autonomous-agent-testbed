@@ -1,0 +1,29 @@
+name: tests
+
+# Unit tests and lint only. Integration and end-to-end tests need a real
+# Postgres instance and Docker (for the sandbox runner) and are not run here --
+# see the README for how to run those locally.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check src tests
+
+      - name: Unit tests
+        run: pytest tests/unit -q
