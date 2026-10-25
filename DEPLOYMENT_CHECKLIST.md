@@ -2601,8 +2601,8 @@ it, as things stand.
 
 You'd already solved this for a different product (ValidDraw, construction
 pay-application auditing) and shared that Lead Scout's actual code
-(`reference files/lead_scout.py`, not committed to this repo — it's a
-different product's own file, shared as a reference only). It turned out to
+(`reference files/lead_scout.py` — a different product's own file, shared
+as a reference only; later removed from this repo). It turned out to
 be real, iterated production code with documented incidents baked in as
 comments, not the "dumb, hardcoded" thing you called it: a domain-matching
 bug that would have emailed a LinkedIn employee ("bfoster@linkedin.com"), a
