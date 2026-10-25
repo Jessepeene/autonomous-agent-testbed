@@ -133,10 +133,6 @@ python -m factory.main --once      # one supervisor tick
   against — every number in `docs/results-2026.md` is real activity, but none of
   it includes a paying customer.
 - The two Docker-related trade-offs above were accepted, not solved.
-- `BUG_LOG.md`'s own entry numbers collide (two unrelated incidents share each
-  number from #22 to #31, from an earlier backfill pass that restarted its own
-  counter) — the content is all real and all distinct, but search by number with
-  that in mind.
 - See `FINDINGS.md` for what each incident pattern teaches, and its own closing
   assessment of whether this was safe to run unattended.
 

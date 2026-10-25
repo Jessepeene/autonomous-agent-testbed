@@ -2,15 +2,9 @@
 
 Drafted from `BUG_LOG.md` — 57 real, logged production incidents, 37 days
 (2026-08-18 to 2026-09-24). Every sentence below is checked against the actual
-log entry it cites; nothing here is embellished or invented. One note on the
-log itself: `BUG_LOG.md`'s own numbering collides — an earlier backfill pass
-restarted its counter, so two unrelated incidents share each number from #22
-to #31. The content is all real; only the numbers repeat. Where this findings
-document cites one of those numbers, it means the entry whose content actually
-matches the pattern described — checked by reading both candidates, not
-assumed.
+log entry it cites; nothing here is embellished or invented.
 
-## 1. AI output silently lost (#9, #23, #24)
+## 1. AI output silently lost (#9, #49, #50)
 
 Three different ways the same class of failure showed up: a model produced a
 correct answer and the system discarded it without telling anyone.
@@ -19,19 +13,19 @@ correct answer and the system discarded it without telling anyone.
   JSON answer. On small-batch calls, thinking alone could consume the entire
   budget, so the model hit `MAX_TOKENS` having emitted no answer at all —
   `SchemaViolation`, a crashed call, with nothing to point at.
-- **#23**: thirty fields across twelve schemas carried a `max_length` the model
+- **#49**: thirty fields across twelve schemas carried a `max_length` the model
   was never told existed. A fully correct, 1,501-character release rationale
   failed validation at a 1,500-character cap and the entire response — the
-  highest-judgement call in the company — was thrown away.
-- **#24**: the release judgement inherited a generic 8,192-token default that
+  system's most important decision — was thrown away.
+- **#50**: the release judgement inherited a generic 8,192-token default that
   was never sized for what it actually has to weigh (every open issue, the
   convergence history, a full rationale). Thinking consumed the budget before
   the model could emit its decision.
 
 **Fix, each case**: bound the thinking budget explicitly rather than leaving it
 unbounded (#9); stop putting `max_length` on any field a model writes, enforced
-by a test that enumerates every schema (#23); size `max_tokens` to the actual
-call, not a shared default (#24).
+by a test that enumerates every schema (#49); size `max_tokens` to the actual
+call, not a shared default (#50).
 
 **The lesson**: a silent validation failure and a silent token-budget collision
 look identical to "nothing happened" from outside the call. Both are a model
@@ -40,13 +34,13 @@ anyone — human or system — ever sees it. The fix is never "tell the model to
 be shorter"; it's removing the artificial ceiling, because the real ceiling
 (the API's own `max_tokens`) already exists and enforces itself.
 
-## 2. Quality checks that lied (#22, #33, #37, #44)
+## 2. Quality checks that lied (#33, #37, #44, #48)
 
 Four different checks that reported a confident, wrong answer instead of the
 truth — each one indistinguishable, from outside, from a check that had
 actually run correctly.
 
-- **#22**: an issue filed `open` was never closed by the one mechanism designed
+- **#48**: an issue filed `open` was never closed by the one mechanism designed
   to close it, so the "is this converging" check read the same stale blocker
   forever and reported "not converging" on every attempt after the first,
   regardless of whether the defect still existed.
@@ -65,7 +59,7 @@ actually run correctly.
   which is what a finished product looks like.
 
 **Fix, each case**: close issues that no longer reproduce, on every check that
-can see the whole product (#22); anchor convergence to the last *repair
+can see the whole product (#48); anchor convergence to the last *repair
 attempt*, not the last decision, so a first attempt has nothing to falsely
 compare against (#33); make not-attempted and attempted-but-failed both block
 release, rather than letting "never tried" pass as "succeeded" (#37); read all
@@ -96,7 +90,7 @@ but checking its actual content: it isn't a measurement-pollution bug. A
 generated landing page published its own internal Discovery provenance (a
 link to the GitHub issue the idea was scraped from) directly to real visitors
 — a credibility leak, not a corrupted metric. Its real kinship is with the
-"missing context, not missing capability" theme that also produced #23: the
+"missing context, not missing capability" theme that also produced #49: the
 codegen prompt handed the model a field literally named `evidence` with no
 framing for what it was or that it must never appear on the page. The model
 used it exactly as labeled. Noting this rather than forcing the fit, per the
