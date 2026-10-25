@@ -32,6 +32,13 @@ own), and steered the fixes for the incidents in `BUG_LOG.md`. `FINDINGS.md`
 was drafted with an AI agent from the bug log and checked by me against
 every entry.
 
+Design principle: agents were treated as employees rather than stateless
+input-output calls: an employee handbook (`src/factory/handbook.py`) they
+could consult before deciding anything, roles with explicit permissions
+that an agent cannot widen itself (`src/factory/agents/roles.py`),
+department managers, escalation paths to a human, and hard limits on
+authority.
+
 ## Start here
 
 1. **`FINDINGS.md`** — what broke, grouped into patterns, and what each one
