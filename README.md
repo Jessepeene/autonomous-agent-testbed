@@ -26,10 +26,13 @@ collected.
    else here is supporting material.
 2. **`src/factory/llm/client.py`** and **`src/factory/llm/router.py`** —
    structured output via `parse()`, a schema-repair retry that shows the model
-   its own validation error, jittered backoff, a hard spend-cap circuit breaker,
-   a `NO_FAILOVER` policy for calls that must never silently change vendor, a
+   its own validation error, jittered backoff, a circuit breaker that drops a
+   provider from the candidate list once it's in sustained outage
+   (`tripped_providers`) rather than retrying into a known-dead endpoint, a
+   `NO_FAILOVER` policy for calls that must never silently change vendor, a
    provider refusal that never fails over (a refusal isn't an outage), and
-   per-call cost metering.
+   per-call cost metering. The daily spend cap is a separate guardrail — see
+   the table below.
 3. **`src/factory/state/repository.py`** — task claiming via
    `SELECT ... FOR UPDATE SKIP LOCKED`, so multiple workers pull from the same
    queue without colliding or blocking each other.
