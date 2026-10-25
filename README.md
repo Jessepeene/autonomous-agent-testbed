@@ -1,9 +1,48 @@
-# Autonomous Multi-Agent B2B SaaS Factory
+# autonomous-agent-testbed
 
-A continuously-running system that discovers B2B micro-SaaS opportunities, validates
-demand, builds and deploys MVPs, acquires customers, processes payments, and
-reinvests profit — with a human in the loop only for missing credentials and legal
-uncertainty.
+**Research question**: can an autonomous LLM system operate under real stakes —
+real money, real deployments, live on the public internet — if its safety rules
+are enforced in code rather than prompts?
+
+**Honest outcome**: it ran in production for 37 days (2026-08-18 to 2026-09-24).
+In that time it built at least 4 products (3 still exist in the final database;
+one earlier one, `manifestaudit.com`, is documented throughout the project's own
+history but has no row left in the database this repo's numbers are drawn from).
+It earned **€0** — no product ever reached a paying customer. It produced 57
+logged production incidents (`BUG_LOG.md`). Outbound email was built and gated
+but never enabled: no real email was ever sent (the only 2 composed messages
+were self-tests to an unmailable `.invalid` address), and no real person ever
+submitted a form (the only 2 sign-ups on record were self-tests too). It is
+now being taken offline.
+
+All of the above is measured, not estimated — see `docs/results-2026.md` for
+the exact SQL run against the production database and the date it was
+collected.
+
+## Start here
+
+1. **`FINDINGS.md`** — what broke, grouped into patterns, and what each one
+   teaches about running LLM systems in production. The real exhibit; everything
+   else here is supporting material.
+2. **`src/factory/llm/client.py`** and **`src/factory/llm/router.py`** —
+   structured output via `parse()`, a schema-repair retry that shows the model
+   its own validation error, jittered backoff, a hard spend-cap circuit breaker,
+   a `NO_FAILOVER` policy for calls that must never silently change vendor, a
+   provider refusal that never fails over (a refusal isn't an outage), and
+   per-call cost metering.
+3. **`src/factory/state/repository.py`** — task claiming via
+   `SELECT ... FOR UPDATE SKIP LOCKED`, so multiple workers pull from the same
+   queue without colliding or blocking each other.
+4. **`src/factory/state/orm.py`** — the ledger's own `CHECK` constraints
+   (`balance_cents >= 0`, integer cents, never floats) — a balance cannot go
+   negative at the database layer, independent of anything the application code
+   does or fails to do.
+5. **`src/factory/engines/compliance/minimize.py`** — GDPR Art. 5(1)(c) data
+   minimisation enforced at the one sanctioned write path into the `leads`
+   table, not as a policy document.
+6. **`BUG_LOG.md`** and **`ARCHITECTURE_ROADMAP.md`** — the full incident
+   history and the living design record, written as the system was built, not
+   after the fact.
 
 ## Architecture
 
@@ -20,29 +59,46 @@ Discovery   Development   Marketing     Finance    Compliance
 
 Model calls go through a **dual-provider router**: Gemini serves orchestration,
 discovery, compliance, and marketing copy; Claude serves code generation and the
-Bug Council. Engines call `llm.parse(Schema, task_type=...)` and receive a validated
-Pydantic object — no free-text parsing anywhere in the system.
+Bug Council; DeepSeek serves code repair only, and can never be reached as
+another task type's accidental failover target (`BUG_LOG.md` #13). Engines call
+`llm.parse(Schema, task_type=...)` and receive a validated Pydantic object — no
+free-text parsing anywhere in the system.
 
-Leads come from **B2B data providers** (Hunter.io, Apollo.io) queried through the MCP
-tool registry, with an operator CSV drop retained as a manual override. Each adapter
-reduces the provider response to five PII fields plus provenance before it travels
-any further; see `engines/marketing/providers/`.
+Leads come from **B2B data providers** (Hunter.io, Apollo.io), with an operator
+CSV drop retained as a manual override. Each adapter reduces the provider
+response to five PII fields plus provenance before it travels any further.
 
 ## Guardrails that live in code, not in prompts
 
+Compliance first, deliberately — these are the ones that matter most if this
+system is ever trusted with real contact information:
+
 | Guardrail | Where |
 |---|---|
+| GDPR data minimization | `engines/compliance/minimize.py` — the only sanctioned write path into `leads`; the table itself has only five PII columns, so there's nowhere to put more even if a caller tried |
 | Outbound email blacklist | `engines/marketing/email.py` parses root `blacklist.txt` on every send and fails **closed** |
-| GDPR data minimization | Provider adapters narrow at the HTTP boundary; `engines/compliance/minimize.py` enforces again at the DB boundary; the `leads` table has only five PII columns |
-| Data provenance | `leads.source_url` / `leads.scraped_at` are `NOT NULL`; `provenance_kind` decides what the Art. 14 footer may claim |
 | Legitimate Interest Assessment | `engines/compliance/lia.py`, required before any contact |
-| Sandboxed execution | `sandbox/docker_runner.py`; `sandbox/disabled.py` raises when Docker is absent |
+| Data provenance | `leads.source_url` / `leads.scraped_at` are `NOT NULL`; `provenance_kind` decides what the Art. 14 footer may claim |
+| Dry-run default | `FACTORY_DRY_RUN=1` stubs every outbound side effect — no email, no deploy, no charge — until explicitly turned off |
+| Sandboxed execution | `sandbox/docker_runner.py`; `sandbox/disabled.py` raises when Docker is absent rather than silently running unsandboxed |
 | Deploy gate | `engines/development/bug_council.py` — five reviewers, unanimous or no deploy |
 | Ad spend on broken MVPs | `supervisor/concurrency.py` pauses paid spend while a patch is in flight |
-| Never-negative balance | `ledger` CHECK constraint + `engines/finance/reinvest.py` integer cents |
+| Never-negative balance | `ledger` `CHECK` constraint + `engines/finance/reinvest.py` integer cents |
 | Discovery backlog flooding | `supervisor/orchestrator.py` holds ideas at `MAX_CONCURRENT_BUILDS` |
+| LLM spend | `DAILY_LLM_SPEND_CAP_USD` — a deterministic circuit breaker, never delegated to a model, because asking an LLM whether to stop spending is the one place "just this once" would be catastrophic |
 
-## Quick start
+## Trade-offs, stated plainly
+
+- **The Docker socket is mounted into the app container** so it can launch
+  sandboxed sibling containers for generated code. That's root-equivalent
+  access to the host from inside the app container — a real, acknowledged
+  attack surface, not a theoretical one.
+- **Generated code ran in plain Docker containers**, not a stronger isolation
+  boundary (gVisor, Firecracker, or similar). Sandboxing here means a separate
+  container and a resource/time limit, not a security boundary strong enough
+  to trust fully adversarial code.
+
+## How to run
 
 ```bash
 cp .env.example .env      # fill in DATABASE_URL and at least one provider key
@@ -51,21 +107,33 @@ python -m factory.preflight        # tells you exactly what is missing and how t
 docker compose up -d postgres
 alembic upgrade head
 python -m factory.main --once      # one supervisor tick
-pytest tests/unit -q
 ```
 
-`FACTORY_DRY_RUN=1` (the default) stubs every outbound side effect: no email is sent,
-no deploy runs, no card is charged. Turn it off only after the guardrail test suite
-has passed against real credentials.
-
-### Testing
+## Testing
 
 - **`pytest tests/unit -q`** — no external services. This is what CI
   (`.github/workflows/tests.yml`) runs on every push and PR.
 - **`pytest tests/integration -q`** — needs a real Postgres (`docker compose up -d
   postgres && alembic upgrade head` first). Not run in CI.
-- **End-to-end** (an actual supervisor tick against real engines) additionally needs
-  Docker available to the process, for the sandbox runner that executes generated
-  code. Run locally only.
+- **End-to-end** (an actual supervisor tick against real engines) additionally
+  needs Docker available to the process, for the sandbox runner that executes
+  generated code. Run locally only.
 
-See `DEPLOYMENT.md` for VPS setup.
+## Known limitations
+
+- No real customer or real revenue data exists to validate the business logic
+  against — every number in `docs/results-2026.md` is real activity, but none of
+  it includes a paying customer.
+- The two Docker-related trade-offs above were accepted, not solved.
+- `BUG_LOG.md`'s own entry numbers collide (two unrelated incidents share each
+  number from #22 to #31, from an earlier backfill pass that restarted its own
+  counter) — the content is all real and all distinct, but search by number with
+  that in mind.
+- See `FINDINGS.md` for what each incident pattern teaches, and its own closing
+  assessment of whether this was safe to run unattended.
+
+## Current status
+
+Offline research case. Ran in production 2026-08-18 to 2026-09-24, then
+deliberately paused (zero LLM spend since). Being decommissioned; this repo is
+what's left once it is.
