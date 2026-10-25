@@ -72,7 +72,7 @@ A check that cannot distinguish "I verified this passed" from "I never
 verified anything" will eventually report the second as the first, and will
 look completely healthy while doing it.
 
-## 3. The agent polluting its own measurement (#36, with #32 as a related but distinct case)
+## 3. The agent polluting its own measurement (#36)
 
 - **#36**: the live reviewer agent was told to "actually try" the thing it was
   reviewing — submitting a real email on a validation landing page. It
@@ -85,18 +85,7 @@ look completely healthy while doing it.
 form-submission endpoint already had, so a review can exercise the real path
 without writing into the real signal.
 
-**On #32** — cited alongside #36 in the original grouping for this pattern,
-but checking its actual content: it isn't a measurement-pollution bug. A
-generated landing page published its own internal Discovery provenance (a
-link to the GitHub issue the idea was scraped from) directly to real visitors
-— a credibility leak, not a corrupted metric. Its real kinship is with the
-"missing context, not missing capability" theme that also produced #49: the
-codegen prompt handed the model a field literally named `evidence` with no
-framing for what it was or that it must never appear on the page. The model
-used it exactly as labeled. Noting this rather than forcing the fit, per the
-instruction to flag a mis-grouped entry.
-
-**The lesson (from #36)**: an agent that is told to verify something by *doing*
+**The lesson**: an agent that is told to verify something by *doing*
 it needs a way to do it that cannot be mistaken for the real thing. "Act like a
 real user" and "don't become a real data point" are not automatically
 compatible, and the gap between them doesn't announce itself.
@@ -177,6 +166,18 @@ state looked exactly as if a careful decision had been made to wait. A key
 that silently drops a legitimate repeat is worse than one that raises on
 conflict, because the first looks correct from every angle except the one
 where you ask whether the thing that should have happened, did.
+
+## Also notable
+
+**#32**: a generated landing page published its own internal Discovery
+provenance — a link to the GitHub issue the idea was scraped from — directly
+to real visitors. A credibility leak, not a corrupted metric, so it doesn't
+belong in pattern 3. Its real kinship is with #49's "missing context, not
+missing capability" shape: the codegen prompt handed the model a field
+literally named `evidence` with no framing for what it was or that it must
+never appear on the page. The model used it exactly as labeled. **Fix**: the
+field is now labelled as internal provenance, with a hard constraint that
+nothing internal to the factory may appear on a page.
 
 ## Conclusion
 
