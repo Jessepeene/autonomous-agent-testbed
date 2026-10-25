@@ -2471,6 +2471,10 @@ facts rather than the property.
 
 ## 45. An underpowered validation retired a product on evidence its own settings comment calls noise
 
+Note: outbound email was never enabled in this system. "Contacted" here means
+outreach composed in dry-run mode; no real person was ever emailed (see
+docs/results-2026.md).
+
 **Found**: 2026-09-23, scoping Phase 2.12's shipping-bar metric. `validation_min_sample_size`'s
 own comment already said it: "below this many leads contacted, a response rate is
 statistically meaningless." The gate computed that check and then ignored its own

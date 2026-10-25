@@ -1948,6 +1948,10 @@ Three pieces.
   inconclusive runs record an `Outcome` outside every trial's arithmetic and write a
   `FACT`, never a `FAILURE`, at Discovery's scope.
 
+  Note: outbound email was never enabled in this system. "Contacted" here means
+  outreach composed in dry-run mode; no real person was ever emailed (see
+  docs/results-2026.md).
+
   This surfaced a second question, and Jesse's own read of it was the right one:
   *"unless they have concrete evidence the product will not work they won't retire
   it, right?"* The codebase already agreed with him — for exactly one trigger. The
