@@ -193,6 +193,7 @@ still judgement, memory, or a boolean standing in for a question with more
 than two answers.
 
 **This system was not yet safe to run unattended, which is why it was taken
-offline.** The failures were all structural and all fixable — none of them
-were the model reasoning badly — but "all fixable, in sequence, as they're
-found in production" is not the same claim as "safe to leave running."
+offline.** The failures were all structural and all fixable — in these
+incidents, the model's reasoning was rarely the problem; the harness around
+it was — but "all fixable, in sequence, as they're found in production" is
+not the same claim as "safe to leave running."
