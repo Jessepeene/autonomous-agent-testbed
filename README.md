@@ -60,7 +60,7 @@ Discovery   Development   Marketing     Finance    Compliance
    tasks · ideas · products · product_locks · leads · ledger · interrupts · checkpoints
 ```
 
-Model calls go through a **dual-provider router**: Gemini serves orchestration,
+Model calls go through a **multi-provider router**: Gemini serves orchestration,
 discovery, compliance, and marketing copy; Claude serves code generation and the
 Bug Council; DeepSeek serves code repair only, and can never be reached as
 another task type's accidental failover target (`BUG_LOG.md` #13). Engines call
