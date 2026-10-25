@@ -8,12 +8,14 @@ are enforced in code rather than prompts?
 In that time it built at least 4 products (3 still exist in the final database;
 one earlier one, `manifestaudit.com`, is documented throughout the project's own
 history but has no row left in the database this repo's numbers are drawn from).
-It earned **€0** — no product ever reached a paying customer. It produced 57
-logged production incidents (`BUG_LOG.md`). Outbound email was built and gated
-but never enabled: no real email was ever sent (the only 2 composed messages
-were self-tests to an unmailable `.invalid` address), and no real person ever
-submitted a form (the only 2 sign-ups on record were self-tests too). It is
-now being taken offline.
+It earned **€0** — no product ever reached a paying customer. It made 95,271
+model calls for $94.74 across three providers, reached 9 release decisions —
+6 of which its own gates blocked outright (`fix_first`/`rethink`/`abandon`) —
+and produced 57 logged production incidents (`BUG_LOG.md`), against 1,392 unit
+tests passing in CI. Outbound email was built and gated but never enabled: no
+real email was ever sent (the only 2 composed messages were self-tests to an
+unmailable `.invalid` address), and no real person ever submitted a form (the
+only 2 sign-ups on record were self-tests too). It is now being taken offline.
 
 All of the above is measured, not estimated — see `docs/results-2026.md` for
 the exact SQL run against the production database and the date it was
