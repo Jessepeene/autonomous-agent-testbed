@@ -17,6 +17,7 @@ no database at all -- which is why this is a unit test rather than an integratio
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -88,10 +89,17 @@ async def test_rejects_the_right_token_under_the_wrong_scheme(
 
 async def test_serves_metrics_with_the_right_token(monkeypatch: pytest.MonkeyPatch) -> None:
     """`metrics.collect` is stubbed so this stays a unit test: what is under test is
-    the authorisation decision, not the snapshot's contents."""
+    the authorisation decision, not the snapshot's contents. `session_scope` is
+    stubbed too, the same way `test_interest_cors.py` does it, so this test needs
+    no database at all -- `session_scope()` itself calls `get_engine()`, which
+    requires `DATABASE_URL` before `collect` ever runs."""
     monkeypatch.setenv("METRICS_AUTH_TOKEN", "correct-horse-battery-staple")
 
     from factory.api import app as app_module
+
+    @asynccontextmanager
+    async def fake_session_scope(*args: Any, **kwargs: Any) -> AsyncIterator[None]:
+        yield None
 
     class _Snapshot:
         def as_dict(self) -> dict[str, Any]:
@@ -100,6 +108,7 @@ async def test_serves_metrics_with_the_right_token(monkeypatch: pytest.MonkeyPat
     async def _fake_collect(session: Any) -> _Snapshot:
         return _Snapshot()
 
+    monkeypatch.setattr(app_module, "session_scope", fake_session_scope)
     monkeypatch.setattr(app_module.metrics, "collect", _fake_collect)
 
     async with await _client() as client:

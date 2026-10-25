@@ -9,6 +9,7 @@ integration one.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -322,10 +323,17 @@ async def test_generate_design_brief_rejects_a_wrong_token(
 async def test_serves_state_with_the_right_token(monkeypatch: pytest.MonkeyPatch) -> None:
     """`observability.dashboard.collect` is stubbed so this stays a unit test:
     what is under test is the authorisation decision, not the snapshot's
-    contents."""
+    contents. `session_scope` is stubbed too, the same way `test_interest_cors.py`
+    does it, so this test needs no database at all -- `session_scope()` itself
+    calls `get_engine()`, which requires `DATABASE_URL` before `collect` ever
+    runs."""
     monkeypatch.setenv("DASHBOARD_AUTH_TOKEN", "correct-horse-battery-staple")
 
     from factory.api import dashboard as dashboard_module
+
+    @asynccontextmanager
+    async def fake_session_scope(*args: Any, **kwargs: Any) -> AsyncIterator[None]:
+        yield None
 
     class _Snapshot:
         def as_dict(self) -> dict[str, Any]:
@@ -334,6 +342,7 @@ async def test_serves_state_with_the_right_token(monkeypatch: pytest.MonkeyPatch
     async def _fake_collect(session: Any, *, settings: Any, report: Any) -> _Snapshot:
         return _Snapshot()
 
+    monkeypatch.setattr(dashboard_module, "session_scope", fake_session_scope)
     monkeypatch.setattr(dashboard_module.dashboard_metrics, "collect", _fake_collect)
 
     async with await _client() as client:
