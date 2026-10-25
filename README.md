@@ -21,6 +21,17 @@ All of the above is measured, not estimated — see `docs/results-2026.md` for
 the exact SQL run against the production database and the date it was
 collected.
 
+## How this was built
+
+Most of the code was written by AI coding agents (mainly Claude Code),
+working under my direction. I set the research question and architecture,
+decided which safety rules the system needed and that they be enforced in
+code rather than prompts, drew the lines where a human must stay in charge
+(the system may never retire a product or sign up for a service on its
+own), and steered the fixes for the incidents in `BUG_LOG.md`. `FINDINGS.md`
+was drafted with an AI agent from the bug log and checked by me against
+every entry.
+
 ## Start here
 
 1. **`FINDINGS.md`** — what broke, grouped into patterns, and what each one
