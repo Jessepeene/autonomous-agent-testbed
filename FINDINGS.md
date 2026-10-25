@@ -91,7 +91,7 @@ look completely healthy while doing it.
 ## 3. The agent polluting its own measurement (#36)
 
 - **#36**: the live reviewer agent was told to "actually try" the thing it was
-  reviewing — submitting a real email on a validation landing page. It
+  reviewing — submitting an email address on a validation landing page. It
   invented one, and that fake signup landed directly in the `validation_signals`
   table a real build-or-scrap decision is gated on. The exact table the system
   uses to measure real demand was being corrupted by the system's own review
